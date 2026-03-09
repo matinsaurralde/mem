@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from conftest import make_command
 from mem import patterns, storage
+
+
+# ---------------------------------------------------------------------------
+# Ensure apple_fm_sdk is importable even when the real package is absent.
+# We insert a stub module into sys.modules so that patch() can resolve
+# "apple_fm_sdk.LanguageModelSession" without triggering ImportError.
+# ---------------------------------------------------------------------------
+
+if "apple_fm_sdk" not in sys.modules:
+    _stub = ModuleType("apple_fm_sdk")
+    _stub.LanguageModelSession = MagicMock  # type: ignore[attr-defined]
+    sys.modules["apple_fm_sdk"] = _stub
 
 
 # ---------------------------------------------------------------------------
