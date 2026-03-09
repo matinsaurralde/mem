@@ -11,11 +11,17 @@ into the abstract pattern:
 Apple Foundation Models run entirely on-device via apple-fm-sdk.
 No data ever leaves the machine.
 
-What is guided generation:
-    Guided generation constrains the LLM's output to conform to a
-    Pydantic schema. Instead of free-form text, the model produces
-    structured JSON that validates against PatternExtractionResult.
-    This eliminates parsing errors and ensures reliable structured output.
+Architecture:
+    The LLM handles GENERALIZATION (the hard part — turning concrete
+    arguments into abstract placeholders). Code handles COUNTING and
+    DEDUPLICATION (the easy part). This split plays to each system's
+    strengths: the on-device model is good at semantic understanding
+    but unreliable at counting and dedup.
+
+    Flow:
+    1. Deduplicate raw commands and count identical ones (code)
+    2. Generalize each unique command via guided generation (LLM)
+    3. Aggregate pattern frequencies from the mapping (code)
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from mem import storage
 from mem.models import (
@@ -34,22 +40,28 @@ from mem.models import (
 
 logger = logging.getLogger(__name__)
 
-# The prompt template for pattern extraction.
-# Why this wording:
-# - "analyzing shell command history" sets the domain context
-# - Listing concrete commands gives the model examples to generalize from
-# - "Replace specific names, values, and identifiers with <placeholder>"
-#   explicitly instructs the model to use angle-bracket tokens
-# - "Group similar commands into one pattern" prevents redundant patterns
-# - "Return only the patterns, no explanation" keeps output clean for parsing
-EXTRACTION_PROMPT = """You are analyzing shell command history for the tool: {tool}
+# Per-command generalization prompt.
+# Why this design:
+# - One command at a time avoids dedup/counting errors from the LLM
+# - Concrete examples anchor the model's understanding of "generalize"
+# - "Keep subcommands, flags, and operators as-is" prevents hallucination
+#   of extra flags (observed with minimal prompts)
+# - Angle-bracket format is explicitly shown in examples
+GENERALIZE_PROMPT = """Convert this {tool} command into a generalized pattern.
+Replace specific arguments (names, IDs, paths, tags, values) with <descriptive_placeholder> in angle brackets.
+Keep subcommands, flags, and operators as-is.
 
-Here are commands the user has run:
-{command_list}
+Examples:
+  "git checkout main" -> "git checkout <branch>"
+  "docker run -d -p 8080:80 myapp" -> "docker run -d -p <host_port>:<container_port> <image>"
+  "kubectl get pods" -> "kubectl get <resource>"
 
-Extract the abstract structural patterns. Replace specific names, values, and identifiers with <placeholder> tokens in angle brackets. Group similar commands into one pattern.
+Command: {command}"""
 
-Return only the patterns, no explanation."""
+# Session summary prompt (used by capture module).
+SESSION_SUMMARY_PROMPT = (
+    "Summarize this shell session in one short sentence:\n{commands}"
+)
 
 
 def _apple_fm_available() -> bool:
@@ -61,35 +73,101 @@ def _apple_fm_available() -> bool:
         return False
 
 
+def _get_generable_types() -> tuple[type, type]:
+    """Lazily create @fm.generable types for guided generation.
+
+    Returns (GeneralizedCommand, SessionSummary) classes decorated
+    with @fm.generable. Created on first call to avoid import-time
+    dependency on apple-fm-sdk.
+    """
+    import apple_fm_sdk as fm
+
+    @fm.generable("Generalized form of a shell command")
+    class GeneralizedCommand:
+        pattern: str = fm.guide(
+            "The command with variable parts replaced by <placeholder>"
+        )
+
+    return GeneralizedCommand
+
+
+async def _generalize_commands(
+    tool: str, unique_commands: list[str]
+) -> dict[str, str]:
+    """Generalize each unique command via Apple FM guided generation.
+
+    Returns a mapping from concrete command -> generalized pattern.
+    Uses one LanguageModelSession per tool to share context.
+    """
+    import apple_fm_sdk as fm
+
+    GeneralizedCommand = _get_generable_types()
+    session = fm.LanguageModelSession()
+    cmd_to_pattern: dict[str, str] = {}
+
+    for cmd in unique_commands:
+        prompt = GENERALIZE_PROMPT.format(tool=tool, command=cmd)
+        result = await session.respond(prompt, generating=GeneralizedCommand)
+        cmd_to_pattern[cmd] = result.pattern
+
+    return cmd_to_pattern
+
+
 async def extract_patterns_for_tool(
     tool: str, commands: list[str]
 ) -> PatternExtractionResult:
     """Extract abstract patterns from a list of concrete commands.
 
-    Uses Apple FM SDK with guided generation (Pydantic schema)
-    to produce structured output. Falls back to a simple heuristic
-    if the SDK is unavailable.
+    Strategy:
+    1. Deduplicate commands and count frequencies (code)
+    2. Generalize each unique command via LLM (if available)
+    3. Aggregate frequencies by generalized pattern (code)
+
+    Falls back to simple frequency grouping if SDK is unavailable.
     """
+    # Step 1: Count raw frequencies (code — fast and exact)
+    raw_freq = Counter(commands)
+    unique_cmds = list(raw_freq.keys())
+
     if _apple_fm_available():
-        import apple_fm_sdk
+        # Step 2: Generalize unique commands (LLM — semantic understanding)
+        cmd_to_pattern = await _generalize_commands(tool, unique_cmds)
 
-        prompt = EXTRACTION_PROMPT.format(
-            tool=tool,
-            command_list="\n".join(f"  {cmd}" for cmd in commands),
-        )
+        # Step 3: Aggregate by pattern (code — exact counting)
+        pattern_freq: Counter[str] = Counter()
+        pattern_example: dict[str, str] = {}
+        for cmd, count in raw_freq.items():
+            p = cmd_to_pattern[cmd]
+            pattern_freq[p] += count
+            if p not in pattern_example:
+                pattern_example[p] = cmd
 
-        # Guided generation: the model's output is constrained to match
-        # the PatternExtractionResult Pydantic schema, producing valid
-        # structured JSON instead of free-form text.
-        result = await apple_fm_sdk.generate(
-            prompt=prompt,
-            schema=PatternExtractionResult,
-        )
-        return result
+        patterns = [
+            CommandPattern(pattern=p, example=pattern_example[p], frequency=f)
+            for p, f in pattern_freq.most_common()
+        ]
+        return PatternExtractionResult(tool=tool, patterns=patterns)
     else:
-        # Fallback: simple frequency-based "patterns" without AI
-        # Just return the most common commands as-is
         return _heuristic_patterns(tool, commands)
+
+
+async def generate_session_summary(commands: list[str]) -> str | None:
+    """Generate a one-sentence session summary via Apple FM.
+
+    Returns None if SDK is unavailable or generation fails.
+    """
+    if not _apple_fm_available():
+        return None
+
+    try:
+        import apple_fm_sdk as fm
+
+        session = fm.LanguageModelSession()
+        prompt = SESSION_SUMMARY_PROMPT.format(commands="\n".join(commands))
+        result = await session.respond(prompt)
+        return str(result)
+    except Exception:
+        return None
 
 
 def _heuristic_patterns(tool: str, commands: list[str]) -> PatternExtractionResult:

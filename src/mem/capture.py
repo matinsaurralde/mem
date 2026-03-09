@@ -180,16 +180,11 @@ class SessionTracker:
         using the first command as the summary.
         """
         try:
-            from mem.patterns import _apple_fm_available
-            if _apple_fm_available():
-                import asyncio
-                import apple_fm_sdk
-                prompt = (
-                    "Summarize this shell session in one short sentence:\n"
-                    + "\n".join(commands)
-                )
-                result = asyncio.run(apple_fm_sdk.generate(prompt=prompt))
-                return str(result)
+            import asyncio
+            from mem.patterns import generate_session_summary
+            result = asyncio.run(generate_session_summary(commands))
+            if result:
+                return result
         except Exception:
             pass
 
