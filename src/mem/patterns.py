@@ -73,12 +73,11 @@ def _apple_fm_available() -> bool:
         return False
 
 
-def _get_generable_types() -> tuple[type, type]:
-    """Lazily create @fm.generable types for guided generation.
+def _get_generable_types() -> type:
+    """Lazily create @fm.generable type for guided generation.
 
-    Returns (GeneralizedCommand, SessionSummary) classes decorated
-    with @fm.generable. Created on first call to avoid import-time
-    dependency on apple-fm-sdk.
+    Returns the GeneralizedCommand class decorated with @fm.generable.
+    Created on first call to avoid import-time dependency on apple-fm-sdk.
     """
     import apple_fm_sdk as fm
 

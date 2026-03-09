@@ -10,13 +10,8 @@ from __future__ import annotations
 import math
 import time
 from collections import Counter
-from typing import TYPE_CHECKING
-
 from mem import storage
 from mem.models import CapturedCommand, CommandPattern, WorkSession
-
-if TYPE_CHECKING:
-    pass
 
 
 def score_command(

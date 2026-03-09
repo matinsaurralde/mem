@@ -210,11 +210,15 @@ def rotate(
                     except json.JSONDecodeError:
                         lines_kept.append(line_stripped)  # keep corrupted lines
 
-            if commands_removed > 0 or len(lines_kept) < lines_total:
+            if len(lines_kept) < lines_total:
                 if lines_kept:
-                    path.write_text(
+                    # Atomic write: write to temp file then rename to avoid
+                    # data loss if the process is interrupted mid-write.
+                    tmp = path.with_suffix(".jsonl.tmp")
+                    tmp.write_text(
                         "\n".join(lines_kept) + "\n", encoding="utf-8"
                     )
+                    tmp.rename(path)
                 else:
                     path.unlink()
 
@@ -264,9 +268,11 @@ def forget_commands(query: str) -> int:
                         lines_kept.append(line_stripped)
 
             if lines_kept:
-                path.write_text(
+                tmp = path.with_suffix(".jsonl.tmp")
+                tmp.write_text(
                     "\n".join(lines_kept) + "\n", encoding="utf-8"
                 )
+                tmp.rename(path)
             else:
                 path.unlink()
 
@@ -296,9 +302,11 @@ def forget_commands(query: str) -> int:
                         sessions_kept.append(line_stripped)
 
             if sessions_kept:
-                path.write_text(
+                tmp = path.with_suffix(".jsonl.tmp")
+                tmp.write_text(
                     "\n".join(sessions_kept) + "\n", encoding="utf-8"
                 )
+                tmp.rename(path)
             else:
                 path.unlink()
 
