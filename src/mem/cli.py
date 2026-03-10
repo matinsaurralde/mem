@@ -24,6 +24,20 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+class MemGroup(click.Group):
+    """Custom group that treats unknown commands as search queries."""
+
+    def invoke(self, ctx):
+        # If the first arg isn't a known subcommand, treat it as a search query
+        args = ctx.protected_args + ctx.args
+        if args and args[0] not in self.commands:
+            ctx.ensure_object(dict)
+            ctx.obj["query_args"] = list(args)
+            ctx.protected_args = []
+            ctx.args = []
+        return super().invoke(ctx)
+
+
 def _current_repo() -> str | None:
     """Detect the git repo for the current working directory."""
     return get_git_repo(os.getcwd())
@@ -50,10 +64,7 @@ def _relative_time(ts: int) -> str:
     return f"{w}w ago"
 
 
-@click.group(
-    invoke_without_command=True,
-    context_settings={"allow_extra_args": True, "allow_interspersed_args": False},
-)
+@click.group(cls=MemGroup, invoke_without_command=True)
 @click.version_option(__version__, prog_name="mem")
 @click.option("--pattern", "-p", is_flag=True, help="Show extracted patterns instead of commands")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
@@ -64,7 +75,9 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
-    query = ctx.args[0] if ctx.args else None
+    ctx.ensure_object(dict)
+    query_args = ctx.obj.get("query_args", [])
+    query = query_args[0] if query_args else None
     if query is None:
         click.echo(ctx.get_help())
         return
