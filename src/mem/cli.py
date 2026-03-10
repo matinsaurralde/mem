@@ -29,12 +29,12 @@ class MemGroup(click.Group):
 
     def invoke(self, ctx):
         # If the first arg isn't a known subcommand, treat it as a search query
-        args = ctx.protected_args + ctx.args
+        args = list(ctx.protected_args) + list(ctx.args)
         if args and args[0] not in self.commands:
             ctx.ensure_object(dict)
-            ctx.obj["query_args"] = list(args)
-            ctx.protected_args = []
-            ctx.args = []
+            ctx.obj["query_args"] = args
+            ctx.protected_args.clear()
+            ctx.args.clear()
         return super().invoke(ctx)
 
 
