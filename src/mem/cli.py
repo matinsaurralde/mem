@@ -163,14 +163,14 @@ _ZSH_HOOK = '''# mem shell hook
 
 _mem_preexec() {
   _mem_cmd="$1"
-  _mem_start=$(date +%s%3N)
+  _mem_start=$SECONDS
 }
 
 _mem_precmd() {
   local exit_code=$?
   if [[ -n "$_mem_cmd" ]]; then
-    local end=$(date +%s%3N)
-    local duration=$(( end - _mem_start ))
+    integer duration
+    (( duration = (SECONDS - _mem_start) * 1000 ))
     mem _capture "$_mem_cmd" "$PWD" "$exit_code" "$duration" 2>/dev/null &!
     _mem_cmd=""
   fi
