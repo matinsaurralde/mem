@@ -12,25 +12,25 @@ from mem.models import CommandPattern, PatternFile
 class TestAppendAndRead:
     def test_append_and_read_command(self, tmp_mem_dir):
         """Append a command, read it back, verify all fields match."""
-        cmd = make_command(command="docker compose up -d", repo="myapp", exit_code=0, duration_ms=3200)
+        cmd = make_command(command="docker compose up -d", repo="/Users/test/projects/myapp", exit_code=0, duration_ms=3200)
         storage.append_command(cmd)
 
-        results = list(storage.read_commands("myapp"))
+        results = list(storage.read_commands("Users-test-projects-myapp"))
         assert len(results) == 1
         assert results[0].command == "docker compose up -d"
-        assert results[0].repo == "myapp"
+        assert results[0].repo == "/Users/test/projects/myapp"
         assert results[0].exit_code == 0
         assert results[0].duration_ms == 3200
 
     def test_multiple_repos_isolated(self, tmp_mem_dir):
         """Commands in different repos stay in different files."""
-        cmd_a = make_command(command="make test", repo="repo-a")
-        cmd_b = make_command(command="cargo build", repo="repo-b")
+        cmd_a = make_command(command="make test", repo="/Users/test/projects/repo-a")
+        cmd_b = make_command(command="cargo build", repo="/Users/test/projects/repo-b")
         storage.append_command(cmd_a)
         storage.append_command(cmd_b)
 
-        results_a = list(storage.read_commands("repo-a"))
-        results_b = list(storage.read_commands("repo-b"))
+        results_a = list(storage.read_commands("Users-test-projects-repo-a"))
+        results_b = list(storage.read_commands("Users-test-projects-repo-b"))
         assert len(results_a) == 1
         assert results_a[0].command == "make test"
         assert len(results_b) == 1
@@ -84,8 +84,8 @@ class TestPatterns:
 class TestReadAll:
     def test_read_all_commands(self, tmp_mem_dir):
         """read_all_commands iterates across all repo files."""
-        storage.append_command(make_command(command="cmd1", repo="repo-a"))
-        storage.append_command(make_command(command="cmd2", repo="repo-b"))
+        storage.append_command(make_command(command="cmd1", repo="/Users/test/projects/repo-a"))
+        storage.append_command(make_command(command="cmd2", repo="/Users/test/projects/repo-b"))
         storage.append_command(make_command(command="cmd3", repo=None))
 
         results = list(storage.read_all_commands())
@@ -97,12 +97,12 @@ class TestCorruptedLines:
     def test_skips_corrupted_lines(self, tmp_mem_dir):
         """Corrupted JSONL lines are skipped, not fatal."""
         storage.ensure_dirs()
-        path = storage.repo_file("myapp")
+        path = storage.repo_file("Users-test-projects-myapp")
         cmd = make_command(command="good command")
         with path.open("a") as f:
             f.write(cmd.to_jsonl() + "\n")
             f.write("THIS IS NOT JSON\n")
             f.write(cmd.to_jsonl() + "\n")
 
-        results = list(storage.read_commands("myapp"))
+        results = list(storage.read_commands("Users-test-projects-myapp"))
         assert len(results) == 2

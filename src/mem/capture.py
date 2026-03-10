@@ -17,10 +17,14 @@ from mem import storage
 
 
 def get_git_repo(directory: str) -> str | None:
-    """Detect the current git repository name.
+    """Detect the current git repository's root path.
 
-    Runs `git rev-parse --show-toplevel` to find the repo root,
-    then returns the basename (e.g., /Users/me/projects/myapp -> myapp).
+    Runs `git rev-parse --show-toplevel` to find the repo root
+    and returns the full absolute path (e.g., /Users/me/projects/myapp).
+
+    Uses the full path — not the basename — so repos with the same
+    folder name under different parents stay isolated (e.g.,
+    /work/client-a/api and /work/client-b/api are distinct).
 
     Returns None if the directory is not inside a git repository.
 
@@ -35,7 +39,7 @@ def get_git_repo(directory: str) -> str | None:
             timeout=5,
         )
         if result.returncode == 0:
-            return result.stdout.strip().split("/")[-1]
+            return result.stdout.strip()
         return None
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None

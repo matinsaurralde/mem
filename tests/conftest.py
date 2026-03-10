@@ -22,7 +22,7 @@ def make_command(
     command: str = "git status",
     ts: int | None = None,
     dir: str = "/Users/test/projects/myapp",
-    repo: str | None = "myapp",
+    repo: str | None = "/Users/test/projects/myapp",
     exit_code: int = 0,
     duration_ms: int = 50,
     session: str | None = None,

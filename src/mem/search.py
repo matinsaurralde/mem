@@ -32,8 +32,9 @@ def score_command(
       reflect current work context. A command from today is almost certainly
       more relevant than one from last month.
     - Context (20%): A tiebreaker that boosts commands from the current
-      repo. Lower weight because frequency and recency already capture
-      most relevance — context just refines the ranking.
+      repo (1.0) or sibling repos sharing the same parent directory (0.5).
+      Lower weight because frequency and recency already capture most
+      relevance — context just refines the ranking.
 
     Why exit code is NOT included (v1): Per specification clarification,
     exit code is captured and stored but does not affect ranking. Failed
@@ -52,10 +53,16 @@ def score_command(
     # Recency: exponential decay, half-life 7 days
     recency = math.exp(-days_since * math.log(2) / 7)
 
-    # Context: 1.0 same repo, 0.5 same dir prefix, 0.0 otherwise
+    # Context: 1.0 same repo, 0.5 sibling repos (same parent dir), 0.0 otherwise
     if current_repo and cmd.repo and cmd.repo == current_repo:
         context = 1.0
-    elif current_repo and cmd.repo and cmd.repo.startswith(current_repo.split("-")[0]):
+    elif (
+        current_repo
+        and cmd.repo
+        and "/" in current_repo
+        and "/" in cmd.repo
+        and cmd.repo.rsplit("/", 1)[0] == current_repo.rsplit("/", 1)[0]
+    ):
         context = 0.5
     else:
         context = 0.0

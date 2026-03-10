@@ -16,7 +16,9 @@ class TestGetGitRepo:
         """Returns repo name when inside a git repo."""
         # Use the actual mem repo directory for this test
         repo = get_git_repo(".")
-        assert repo == "mem"
+        assert repo is not None
+        assert repo.endswith("/mem")
+        assert "/" in repo  # full path, not just basename
 
     def test_returns_none_outside_repo(self, tmp_path):
         """Returns None when not inside a git repo."""
@@ -48,7 +50,7 @@ class TestCaptureCommand:
 
     def test_captures_with_metadata(self, tmp_mem_dir):
         """Capture stores command with all metadata fields."""
-        with patch("mem.capture.get_git_repo", return_value="myapp"):
+        with patch("mem.capture.get_git_repo", return_value="/Users/test/projects/myapp"):
             capture_command(
                 raw="git status",
                 directory="/Users/test/myapp",
@@ -60,7 +62,7 @@ class TestCaptureCommand:
         assert len(cmds) == 1
         cmd = cmds[0]
         assert cmd.command == "git status"
-        assert cmd.repo == "myapp"
+        assert cmd.repo == "/Users/test/projects/myapp"
         assert cmd.exit_code == 0
         assert cmd.duration_ms == 42
 
@@ -80,7 +82,7 @@ class TestCaptureCommand:
 
     def test_captures_failed_commands(self, tmp_mem_dir):
         """Commands with non-zero exit codes are still captured."""
-        with patch("mem.capture.get_git_repo", return_value="myapp"):
+        with patch("mem.capture.get_git_repo", return_value="/Users/test/projects/myapp"):
             capture_command(
                 raw="make build",
                 directory="/Users/test/myapp",
@@ -95,7 +97,7 @@ class TestCaptureCommand:
     def test_session_tracking_failure_does_not_block_capture(self, tmp_mem_dir):
         """Session tracking errors are swallowed silently."""
         with (
-            patch("mem.capture.get_git_repo", return_value="myapp"),
+            patch("mem.capture.get_git_repo", return_value="/Users/test/projects/myapp"),
             patch(
                 "mem.capture.SessionTracker.update",
                 side_effect=RuntimeError("session broken"),
@@ -120,22 +122,22 @@ class TestSessionTracker:
     def test_first_command_starts_session(self, tmp_mem_dir):
         """First command creates a new session state."""
         tracker = SessionTracker()
-        cmd = make_command(command="git status", ts=1000, repo="myapp")
+        cmd = make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp")
         tracker.update(cmd)
 
         state = tracker._load_state()
         assert state is not None
         assert state.commands == ["git status"]
         assert state.last_command_ts == 1000
-        assert state.last_repo == "myapp"
+        assert state.last_repo == "/Users/test/projects/myapp"
 
     def test_subsequent_commands_extend_session(self, tmp_mem_dir):
         """Commands within timeout extend the current session."""
         tracker = SessionTracker()
 
-        tracker.update(make_command(command="git status", ts=1000, repo="myapp"))
-        tracker.update(make_command(command="git diff", ts=1010, repo="myapp"))
-        tracker.update(make_command(command="git add .", ts=1020, repo="myapp"))
+        tracker.update(make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp"))
+        tracker.update(make_command(command="git diff", ts=1010, repo="/Users/test/projects/myapp"))
+        tracker.update(make_command(command="git add .", ts=1020, repo="/Users/test/projects/myapp"))
 
         state = tracker._load_state()
         assert len(state.commands) == 3
@@ -147,11 +149,11 @@ class TestSessionTracker:
         tracker = SessionTracker()
 
         # First session
-        tracker.update(make_command(command="git status", ts=1000, repo="myapp"))
-        tracker.update(make_command(command="git diff", ts=1010, repo="myapp"))
+        tracker.update(make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp"))
+        tracker.update(make_command(command="git diff", ts=1010, repo="/Users/test/projects/myapp"))
 
         # 301 seconds later — triggers session close
-        tracker.update(make_command(command="make build", ts=1311, repo="myapp"))
+        tracker.update(make_command(command="make build", ts=1311, repo="/Users/test/projects/myapp"))
 
         # Old session should be persisted
         sessions = list(storage.read_all_sessions())
@@ -167,28 +169,28 @@ class TestSessionTracker:
         tracker = SessionTracker()
 
         # Working in myapp
-        tracker.update(make_command(command="git status", ts=1000, repo="myapp"))
-        tracker.update(make_command(command="npm test", ts=1010, repo="myapp"))
+        tracker.update(make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp"))
+        tracker.update(make_command(command="npm test", ts=1010, repo="/Users/test/projects/myapp"))
 
         # Switch to another repo (within timeout)
-        tracker.update(make_command(command="git log", ts=1020, repo="other-repo"))
+        tracker.update(make_command(command="git log", ts=1020, repo="/Users/test/projects/other-repo"))
 
         # myapp session should be closed
         sessions = list(storage.read_all_sessions())
         assert len(sessions) == 1
-        assert sessions[0].repo == "myapp"
+        assert sessions[0].repo == "/Users/test/projects/myapp"
         assert sessions[0].commands == ["git status", "npm test"]
 
         # New session for other-repo
         state = tracker._load_state()
-        assert state.last_repo == "other-repo"
+        assert state.last_repo == "/Users/test/projects/other-repo"
 
     def test_exactly_300s_does_not_close(self, tmp_mem_dir):
         """Boundary check: exactly 300s is NOT a session break."""
         tracker = SessionTracker()
 
-        tracker.update(make_command(command="cmd1", ts=1000, repo="myapp"))
-        tracker.update(make_command(command="cmd2", ts=1300, repo="myapp"))  # exactly 300s
+        tracker.update(make_command(command="cmd1", ts=1000, repo="/Users/test/projects/myapp"))
+        tracker.update(make_command(command="cmd2", ts=1300, repo="/Users/test/projects/myapp"))  # exactly 300s
 
         # No session should be closed
         sessions = list(storage.read_all_sessions())
@@ -201,12 +203,12 @@ class TestSessionTracker:
         """Session summary falls back to first command when AI unavailable."""
         tracker = SessionTracker()
 
-        tracker.update(make_command(command="git status", ts=1000, repo="myapp"))
-        tracker.update(make_command(command="git diff", ts=1010, repo="myapp"))
+        tracker.update(make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp"))
+        tracker.update(make_command(command="git diff", ts=1010, repo="/Users/test/projects/myapp"))
 
         # Trigger close via timeout
         with patch("mem.patterns._apple_fm_available", return_value=False):
-            tracker.update(make_command(command="new cmd", ts=1311, repo="myapp"))
+            tracker.update(make_command(command="new cmd", ts=1311, repo="/Users/test/projects/myapp"))
 
         sessions = list(storage.read_all_sessions())
         assert len(sessions) == 1
@@ -216,11 +218,11 @@ class TestSessionTracker:
         """Single-command session uses the command itself as summary."""
         tracker = SessionTracker()
 
-        tracker.update(make_command(command="git status", ts=1000, repo="myapp"))
+        tracker.update(make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp"))
 
         # Trigger close via repo change
         with patch("mem.patterns._apple_fm_available", return_value=False):
-            tracker.update(make_command(command="ls", ts=1010, repo="other"))
+            tracker.update(make_command(command="ls", ts=1010, repo="/Users/test/projects/other"))
 
         sessions = list(storage.read_all_sessions())
         assert len(sessions) == 1
@@ -233,7 +235,7 @@ class TestSessionTracker:
         tracker._state_path.write_text("{{invalid json", encoding="utf-8")
 
         # Should not raise, starts fresh session
-        tracker.update(make_command(command="git status", ts=1000, repo="myapp"))
+        tracker.update(make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp"))
 
         state = tracker._load_state()
         assert state is not None
@@ -249,7 +251,7 @@ class TestSessionTracker:
         empty_state = SessionState(
             session_id="test123",
             last_command_ts=1000,
-            last_repo="myapp",
+            last_repo="/Users/test/projects/myapp",
             commands=[],
         )
         tracker._close_session(empty_state)
@@ -260,7 +262,7 @@ class TestSessionTracker:
     def test_state_survives_reload(self, tmp_mem_dir):
         """State persisted to disk can be loaded by a new tracker instance."""
         tracker1 = SessionTracker()
-        tracker1.update(make_command(command="git status", ts=1000, repo="myapp"))
+        tracker1.update(make_command(command="git status", ts=1000, repo="/Users/test/projects/myapp"))
 
         # New tracker instance loads existing state
         tracker2 = SessionTracker()
@@ -269,6 +271,6 @@ class TestSessionTracker:
         assert state.commands == ["git status"]
 
         # Continue the session
-        tracker2.update(make_command(command="git diff", ts=1010, repo="myapp"))
+        tracker2.update(make_command(command="git diff", ts=1010, repo="/Users/test/projects/myapp"))
         state = tracker2._load_state()
         assert state.commands == ["git status", "git diff"]
