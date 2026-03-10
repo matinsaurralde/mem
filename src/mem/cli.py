@@ -150,12 +150,6 @@ def init(shell: str) -> None:
         click.echo(f'Error: {shell} support coming in v1.5. Currently supported: zsh', err=True)
         sys.exit(1)
 
-    # Print setup instructions to stderr so they don't pollute stdout
-    err_console.print(f'# Add this to your ~/.{shell}rc:')
-    err_console.print(f'#   eval "$(mem init {shell})"')
-    err_console.print('# Then reload:')
-    err_console.print(f'#   source ~/.{shell}rc')
-
     # Print hook code to stdout
     hook_path = Path(__file__).parent.parent.parent / "hooks" / f"mem.{shell}"
     if hook_path.exists():
