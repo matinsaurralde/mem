@@ -50,18 +50,21 @@ def _relative_time(ts: int) -> str:
     return f"{w}w ago"
 
 
-@click.group(invoke_without_command=True)
+@click.group(
+    invoke_without_command=True,
+    context_settings={"allow_extra_args": True, "allow_interspersed_args": False},
+)
 @click.version_option(__version__, prog_name="mem")
-@click.argument("query", required=False)
 @click.option("--pattern", "-p", is_flag=True, help="Show extracted patterns instead of commands")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--limit", "-n", default=10, help="Maximum results")
 @click.pass_context
-def cli(ctx: click.Context, query: str | None, pattern: bool, as_json: bool, limit: int) -> None:
+def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
     """mem — your shell history, understood."""
     if ctx.invoked_subcommand is not None:
         return
 
+    query = ctx.args[0] if ctx.args else None
     if query is None:
         click.echo(ctx.get_help())
         return
