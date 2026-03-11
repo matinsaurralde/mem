@@ -400,10 +400,11 @@ def save(command: str, group_name: str | None, global_flag: bool, comment: str |
 
 
 @cli.command(name="list")
+@click.argument("group_name", required=False, default=None)
 @click.option("--global", "global_flag", is_flag=True, help="Show only global scope")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def list_cmd(global_flag: bool, as_json: bool) -> None:
-    """List saved commands and groups."""
+def list_cmd(group_name: str | None, global_flag: bool, as_json: bool) -> None:
+    """List saved commands and groups, or show a group's commands."""
     from mem import groups, storage
 
     global_path = storage.GROUPS_GLOBAL_FILE
@@ -414,6 +415,28 @@ def list_cmd(global_flag: bool, as_json: bool) -> None:
         if repo:
             sanitized = storage.sanitize_repo_name(repo)
             repo_path = storage.group_file_path(sanitized)
+
+    # Show a specific group's commands
+    if group_name is not None:
+        grp, scope_label, _file_path, shadows = groups.resolve_group(
+            group_name, repo_path, global_path, force_global=global_flag,
+        )
+
+        if as_json:
+            click.echo(groups.export_json(group_name, grp))
+            return
+
+        console.print(f"\n● {scope_label} / {group_name}")
+        if grp.description:
+            console.print(f'  "{grp.description}"')
+        if group_name in shadows and scope_label != "global":
+            console.print("  [dim](global group with same name exists — use --global to see it)[/]")
+        console.print("  " + "─" * 50)
+        for i, cmd in enumerate(grp.commands, 1):
+            comment_str = f"   # {cmd.comment}" if cmd.comment else ""
+            console.print(f"  {i}. {cmd.cmd}{comment_str}")
+        console.print()
+        return
 
     result = groups.list_all(repo_path, global_path)
 
@@ -528,6 +551,7 @@ def run(group_name: str, global_flag: bool, yes: bool) -> None:
         return
 
     # Determine which commands to run
+    run_all = yes
     if not yes:
         choice = click.prompt(
             f"  Run all? [y/N] or pick [1-{len(grp.commands)}]",
@@ -539,6 +563,7 @@ def run(group_name: str, global_flag: bool, yes: bool) -> None:
             return
 
         if choice.lower() == "y":
+            run_all = True
             commands_to_run = list(enumerate(grp.commands, 1))
         else:
             try:
@@ -557,7 +582,7 @@ def run(group_name: str, global_flag: bool, yes: bool) -> None:
     # Execute
     console.print()
     for i, cmd in commands_to_run:
-        if not yes and len(commands_to_run) > 1:
+        if not run_all and len(commands_to_run) > 1:
             if not click.confirm(f"  Run [{i}] {cmd.cmd}?", default=True, err=True):
                 continue
 

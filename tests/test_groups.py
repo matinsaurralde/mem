@@ -676,6 +676,44 @@ class TestListCLI:
         assert result.exit_code == 0
         assert "shadowed" in result.output
 
+    def test_list_specific_group(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"deploy": Group(
+                description="deploy steps",
+                commands=[
+                    GroupCommand(cmd="make build", comment="compile"),
+                    GroupCommand(cmd="make push"),
+                ],
+            )}),
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["list", "deploy", "--global"])
+        assert result.exit_code == 0
+        assert "deploy" in result.output
+        assert "make build" in result.output
+        assert "compile" in result.output
+        assert "make push" in result.output
+
+    def test_list_specific_group_not_found(self, tmp_mem_dir: Path):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["list", "nope", "--global"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+    def test_list_specific_group_json(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"g": Group(
+                commands=[GroupCommand(cmd="echo hi")],
+            )}),
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["list", "g", "--global", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "g" in data
+
 
 class TestRunCLI:
     def _setup_group(self, tmp_mem_dir: Path):
@@ -723,6 +761,20 @@ class TestRunCLI:
         with patch("mem.cli._is_interactive", return_value=True):
             result = runner.invoke(cli, ["run", "test", "--global"], input="n\n")
         assert result.exit_code == 0
+
+    def test_run_all_skips_per_command_confirm(self, tmp_mem_dir: Path):
+        self._setup_group(tmp_mem_dir)
+        runner = CliRunner()
+        with patch("mem.cli._is_interactive", return_value=True):
+            # "y\n" = run all — should NOT prompt for each command
+            result = runner.invoke(cli, ["run", "test", "--global"], input="y\n")
+        assert result.exit_code == 0
+        # All 3 commands should appear as executed ($ echo N)
+        assert "$ echo 1" in result.output
+        assert "$ echo 2" in result.output
+        assert "$ echo 3" in result.output
+        # Should NOT contain per-command confirmation prompts
+        assert "Run [1]" not in result.output
 
     def test_run_non_tty_without_yes_errors(self, tmp_mem_dir: Path):
         self._setup_group(tmp_mem_dir)
