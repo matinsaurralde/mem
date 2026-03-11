@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -41,6 +42,11 @@ class MemGroup(click.Group):
 def _current_repo() -> str | None:
     """Detect the git repo for the current working directory."""
     return get_git_repo(os.getcwd())
+
+
+def _is_interactive() -> bool:
+    """Check if stdin is connected to a terminal."""
+    return sys.stdin.isatty()
 
 
 def _relative_time(ts: int) -> str:
@@ -350,3 +356,458 @@ def forget(query: str, yes: bool) -> None:
 
     removed = storage.forget_commands(query)
     console.print(f"Deleted {removed} commands.")
+
+
+# --- Named Groups CLI commands ---
+
+
+@cli.command()
+@click.argument("command")
+@click.option("--group", "-g", "group_name", default=None, help="Target group name")
+@click.option("--global", "global_flag", is_flag=True, help="Save to global scope")
+@click.option("--comment", "-c", default=None, help="Inline annotation")
+def save(command: str, group_name: str | None, global_flag: bool, comment: str | None) -> None:
+    """Save a command to the saved list or to a named group."""
+    from mem import groups
+
+    # Resolve ! to last captured command
+    if command == "!":
+        repo = _current_repo()
+        command = groups.get_last_captured_command(repo)
+
+    scope_path = groups.resolve_scope(global_flag)
+
+    def ask_description(name: str) -> str | None:
+        if not _is_interactive():
+            return None
+        desc = click.prompt(
+            f"Description for '{name}' (optional)",
+            default="",
+            show_default=False,
+        )
+        return desc or None
+
+    saved = groups.save_command(
+        scope_path, command, comment, group_name,
+        description_callback=ask_description,
+    )
+
+    if saved:
+        target = f"group '{group_name}'" if group_name else "saved commands"
+        err_console.print(f"Saved to {target}: {command}")
+    else:
+        err_console.print(f"Already saved: {command}")
+
+
+@cli.command(name="list")
+@click.option("--global", "global_flag", is_flag=True, help="Show only global scope")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def list_cmd(global_flag: bool, as_json: bool) -> None:
+    """List saved commands and groups."""
+    from mem import groups, storage
+
+    global_path = storage.GROUPS_GLOBAL_FILE
+    repo_path = None
+
+    if not global_flag:
+        repo = _current_repo()
+        if repo:
+            sanitized = storage.sanitize_repo_name(repo)
+            repo_path = storage.group_file_path(sanitized)
+
+    result = groups.list_all(repo_path, global_path)
+
+    if as_json:
+        output: dict = {}
+        if result["repo_data"]:
+            output["repo"] = {
+                "name": result["repo_name"],
+                "saved": [s.model_dump() for s in result["repo_data"].saved],
+                "groups": {n: g.model_dump() for n, g in result["repo_data"].groups.items()},
+            }
+        output["global"] = {
+            "saved": [s.model_dump() for s in result["global_data"].saved],
+            "groups": {n: g.model_dump() for n, g in result["global_data"].groups.items()},
+        }
+        if result["shadows"]:
+            output["shadows"] = sorted(result["shadows"])
+        click.echo(json.dumps(output, indent=2))
+        return
+
+    has_data = False
+
+    # Repo saved commands
+    if result["repo_data"] and result["repo_data"].saved:
+        has_data = True
+        console.print(f"\n● Saved commands in {result['repo_name']}")
+        for s in result["repo_data"].saved:
+            comment_str = f"   # {s.comment}" if s.comment else ""
+            console.print(f"  {s.cmd}{comment_str}")
+
+    # Repo groups
+    if result["repo_data"] and result["repo_data"].groups:
+        has_data = True
+        console.print(f"\n● Groups in {result['repo_name']}")
+        for name, grp in result["repo_data"].groups.items():
+            count = len(grp.commands)
+            desc = f'  "{grp.description}"' if grp.description else ""
+            console.print(f"  {name:<20} {count} command{'s' if count != 1 else ''}{desc}")
+
+    # Global saved commands
+    if result["global_data"].saved:
+        has_data = True
+        console.print("\n● Saved commands (global)")
+        for s in result["global_data"].saved:
+            comment_str = f"   # {s.comment}" if s.comment else ""
+            console.print(f"  {s.cmd}{comment_str}")
+
+    # Global groups
+    if result["global_data"].groups:
+        has_data = True
+        shadows = result["shadows"]
+        console.print("\n● Global groups")
+        for name, grp in result["global_data"].groups.items():
+            count = len(grp.commands)
+            desc = f'  "{grp.description}"' if grp.description else ""
+            shadow = "  ← shadowed in this repo" if name in shadows else ""
+            console.print(
+                f"  {name:<20} {count} command{'s' if count != 1 else ''}{desc}"
+                f"[dim]{shadow}[/]"
+            )
+
+    if not has_data:
+        console.print("\nNo saved commands or groups yet.")
+        console.print('  Try: mem save "echo hello" --comment "test"')
+        console.print('  Or:  mem save "echo hello" --group my-group')
+
+    console.print()
+
+
+@cli.command()
+@click.argument("group_name", metavar="GROUP")
+@click.option("--global", "global_flag", is_flag=True, help="Force global scope")
+@click.option("--yes", "-y", is_flag=True, help="Skip all confirmation prompts")
+def run(group_name: str, global_flag: bool, yes: bool) -> None:
+    """Execute a group's commands interactively."""
+    import subprocess as sp
+
+    from mem import groups, storage
+
+    if not _is_interactive() and not yes:
+        raise click.ClickException(
+            "Non-interactive mode detected. Use --yes to run without prompts."
+        )
+
+    global_path = storage.GROUPS_GLOBAL_FILE
+    repo_path = None
+    repo = _current_repo()
+    if repo:
+        sanitized = storage.sanitize_repo_name(repo)
+        repo_path = storage.group_file_path(sanitized)
+
+    grp, scope_label, _file_path, shadows = groups.resolve_group(
+        group_name, repo_path, global_path, force_global=global_flag,
+    )
+
+    # Display header
+    console.print(f"\n● {scope_label} / {group_name}")
+    if grp.description:
+        console.print(f'  "{grp.description}"')
+    if group_name in shadows and scope_label != "global":
+        console.print("  [dim](global group with same name exists — use --global to see it)[/]")
+    console.print("  " + "─" * 50)
+
+    # Display commands
+    for i, cmd in enumerate(grp.commands, 1):
+        comment_str = f"   # {cmd.comment}" if cmd.comment else ""
+        console.print(f"  {i}. {cmd.cmd}{comment_str}")
+    console.print("  " + "─" * 50)
+
+    if not grp.commands:
+        console.print("  (no commands)")
+        return
+
+    # Determine which commands to run
+    if not yes:
+        choice = click.prompt(
+            f"  Run all? [y/N] or pick [1-{len(grp.commands)}]",
+            default="n",
+            show_default=False,
+        )
+
+        if choice.lower() == "n":
+            return
+
+        if choice.lower() == "y":
+            commands_to_run = list(enumerate(grp.commands, 1))
+        else:
+            try:
+                idx = int(choice)
+                if 1 <= idx <= len(grp.commands):
+                    commands_to_run = [(idx, grp.commands[idx - 1])]
+                else:
+                    err_console.print(f"Invalid selection: {choice}")
+                    return
+            except ValueError:
+                err_console.print(f"Invalid selection: {choice}")
+                return
+    else:
+        commands_to_run = list(enumerate(grp.commands, 1))
+
+    # Execute
+    console.print()
+    for i, cmd in commands_to_run:
+        if not yes and len(commands_to_run) > 1:
+            if not click.confirm(f"  Run [{i}] {cmd.cmd}?", default=True, err=True):
+                continue
+
+        console.print(f"  [dim]$ {cmd.cmd}[/]")
+        try:
+            result = sp.run(cmd.cmd, shell=True)
+        except KeyboardInterrupt:
+            console.print("\n  Interrupted.")
+            if yes:
+                sys.exit(130)
+            if not click.confirm("  Continue?", default=False, err=True):
+                sys.exit(130)
+            continue
+
+        if result.returncode != 0:
+            if yes:
+                sys.exit(result.returncode)
+            if not click.confirm(
+                f"  Command failed (exit {result.returncode}). Continue?",
+                default=False,
+                err=True,
+            ):
+                sys.exit(result.returncode)
+    console.print()
+
+
+@cli.command()
+@click.argument("group_name", metavar="GROUP")
+@click.option("--format", "-f", "fmt", type=click.Choice(["markdown", "json"]),
+              default="markdown", help="Output format")
+@click.option("--global", "global_flag", is_flag=True, help="Export from global scope")
+def export(group_name: str, fmt: str, global_flag: bool) -> None:
+    """Export a group as markdown or JSON."""
+    from mem import groups, storage
+
+    global_path = storage.GROUPS_GLOBAL_FILE
+    repo_path = None
+    repo = _current_repo()
+    if repo:
+        sanitized = storage.sanitize_repo_name(repo)
+        repo_path = storage.group_file_path(sanitized)
+
+    grp, _, _, _ = groups.resolve_group(
+        group_name, repo_path, global_path, force_global=global_flag,
+    )
+
+    if fmt == "markdown":
+        click.echo(groups.export_markdown(group_name, grp))
+    else:
+        click.echo(groups.export_json(group_name, grp))
+
+
+@cli.command(name="import")
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--group", "-g", "group_name", required=True, help="Target group name")
+@click.option("--format", "-f", "fmt", type=click.Choice(["json", "markdown"]),
+              default="json", help="Input format")
+@click.option("--global", "global_flag", is_flag=True, help="Import to global scope")
+def import_cmd(file: str, group_name: str, fmt: str, global_flag: bool) -> None:
+    """Import a group from a file."""
+    from mem import groups, storage
+    from mem.models import Group
+
+    groups.validate_group_name(group_name)
+    scope_path = groups.resolve_scope(global_flag)
+    data = groups._load_group_file(scope_path)
+
+    file_path = Path(file)
+    if fmt == "json":
+        commands = groups.import_from_json(file_path)
+    else:
+        commands = groups.import_from_markdown(file_path)
+
+    if group_name in data.groups:
+        choice = click.prompt(
+            f"Group '{group_name}' already exists. Merge or Replace?",
+            type=click.Choice(["m", "r"], case_sensitive=False),
+            default="r",
+        )
+        if choice.lower() == "r":
+            data.groups[group_name] = Group(
+                description=data.groups[group_name].description, commands=commands,
+            )
+            added = len(commands)
+        else:
+            existing_cmds = {c.cmd for c in data.groups[group_name].commands}
+            added = 0
+            for cmd in commands:
+                if cmd.cmd not in existing_cmds:
+                    data.groups[group_name].commands.append(cmd)
+                    added += 1
+    else:
+        data.groups[group_name] = Group(commands=commands)
+        added = len(commands)
+
+    storage.write_group_file(scope_path, data)
+    err_console.print(f"Imported {added} commands to group '{group_name}'.")
+
+
+# --- Group management subgroup ---
+
+
+@cli.group(name="group")
+def group_grp() -> None:
+    """Manage named groups."""
+
+
+@group_grp.command(name="edit")
+@click.argument("name")
+@click.option("--global", "global_flag", is_flag=True, help="Edit global scope")
+def group_edit(name: str, global_flag: bool) -> None:
+    """Open the data file in your editor."""
+    import subprocess as sp
+
+    from mem import groups
+
+    scope_path = groups.resolve_scope(global_flag)
+    data = groups._load_group_file(scope_path)
+
+    if name not in data.groups:
+        raise click.ClickException(f"Group '{name}' not found.")
+
+    editor = os.environ.get("EDITOR", "vi")
+    try:
+        sp.run([*shlex.split(editor), str(scope_path)])
+    except FileNotFoundError:
+        err_console.print(f"Editor '{editor}' not found. Edit manually: {scope_path}")
+
+
+@group_grp.command(name="remove")
+@click.argument("name")
+@click.option("--global", "global_flag", is_flag=True, help="Remove from global scope")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def group_remove(name: str, global_flag: bool, yes: bool) -> None:
+    """Delete an entire group."""
+    from mem import groups, storage
+
+    scope_path = groups.resolve_scope(global_flag)
+    data = groups._load_group_file(scope_path)
+
+    if name not in data.groups:
+        raise click.ClickException(f"Group '{name}' not found.")
+
+    grp = data.groups[name]
+
+    # Show contents before deleting
+    console.print(f"\nGroup: {name}")
+    if grp.description:
+        console.print(f'  "{grp.description}"')
+    for i, cmd in enumerate(grp.commands, 1):
+        comment_str = f"   # {cmd.comment}" if cmd.comment else ""
+        console.print(f"  {i}. {cmd.cmd}{comment_str}")
+    console.print()
+
+    if not yes:
+        if not click.confirm(f"Delete group '{name}'?", default=False):
+            return
+
+    del data.groups[name]
+    storage.write_group_file(scope_path, data)
+    err_console.print(f"Deleted group '{name}'.")
+
+
+@group_grp.command(name="rename")
+@click.argument("old")
+@click.argument("new")
+@click.option("--global", "global_flag", is_flag=True, help="Rename in global scope")
+def group_rename(old: str, new: str, global_flag: bool) -> None:
+    """Rename a group."""
+    from mem import groups, storage
+
+    groups.validate_group_name(new)
+    scope_path = groups.resolve_scope(global_flag)
+    data = groups._load_group_file(scope_path)
+
+    if old not in data.groups:
+        raise click.ClickException(f"Group '{old}' not found.")
+    if new in data.groups:
+        raise click.ClickException(f"Group '{new}' already exists.")
+
+    data.groups[new] = data.groups.pop(old)
+    storage.write_group_file(scope_path, data)
+    err_console.print(f"Renamed '{old}' → '{new}'.")
+
+
+@group_grp.command(name="copy")
+@click.argument("name")
+@click.option("--global", "global_flag", is_flag=True, help="Copy to global scope")
+@click.option("--repo", "repo_flag", is_flag=True, help="Copy to current repo scope")
+def group_copy(name: str, global_flag: bool, repo_flag: bool) -> None:
+    """Copy a group between scopes."""
+    from mem import groups, storage
+
+    if not global_flag and not repo_flag:
+        raise click.ClickException("Specify --global or --repo as the target scope.")
+    if global_flag and repo_flag:
+        raise click.ClickException("Cannot specify both --global and --repo.")
+
+    repo = _current_repo()
+    if repo is None:
+        raise click.ClickException("Not in a git repository.")
+
+    sanitized = storage.sanitize_repo_name(repo)
+    repo_path = storage.group_file_path(sanitized)
+    global_path = storage.GROUPS_GLOBAL_FILE
+
+    if global_flag:
+        source_path, target_path = repo_path, global_path
+    else:
+        source_path, target_path = global_path, repo_path
+
+    source_data = groups._load_group_file(source_path)
+    target_data = groups._load_group_file(target_path)
+
+    source_scope = "repo" if global_flag else "global"
+    target_scope = "global" if global_flag else "repo"
+
+    if name not in source_data.groups:
+        raise click.ClickException(f"Group '{name}' not found in {source_scope} scope.")
+    if name in target_data.groups:
+        raise click.ClickException(f"Group '{name}' already exists in {target_scope} scope.")
+
+    target_data.groups[name] = source_data.groups[name].model_copy(deep=True)
+    storage.write_group_file(target_path, target_data)
+    err_console.print(f"Copied group '{name}' to {target_scope} scope.")
+
+
+# --- Saved commands subgroup ---
+
+
+@cli.group(name="saved")
+def saved_grp() -> None:
+    """Manage saved commands."""
+
+
+@saved_grp.command(name="edit")
+@click.option("--global", "global_flag", is_flag=True, help="Edit global scope")
+def saved_edit(global_flag: bool) -> None:
+    """Open the data file in your editor."""
+    import subprocess as sp
+
+    from mem import groups
+
+    scope_path = groups.resolve_scope(global_flag)
+
+    if not scope_path.exists():
+        raise click.ClickException("No saved data yet. Save something first with 'mem save'.")
+
+    editor = os.environ.get("EDITOR", "vi")
+    try:
+        sp.run([*shlex.split(editor), str(scope_path)])
+    except FileNotFoundError:
+        err_console.print(f"Editor '{editor}' not found. Edit manually: {scope_path}")

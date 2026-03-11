@@ -81,3 +81,34 @@ class SessionState(BaseModel):
     last_command_ts: int
     last_repo: str | None = None
     commands: list[str]
+
+
+# --- Named Groups (active memory) ---
+
+
+class SavedCommand(BaseModel):
+    """A single bookmarked command in the saved list."""
+
+    cmd: str = Field(min_length=1)
+    comment: str | None = None
+
+
+class GroupCommand(BaseModel):
+    """A single command entry within a named group."""
+
+    cmd: str = Field(min_length=1)
+    comment: str | None = None
+
+
+class Group(BaseModel):
+    """A named, ordered collection of commands forming a runbook."""
+
+    description: str | None = None
+    commands: list[GroupCommand] = []
+
+
+class GroupFile(BaseModel):
+    """On-disk data file containing saved commands and named groups for a scope."""
+
+    saved: list[SavedCommand] = []
+    groups: dict[str, Group] = {}

@@ -19,9 +19,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from mem.models import CapturedCommand, PatternFile, WorkSession
+from mem.models import CapturedCommand, GroupFile, PatternFile, WorkSession
 
 MEM_DIR = Path.home() / ".mem"
+
+# --- Named Groups storage ---
+GROUPS_DIR = MEM_DIR / "groups"
+GROUPS_REPOS_DIR = GROUPS_DIR / "repos"
+GROUPS_GLOBAL_FILE = GROUPS_DIR / "_global.json"
 
 
 def repo_file(repo: str) -> Path:
@@ -44,6 +49,7 @@ def ensure_dirs() -> None:
     (MEM_DIR / "repos").mkdir(parents=True, exist_ok=True)
     (MEM_DIR / "sessions").mkdir(parents=True, exist_ok=True)
     (MEM_DIR / "patterns").mkdir(parents=True, exist_ok=True)
+    (MEM_DIR / "groups" / "repos").mkdir(parents=True, exist_ok=True)
 
 
 def sanitize_repo_name(name: str) -> str:
@@ -311,3 +317,44 @@ def forget_commands(query: str) -> int:
                 path.unlink()
 
     return removed
+
+
+# --- Named Groups storage ---
+
+
+def group_file_path(repo: str | None) -> Path:
+    """Path for a scope's group data file.
+
+    Repo-scoped files live under groups/repos/<sanitized_repo>.json.
+    Global file is groups/_global.json.
+    """
+    if repo is None:
+        return GROUPS_GLOBAL_FILE
+    return GROUPS_REPOS_DIR / f"{sanitize_repo_name(repo)}.json"
+
+
+def read_group_file(path: Path) -> GroupFile:
+    """Read and parse a group file. Return empty GroupFile if missing.
+
+    Raises ValueError on malformed JSON so callers can present
+    a user-friendly error without losing the corrupt file on disk.
+    """
+    if not path.exists():
+        return GroupFile()
+    try:
+        return GroupFile.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"error: cannot read {path}: {e}", file=sys.stderr)
+        raise ValueError(f"Malformed data in {path}") from e
+
+
+def write_group_file(path: Path, data: GroupFile) -> None:
+    """Write group data atomically (tmp + rename pattern).
+
+    Creates parent directories if needed. Uses the same atomic
+    write strategy as write_patterns to prevent corruption.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(data.model_dump_json(indent=2), encoding="utf-8")
+    tmp_path.rename(path)
