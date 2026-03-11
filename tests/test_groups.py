@@ -6,6 +6,7 @@ Covers models, storage, business logic in groups.py, and CLI commands.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1162,3 +1163,62 @@ class TestResolveScope:
         with patch("mem.groups.get_git_repo", return_value=None):
             with pytest.raises(click.ClickException, match="git repository"):
                 groups.resolve_scope(global_flag=False)
+
+
+class TestSaveNonInteractive:
+    """Verify save --group skips description prompt in non-interactive mode."""
+
+    def test_new_group_no_tty_skips_prompt(self, tmp_mem_dir: Path):
+        runner = CliRunner()
+        with patch("mem.cli._is_interactive", return_value=False):
+            result = runner.invoke(
+                cli, ["save", "echo hi", "--global", "-g", "ci-group"],
+            )
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert "ci-group" in data.groups
+        assert data.groups["ci-group"].description is None
+
+    def test_new_group_tty_prompts(self, tmp_mem_dir: Path):
+        runner = CliRunner()
+        with patch("mem.cli._is_interactive", return_value=True):
+            result = runner.invoke(
+                cli, ["save", "echo hi", "--global", "-g", "my-group"],
+                input="My description\n",
+            )
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert data.groups["my-group"].description == "My description"
+
+
+class TestEditorParsing:
+    """Verify EDITOR values with arguments are parsed correctly."""
+
+    def test_editor_with_args(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"test": Group(commands=[GroupCommand(cmd="echo x")])}),
+        )
+        runner = CliRunner()
+        with patch.dict(os.environ, {"EDITOR": "code -w"}), \
+             patch("subprocess.run") as mock_run:
+            result = runner.invoke(cli, ["group", "edit", "test", "--global"])
+        assert result.exit_code == 0
+        args = mock_run.call_args[0][0]
+        assert args[0] == "code"
+        assert args[1] == "-w"
+
+    def test_saved_edit_editor_with_args(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(saved=[SavedCommand(cmd="echo x")]),
+        )
+        runner = CliRunner()
+        with patch.dict(os.environ, {"EDITOR": "vim -u NONE"}), \
+             patch("subprocess.run") as mock_run:
+            result = runner.invoke(cli, ["saved", "edit", "--global"])
+        assert result.exit_code == 0
+        args = mock_run.call_args[0][0]
+        assert args[0] == "vim"
+        assert args[1] == "-u"
+        assert args[2] == "NONE"

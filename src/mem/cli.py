@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -377,6 +378,8 @@ def save(command: str, group_name: str | None, global_flag: bool, comment: str |
     scope_path = groups.resolve_scope(global_flag)
 
     def ask_description(name: str) -> str | None:
+        if not _is_interactive():
+            return None
         desc = click.prompt(
             f"Description for '{name}' (optional)",
             default="",
@@ -679,7 +682,7 @@ def group_edit(name: str, global_flag: bool) -> None:
 
     editor = os.environ.get("EDITOR", "vi")
     try:
-        sp.run([editor, str(scope_path)])
+        sp.run([*shlex.split(editor), str(scope_path)])
     except FileNotFoundError:
         err_console.print(f"Editor '{editor}' not found. Edit manually: {scope_path}")
 
@@ -805,6 +808,6 @@ def saved_edit(global_flag: bool) -> None:
 
     editor = os.environ.get("EDITOR", "vi")
     try:
-        sp.run([editor, str(scope_path)])
+        sp.run([*shlex.split(editor), str(scope_path)])
     except FileNotFoundError:
         err_console.print(f"Editor '{editor}' not found. Edit manually: {scope_path}")
