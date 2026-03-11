@@ -603,13 +603,14 @@ class TestSaveCLI:
         assert result.exit_code == 0
         assert "Already saved" in result.output
 
-    def test_save_outside_repo_without_global_errors(self, tmp_mem_dir: Path):
+    def test_save_outside_repo_falls_back_to_global(self, tmp_mem_dir: Path):
         runner = CliRunner()
         with patch("mem.cli._current_repo", return_value=None), \
              patch("mem.groups.get_git_repo", return_value=None):
             result = runner.invoke(cli, ["save", "echo hello"])
-        assert result.exit_code != 0
-        assert "git repository" in result.output.lower() or "git repository" in str(result.exception).lower()
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert any(s.cmd == "echo hello" for s in data.saved)
 
     def test_save_in_repo(self, tmp_mem_dir: Path):
         runner = CliRunner()
@@ -1159,10 +1160,10 @@ class TestResolveScope:
         expected_name = storage.sanitize_repo_name(FAKE_REPO)
         assert path == storage.group_file_path(expected_name)
 
-    def test_outside_repo_raises(self, tmp_mem_dir: Path):
+    def test_outside_repo_falls_back_to_global(self, tmp_mem_dir: Path):
         with patch("mem.groups.get_git_repo", return_value=None):
-            with pytest.raises(click.ClickException, match="git repository"):
-                groups.resolve_scope(global_flag=False)
+            path = groups.resolve_scope(global_flag=False)
+        assert path == storage.GROUPS_GLOBAL_FILE
 
 
 class TestSaveNonInteractive:

@@ -32,16 +32,14 @@ def resolve_scope(global_flag: bool) -> Path:
     """Return the path to the data file for the target scope.
 
     Uses the current git repo for scoping unless --global is set.
-    Raises ClickException if outside a git repo without --global.
+    Falls back to global scope when outside a git repo.
     """
     if global_flag:
         return storage.GROUPS_GLOBAL_FILE
 
     repo = get_git_repo(os.getcwd())
     if repo is None:
-        raise click.ClickException(
-            "Not in a git repository. Use --global to save globally."
-        )
+        return storage.GROUPS_GLOBAL_FILE
     sanitized = storage.sanitize_repo_name(repo)
     return storage.group_file_path(sanitized)
 
