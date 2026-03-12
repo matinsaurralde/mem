@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cli-mem"
-version = "0.3.1"
+version = "0.3.2"
 description = "Privacy-first CLI that turns shell history into searchable memory"
 license = "MIT"
 readme = "README.md"
