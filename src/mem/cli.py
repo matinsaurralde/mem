@@ -254,11 +254,11 @@ def session(query: str, as_json: bool) -> None:
         console.print("No matching sessions found.")
         return
 
-    for i, s in enumerate(results, 1):
-        from datetime import datetime, timezone
+    from datetime import datetime, timezone
 
+    for i, s in enumerate(results, 1):
         dt = datetime.fromtimestamp(s.started_at, tz=timezone.utc)
-        header = f"Session: {dt.strftime('%Y-%m-%d %H:%M')}  {s.repo or 'global'}"
+        header = f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {s.repo or 'global'}"
 
         lines = []
         for j, cmd in enumerate(s.commands, 1):
@@ -270,13 +270,22 @@ def session(query: str, as_json: bool) -> None:
 
     # Replay prompt
     try:
+        import subprocess as sp
+
         choice = click.prompt("Replay a session? [number/n]", default="n")
         if choice.lower() != "n":
             idx = int(choice) - 1
             if 0 <= idx < len(results):
                 console.print()
                 for cmd in results[idx].commands:
-                    click.echo(cmd)
+                    if not click.confirm(f"  Run: {cmd}?", default=True, err=True):
+                        continue
+                    console.print(f"  [dim]$ {cmd}[/]")
+                    try:
+                        sp.run(cmd, shell=True)
+                    except KeyboardInterrupt:
+                        console.print("\n  Interrupted.")
+                        break
     except (ValueError, click.Abort):
         pass
 
@@ -401,26 +410,47 @@ def save(command: str, group_name: str | None, global_flag: bool, comment: str |
 
 @cli.command(name="list")
 @click.argument("group_name", required=False, default=None)
-@click.option("--global", "global_flag", is_flag=True, help="Show only global scope")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Show only global scope")
+@click.option("--repo", "-r", "repo_flag", is_flag=True, help="Show only repo scope")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def list_cmd(group_name: str | None, global_flag: bool, as_json: bool) -> None:
+def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json: bool) -> None:
     """List saved commands and groups, or show a group's commands."""
     from mem import groups, storage
+
+    if global_flag and repo_flag:
+        raise click.ClickException("Cannot use --global and --repo together.")
+
+    repo = _current_repo()
+
+    if repo_flag and not repo:
+        raise click.ClickException("Not in a git repository. Cannot use --repo.")
 
     global_path = storage.GROUPS_GLOBAL_FILE
     repo_path = None
 
-    if not global_flag:
-        repo = _current_repo()
-        if repo:
-            sanitized = storage.sanitize_repo_name(repo)
-            repo_path = storage.group_file_path(sanitized)
+    if not global_flag and repo:
+        sanitized = storage.sanitize_repo_name(repo)
+        repo_path = storage.group_file_path(sanitized)
 
     # Show a specific group's commands
     if group_name is not None:
-        grp, scope_label, _file_path, shadows = groups.resolve_group(
-            group_name, repo_path, global_path, force_global=global_flag,
-        )
+        if repo_flag:
+            # --repo: only look in repo scope, never fall back to global
+            if repo_path is None:
+                raise click.ClickException(f"Group '{group_name}' not found in repo scope.")
+            repo_data = groups._load_group_file(repo_path)
+            if group_name not in repo_data.groups:
+                raise click.ClickException(f"Group '{group_name}' not found in repo scope.")
+            grp = repo_data.groups[group_name]
+            scope_label = repo or repo_path.stem
+            shadows = set()
+        else:
+            grp, scope_label, _file_path, shadows = groups.resolve_group(
+                group_name, repo_path, global_path, force_global=global_flag,
+            )
+            # Use real repo path for display if scope is not global
+            if scope_label != "global" and repo:
+                scope_label = repo
 
         if as_json:
             click.echo(groups.export_json(group_name, grp))
@@ -440,20 +470,24 @@ def list_cmd(group_name: str | None, global_flag: bool, as_json: bool) -> None:
 
     result = groups.list_all(repo_path, global_path)
 
+    # Use real repo path for display instead of sanitized filename
+    repo_display = repo if not global_flag and repo_path else result["repo_name"]
+
     if as_json:
         output: dict = {}
         if result["repo_data"]:
             output["repo"] = {
-                "name": result["repo_name"],
+                "name": repo_display,
                 "saved": [s.model_dump() for s in result["repo_data"].saved],
                 "groups": {n: g.model_dump() for n, g in result["repo_data"].groups.items()},
             }
-        output["global"] = {
-            "saved": [s.model_dump() for s in result["global_data"].saved],
-            "groups": {n: g.model_dump() for n, g in result["global_data"].groups.items()},
-        }
-        if result["shadows"]:
-            output["shadows"] = sorted(result["shadows"])
+        if not repo_flag:
+            output["global"] = {
+                "saved": [s.model_dump() for s in result["global_data"].saved],
+                "groups": {n: g.model_dump() for n, g in result["global_data"].groups.items()},
+            }
+            if result["shadows"]:
+                output["shadows"] = sorted(result["shadows"])
         click.echo(json.dumps(output, indent=2))
         return
 
@@ -462,7 +496,7 @@ def list_cmd(group_name: str | None, global_flag: bool, as_json: bool) -> None:
     # Repo saved commands
     if result["repo_data"] and result["repo_data"].saved:
         has_data = True
-        console.print(f"\n● Saved commands in {result['repo_name']}")
+        console.print(f"\n● Saved commands in {repo_display}")
         for s in result["repo_data"].saved:
             comment_str = f"   # {s.comment}" if s.comment else ""
             console.print(f"  {s.cmd}{comment_str}")
@@ -470,14 +504,14 @@ def list_cmd(group_name: str | None, global_flag: bool, as_json: bool) -> None:
     # Repo groups
     if result["repo_data"] and result["repo_data"].groups:
         has_data = True
-        console.print(f"\n● Groups in {result['repo_name']}")
+        console.print(f"\n● Groups in {repo_display}")
         for name, grp in result["repo_data"].groups.items():
             count = len(grp.commands)
             desc = f'  "{grp.description}"' if grp.description else ""
             console.print(f"  {name:<20} {count} command{'s' if count != 1 else ''}{desc}")
 
     # Global saved commands
-    if result["global_data"].saved:
+    if not repo_flag and result["global_data"].saved:
         has_data = True
         console.print("\n● Saved commands (global)")
         for s in result["global_data"].saved:
@@ -485,7 +519,7 @@ def list_cmd(group_name: str | None, global_flag: bool, as_json: bool) -> None:
             console.print(f"  {s.cmd}{comment_str}")
 
     # Global groups
-    if result["global_data"].groups:
+    if not repo_flag and result["global_data"].groups:
         has_data = True
         shadows = result["shadows"]
         console.print("\n● Global groups")
@@ -508,7 +542,7 @@ def list_cmd(group_name: str | None, global_flag: bool, as_json: bool) -> None:
 
 @cli.command()
 @click.argument("group_name", metavar="GROUP")
-@click.option("--global", "global_flag", is_flag=True, help="Force global scope")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Force global scope")
 @click.option("--yes", "-y", is_flag=True, help="Skip all confirmation prompts")
 def run(group_name: str, global_flag: bool, yes: bool) -> None:
     """Execute a group's commands interactively."""
@@ -609,12 +643,35 @@ def run(group_name: str, global_flag: bool, yes: bool) -> None:
     console.print()
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to system clipboard. Returns True on success."""
+    import shutil
+    import subprocess as sp
+
+    try:
+        # macOS
+        if shutil.which("pbcopy"):
+            sp.run(["pbcopy"], input=text.encode(), check=True)
+            return True
+        # Linux (X11)
+        if shutil.which("xclip"):
+            sp.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=True)
+            return True
+        if shutil.which("xsel"):
+            sp.run(["xsel", "--clipboard", "--input"], input=text.encode(), check=True)
+            return True
+    except sp.CalledProcessError:
+        return False
+    return False
+
+
 @cli.command()
 @click.argument("group_name", metavar="GROUP")
 @click.option("--format", "-f", "fmt", type=click.Choice(["markdown", "json"]),
-              default="markdown", help="Output format")
-@click.option("--global", "global_flag", is_flag=True, help="Export from global scope")
-def export(group_name: str, fmt: str, global_flag: bool) -> None:
+              default="json", help="Output format (default: json)")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Export from global scope")
+@click.option("--stdout", "use_stdout", is_flag=True, help="Print to stdout instead of clipboard")
+def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> None:
     """Export a group as markdown or JSON."""
     from mem import groups, storage
 
@@ -630,18 +687,27 @@ def export(group_name: str, fmt: str, global_flag: bool) -> None:
     )
 
     if fmt == "markdown":
-        click.echo(groups.export_markdown(group_name, grp))
+        output = groups.export_markdown(group_name, grp)
     else:
-        click.echo(groups.export_json(group_name, grp))
+        output = groups.export_json(group_name, grp)
+
+    if use_stdout:
+        click.echo(output)
+    else:
+        if _copy_to_clipboard(output):
+            err_console.print(f"Copied {fmt} to clipboard.")
+        else:
+            click.echo(output)
+            err_console.print("(no clipboard tool found — printed to stdout)")
 
 
 @cli.command(name="import")
 @click.argument("file", type=click.Path(exists=True))
 @click.option("--group", "-g", "group_name", required=True, help="Target group name")
 @click.option("--format", "-f", "fmt", type=click.Choice(["json", "markdown"]),
-              default="json", help="Input format")
+              default=None, help="Input format (auto-detected from extension if omitted)")
 @click.option("--global", "global_flag", is_flag=True, help="Import to global scope")
-def import_cmd(file: str, group_name: str, fmt: str, global_flag: bool) -> None:
+def import_cmd(file: str, group_name: str, fmt: str | None, global_flag: bool) -> None:
     """Import a group from a file."""
     from mem import groups, storage
     from mem.models import Group
@@ -651,6 +717,19 @@ def import_cmd(file: str, group_name: str, fmt: str, global_flag: bool) -> None:
     data = groups._load_group_file(scope_path)
 
     file_path = Path(file)
+
+    # Auto-detect format from extension if not specified
+    if fmt is None:
+        ext = file_path.suffix.lower()
+        if ext == ".json":
+            fmt = "json"
+        elif ext in (".md", ".markdown"):
+            fmt = "markdown"
+        else:
+            raise click.ClickException(
+                f"Cannot detect format from extension '{ext}'. Use --format to specify."
+            )
+
     if fmt == "json":
         commands = groups.import_from_json(file_path)
     else:
@@ -692,7 +771,7 @@ def group_grp() -> None:
 
 @group_grp.command(name="edit")
 @click.argument("name")
-@click.option("--global", "global_flag", is_flag=True, help="Edit global scope")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Edit global scope")
 def group_edit(name: str, global_flag: bool) -> None:
     """Open the data file in your editor."""
     import subprocess as sp
@@ -714,7 +793,7 @@ def group_edit(name: str, global_flag: bool) -> None:
 
 @group_grp.command(name="remove")
 @click.argument("name")
-@click.option("--global", "global_flag", is_flag=True, help="Remove from global scope")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Remove from global scope")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def group_remove(name: str, global_flag: bool, yes: bool) -> None:
     """Delete an entire group."""
@@ -749,7 +828,7 @@ def group_remove(name: str, global_flag: bool, yes: bool) -> None:
 @group_grp.command(name="rename")
 @click.argument("old")
 @click.argument("new")
-@click.option("--global", "global_flag", is_flag=True, help="Rename in global scope")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Rename in global scope")
 def group_rename(old: str, new: str, global_flag: bool) -> None:
     """Rename a group."""
     from mem import groups, storage
@@ -770,7 +849,7 @@ def group_rename(old: str, new: str, global_flag: bool) -> None:
 
 @group_grp.command(name="copy")
 @click.argument("name")
-@click.option("--global", "global_flag", is_flag=True, help="Copy to global scope")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Copy to global scope")
 @click.option("--repo", "repo_flag", is_flag=True, help="Copy to current repo scope")
 def group_copy(name: str, global_flag: bool, repo_flag: bool) -> None:
     """Copy a group between scopes."""
@@ -819,7 +898,7 @@ def saved_grp() -> None:
 
 
 @saved_grp.command(name="edit")
-@click.option("--global", "global_flag", is_flag=True, help="Edit global scope")
+@click.option("--global", "-g", "global_flag", is_flag=True, help="Edit global scope")
 def saved_edit(global_flag: bool) -> None:
     """Open the data file in your editor."""
     import subprocess as sp

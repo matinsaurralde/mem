@@ -246,8 +246,8 @@ def sync_all_patterns() -> tuple[int, int]:
 
     if not _apple_fm_available():
         print(
-            "warning: apple-fm-sdk not available. "
-            "Using heuristic patterns instead of AI extraction.",
+            "Tip: install AI support for smarter pattern extraction: "
+            "pip install cli-mem[ai]",
             file=sys.stderr,
         )
 

@@ -454,7 +454,7 @@ class TestSyncAllPatterns:
 
         assert new == 1
         captured = capsys.readouterr()
-        assert "apple-fm-sdk not available" in captured.err
+        assert "pip install cli-mem[ai]" in captured.err
 
     def test_sync_skips_tools_below_threshold(self, tmp_mem_dir):
         """Tools with <5 commands are skipped entirely."""
