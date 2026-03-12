@@ -108,9 +108,7 @@ class SessionTracker:
     def _save_state(self, state: SessionState) -> None:
         """Persist session state to disk."""
         storage.ensure_dirs()
-        self._state_path.write_text(
-            state.model_dump_json(), encoding="utf-8"
-        )
+        self._state_path.write_text(state.model_dump_json(), encoding="utf-8")
 
     def _clear_state(self) -> None:
         """Remove session state file."""
@@ -169,7 +167,8 @@ class SessionTracker:
         session = WorkSession(
             id=state.session_id,
             summary=summary,
-            started_at=state.last_command_ts - (len(state.commands) * 10),  # approximate
+            started_at=state.last_command_ts
+            - (len(state.commands) * 10),  # approximate
             ended_at=state.last_command_ts,
             dir="",  # not tracked in state for simplicity
             repo=state.last_repo,
@@ -186,6 +185,7 @@ class SessionTracker:
         try:
             import asyncio
             from mem.patterns import generate_session_summary
+
             result = asyncio.run(generate_session_summary(commands))
             if result:
                 return result

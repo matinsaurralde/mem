@@ -18,7 +18,9 @@ def tmp_mem_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Group constants are computed at import time from MEM_DIR, so patch them too
     monkeypatch.setattr(storage, "GROUPS_DIR", tmp_path / "groups")
     monkeypatch.setattr(storage, "GROUPS_REPOS_DIR", tmp_path / "groups" / "repos")
-    monkeypatch.setattr(storage, "GROUPS_GLOBAL_FILE", tmp_path / "groups" / "_global.json")
+    monkeypatch.setattr(
+        storage, "GROUPS_GLOBAL_FILE", tmp_path / "groups" / "_global.json"
+    )
     return tmp_path
 
 

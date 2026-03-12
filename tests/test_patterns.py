@@ -44,6 +44,7 @@ def _build_generalize_map(mapping: dict[str, str]):
     Matches the "Command: ..." line at the end of the prompt to avoid
     false matches against example commands in the prompt template.
     """
+
     async def _respond(prompt: str, generating=None):
         # Extract the actual command from the "Command: <cmd>" line
         raw_cmd = None
@@ -57,12 +58,14 @@ def _build_generalize_map(mapping: dict[str, str]):
 
         # Fallback: return the raw command unchanged
         return _make_mock_generalized(raw_cmd or "unknown")
+
     return _respond
 
 
 @dataclass
 class MockSession:
     """Fake LanguageModelSession that delegates to respond_fn."""
+
     respond_fn: object
 
     async def respond(self, prompt: str, generating=None):
@@ -89,7 +92,9 @@ class TestHeuristicFallback:
             "kubectl describe pod api-7f9b",
         ]
         for cmd in cmds:
-            storage.append_command(make_command(command=cmd, ts=now, repo="/Users/test/projects/infra"))
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/infra")
+            )
 
         with patch.object(patterns, "_apple_fm_available", return_value=False):
             patterns.run_pattern_extraction("kubectl")
@@ -120,7 +125,9 @@ class TestHeuristicFallback:
             "git push origin main",
         ]
         for cmd in cmds:
-            storage.append_command(make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp"))
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp")
+            )
 
         with patch.object(patterns, "_apple_fm_available", return_value=False):
             patterns.run_pattern_extraction("git")
@@ -143,7 +150,9 @@ class TestHeuristicFallback:
         """Tools with fewer than 5 commands are skipped."""
         now = int(time.time())
         for cmd in ["npm install", "npm test"]:
-            storage.append_command(make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp"))
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp")
+            )
 
         patterns.run_pattern_extraction("npm")
         result = storage.read_patterns("npm")
@@ -154,7 +163,11 @@ class TestHeuristicFallback:
         now = int(time.time())
         for i in range(20):
             storage.append_command(
-                make_command(command=f"tool subcommand-{i}", ts=now, repo="/Users/test/projects/myapp")
+                make_command(
+                    command=f"tool subcommand-{i}",
+                    ts=now,
+                    repo="/Users/test/projects/myapp",
+                )
             )
 
         with patch.object(patterns, "_apple_fm_available", return_value=False):
@@ -185,7 +198,9 @@ class TestAIExtraction:
             "kubectl describe pod api-7f9b",
         ]
         for cmd in cmds:
-            storage.append_command(make_command(command=cmd, ts=now, repo="/Users/test/projects/infra"))
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/infra")
+            )
 
         generalize_map = {
             "kubectl get pods": "kubectl get <resource>",
@@ -230,7 +245,9 @@ class TestAIExtraction:
             "git commit -m 'add feature'",
         ]
         for cmd in cmds:
-            storage.append_command(make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp"))
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp")
+            )
 
         generalize_map = {
             "git checkout main": "git checkout <branch>",
@@ -273,7 +290,9 @@ class TestAIExtraction:
             "docker ps -a",
         ]
         for cmd in cmds:
-            storage.append_command(make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp"))
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp")
+            )
 
         generalize_map = {
             "docker build -t myapp:latest .": "docker build -t <image>:<tag> .",
@@ -314,7 +333,9 @@ class TestAIExtraction:
             "terraform destroy",
         ]
         for cmd in cmds:
-            storage.append_command(make_command(command=cmd, ts=now, repo="/Users/test/projects/infra"))
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/infra")
+            )
 
         # AI keeps no-arg subcommands as-is (nothing to generalize)
         generalize_map = {
@@ -446,7 +467,11 @@ class TestSyncAllPatterns:
         now = int(time.time())
         for i in range(6):
             storage.append_command(
-                make_command(command=f"make target-{i}", ts=now, repo="/Users/test/projects/myapp")
+                make_command(
+                    command=f"make target-{i}",
+                    ts=now,
+                    repo="/Users/test/projects/myapp",
+                )
             )
 
         with patch.object(patterns, "_apple_fm_available", return_value=False):
@@ -473,15 +498,21 @@ class TestSyncAllPatterns:
         now = int(time.time())
         for i in range(6):
             storage.append_command(
-                make_command(command=f"tool-a subcmd-{i}", ts=now, repo="/Users/test/projects/a")
+                make_command(
+                    command=f"tool-a subcmd-{i}", ts=now, repo="/Users/test/projects/a"
+                )
             )
             storage.append_command(
-                make_command(command=f"tool-b subcmd-{i}", ts=now, repo="/Users/test/projects/b")
+                make_command(
+                    command=f"tool-b subcmd-{i}", ts=now, repo="/Users/test/projects/b"
+                )
             )
         # tool-c has too few
         for i in range(3):
             storage.append_command(
-                make_command(command=f"tool-c subcmd-{i}", ts=now, repo="/Users/test/projects/c")
+                make_command(
+                    command=f"tool-c subcmd-{i}", ts=now, repo="/Users/test/projects/c"
+                )
             )
 
         with patch.object(patterns, "_apple_fm_available", return_value=False):
@@ -518,13 +549,15 @@ class TestSessionSummary:
             patch.object(patterns, "_apple_fm_available", return_value=True),
             patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
         ):
-            result = await patterns.generate_session_summary([
-                "git checkout fix-auth",
-                "pytest tests/test_auth.py",
-                "vim src/auth.py",
-                "pytest tests/test_auth.py",
-                "git commit -m 'fix token refresh'",
-            ])
+            result = await patterns.generate_session_summary(
+                [
+                    "git checkout fix-auth",
+                    "pytest tests/test_auth.py",
+                    "vim src/auth.py",
+                    "pytest tests/test_auth.py",
+                    "git commit -m 'fix token refresh'",
+                ]
+            )
 
         assert result == "Debugging API authentication flow"
         mock_session.respond.assert_called_once()

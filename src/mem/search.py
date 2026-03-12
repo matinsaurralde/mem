@@ -108,7 +108,9 @@ def search(
     # Also read other repo files if current_repo didn't cover everything
     repos_dir = storage.MEM_DIR / "repos"
     if repos_dir.exists():
-        current_sanitized = storage.sanitize_repo_name(current_repo) if current_repo else None
+        current_sanitized = (
+            storage.sanitize_repo_name(current_repo) if current_repo else None
+        )
         for path in sorted(repos_dir.glob("*.jsonl")):
             repo_name = path.stem
             if repo_name == current_sanitized or repo_name == "_global":

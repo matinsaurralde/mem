@@ -68,6 +68,7 @@ def _apple_fm_available() -> bool:
     """Check if Apple Foundation Models SDK is available."""
     try:
         import apple_fm_sdk  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -90,9 +91,7 @@ def _get_generable_types() -> type:
     return GeneralizedCommand
 
 
-async def _generalize_commands(
-    tool: str, unique_commands: list[str]
-) -> dict[str, str]:
+async def _generalize_commands(tool: str, unique_commands: list[str]) -> dict[str, str]:
     """Generalize each unique command via Apple FM guided generation.
 
     Returns a mapping from concrete command -> generalized pattern.
