@@ -278,17 +278,7 @@ async def _detect_credentials_async(cmd: str) -> list[tuple[str, str, str]]:
     """
     import apple_fm_sdk as fm
 
-    @fm.generable("Detected credential in a shell command")
-    class CredentialDetection:
-        original_value: str = fm.guide(
-            "The literal sensitive value found in the command"
-        )
-        suggested_name: str = fm.guide(
-            "A descriptive variable name like ACME_API_TOKEN"
-        )
-        reason: str = fm.guide(
-            "Why this looks like a credential (e.g., 'JWT token', 'API key')"
-        )
+    from mem._generable import CredentialList
 
     session = fm.LanguageModelSession()
     prompt = (
@@ -299,10 +289,8 @@ async def _detect_credentials_async(cmd: str) -> list[tuple[str, str, str]]:
         f"Command: {cmd}"
     )
 
-    result = await session.respond(prompt, generating=CredentialDetection)
-    if isinstance(result, list):
-        return [(c.original_value, c.suggested_name, c.reason) for c in result]
-    return [(result.original_value, result.suggested_name, result.reason)]
+    result = await session.respond(prompt, generating=CredentialList)
+    return [(c.original_value, c.suggested_name, c.reason) for c in result.credentials]
 
 
 def detect_credentials(cmd: str) -> list[tuple[str, str, str]]:
