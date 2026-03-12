@@ -1858,3 +1858,110 @@ class TestDeduplicateDetections:
         detections = [(token, "AcmeApiToken", "JWT")]
         result = _deduplicate_detections(detections, cmd)
         assert result[0][1] == "ACME_API_TOKEN"
+
+    def test_extracts_value_from_flag_syntax(self):
+        """Bug A: AI returns '--password=secret' instead of just 'secret'."""
+        from mem.variables import _deduplicate_detections
+
+        cmd = "mysql -u admin --password=S3cretP@ssw0rd123 mydb"
+        detections = [("--password=S3cretP@ssw0rd123", "DB_PASSWORD", "password")]
+        result = _deduplicate_detections(detections, cmd)
+        assert len(result) == 1
+        assert result[0][0] == "S3cretP@ssw0rd123"
+
+    def test_extracts_value_from_env_var_syntax(self):
+        """Bug A: AI returns 'GITHUB_TOKEN=ghp_abc...' instead of just the token."""
+        from mem.variables import _deduplicate_detections
+
+        token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+        cmd = f"GITHUB_TOKEN={token} gh pr create"
+        detections = [(f"GITHUB_TOKEN={token}", "GITHUB_TOKEN", "API token")]
+        result = _deduplicate_detections(detections, cmd)
+        assert len(result) == 1
+        assert result[0][0] == token
+
+    def test_filters_hostnames(self):
+        """Bug C: hostnames like registry.ghcr.io are not credentials."""
+        from mem.variables import _deduplicate_detections
+
+        cmd = "docker login -u deploy -p secret123456789 registry.ghcr.io"
+        detections = [
+            ("secret123456789", "REGISTRY_TOKEN", "token"),
+            ("registry.ghcr.io", "REGISTRY_URL", "hostname"),
+        ]
+        result = _deduplicate_detections(detections, cmd)
+        assert len(result) == 1
+        assert result[0][0] == "secret123456789"
+
+    def test_filters_ip_addresses(self):
+        from mem.variables import _deduplicate_detections
+
+        cmd = "redis-cli -h 10.0.1.50 -a MyR3d1sPassword123 PING"
+        detections = [
+            ("MyR3d1sPassword123", "REDIS_PASSWORD", "password"),
+            ("10.0.1.50", "REDIS_HOST", "IP address"),
+        ]
+        result = _deduplicate_detections(detections, cmd)
+        assert len(result) == 1
+        assert result[0][0] == "MyR3d1sPassword123"
+
+
+class TestExtractValueFromSyntax:
+    """Unit tests for _extract_value_from_syntax."""
+
+    def test_cli_flag_long(self):
+        from mem.variables import _extract_value_from_syntax
+
+        cmd = "mysql --password=secret123 mydb"
+        assert _extract_value_from_syntax("--password=secret123", cmd) == "secret123"
+
+    def test_cli_flag_short(self):
+        from mem.variables import _extract_value_from_syntax
+
+        cmd = "tool -p=myvalue123 arg"
+        assert _extract_value_from_syntax("-p=myvalue123", cmd) == "myvalue123"
+
+    def test_env_var_assignment(self):
+        from mem.variables import _extract_value_from_syntax
+
+        cmd = "GITHUB_TOKEN=ghp_abc123 gh pr create"
+        assert _extract_value_from_syntax("GITHUB_TOKEN=ghp_abc123", cmd) == "ghp_abc123"
+
+    def test_plain_value_unchanged(self):
+        from mem.variables import _extract_value_from_syntax
+
+        cmd = "curl -H 'Bearer eyJtoken'"
+        assert _extract_value_from_syntax("eyJtoken", cmd) == "eyJtoken"
+
+    def test_value_not_in_cmd_returns_original(self):
+        from mem.variables import _extract_value_from_syntax
+
+        cmd = "echo hello"
+        assert _extract_value_from_syntax("--flag=nothere", cmd) == "--flag=nothere"
+
+
+class TestLooksLikeHostname:
+    def test_domain(self):
+        from mem.variables import _looks_like_hostname
+
+        assert _looks_like_hostname("registry.ghcr.io") is True
+
+    def test_subdomain(self):
+        from mem.variables import _looks_like_hostname
+
+        assert _looks_like_hostname("api.prod.internal.company.com") is True
+
+    def test_ip_address(self):
+        from mem.variables import _looks_like_hostname
+
+        assert _looks_like_hostname("10.0.1.50") is True
+
+    def test_token_not_hostname(self):
+        from mem.variables import _looks_like_hostname
+
+        assert _looks_like_hostname("eyJhbGciOiJIUzI1NiJ9") is False
+
+    def test_password_not_hostname(self):
+        from mem.variables import _looks_like_hostname
+
+        assert _looks_like_hostname("S3cretP@ssw0rd") is False

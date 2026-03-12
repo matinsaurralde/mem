@@ -313,6 +313,41 @@ def _normalize_var_name(name: str) -> str:
     return result.strip("_")
 
 
+def _extract_value_from_syntax(original_value: str, cmd: str) -> str:
+    """Extract the actual secret value from flag=value or KEY=value syntax.
+
+    The AI sometimes returns 'GITHUB_TOKEN=ghp_abc...' or '--password=secret'
+    as the original_value. We need just the secret part so that .replace()
+    doesn't destroy the command structure.
+    """
+    # Pattern: --flag=value or -f=value (CLI flag syntax)
+    flag_match = re.match(r"^--?[a-zA-Z][\w-]*=(.+)$", original_value)
+    if flag_match:
+        value = flag_match.group(1)
+        if value in cmd:
+            return value
+
+    # Pattern: ENV_VAR=value (environment variable assignment)
+    env_match = re.match(r"^[A-Z][A-Z0-9_]+=(.+)$", original_value)
+    if env_match:
+        value = env_match.group(1)
+        if value in cmd:
+            return value
+
+    return original_value
+
+
+def _looks_like_hostname(value: str) -> bool:
+    """Check if a value looks like a hostname or domain, not a credential."""
+    # Hostnames: words joined by dots, no special chars typical of secrets
+    if re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}$", value):
+        return True
+    # IP addresses
+    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", value):
+        return True
+    return False
+
+
 def _deduplicate_detections(
     detections: list[tuple[str, str, str]],
     cmd: str,
@@ -325,30 +360,39 @@ def _deduplicate_detections(
     - Very short values (< 8 chars, not plausible secrets)
     - Duplicate original_value entries
     - Values that are substrings of other detected values
+
+    Also extracts the actual secret from flag=value syntax when the AI
+    returns the whole expression as original_value.
     """
     result: list[tuple[str, str, str]] = []
     seen_values: set[str] = set()
 
     for original_value, suggested_name, reason in detections:
+        # Extract actual value from flag=value or ENV=value syntax
+        value = _extract_value_from_syntax(original_value, cmd)
+
         # Skip hallucinated values not in the command
-        if original_value not in cmd:
+        if value not in cmd:
             continue
         # Skip URLs
-        if original_value.startswith(("http://", "https://")):
+        if value.startswith(("http://", "https://")):
+            continue
+        # Skip hostnames and IP addresses
+        if _looks_like_hostname(value):
             continue
         # Skip very short values
-        if len(original_value) < 8:
+        if len(value) < 8:
             continue
         # Skip duplicates
-        if original_value in seen_values:
+        if value in seen_values:
             continue
         # Normalize suggested name to UPPER_SNAKE_CASE
         normalized = _normalize_var_name(suggested_name)
         if not re.match(r"^[A-Z][A-Z0-9_]+$", normalized):
             continue
 
-        seen_values.add(original_value)
-        result.append((original_value, normalized, reason))
+        seen_values.add(value)
+        result.append((value, normalized, reason))
 
     # Remove values that are substrings of other detected values
     filtered: list[tuple[str, str, str]] = []
@@ -387,17 +431,26 @@ async def _detect_credentials_async(cmd: str) -> list[tuple[str, str, str]]:
     prompt = (
         "Analyze this shell command and find ONLY hardcoded sensitive values "
         "that should be replaced with environment variables.\n\n"
+        "RULES FOR original_value:\n"
+        "- Return ONLY the literal secret value, not the flag or key name.\n"
+        "- For --password=mysecret, return 'mysecret' not '--password=mysecret'.\n"
+        "- For GITHUB_TOKEN=ghp_abc, return 'ghp_abc' not 'GITHUB_TOKEN=ghp_abc'.\n"
+        "- For postgres://user:pass@host, return 'pass' not the full URL.\n\n"
+        "RULES FOR suggested_name:\n"
+        "- Derive the name from the service or tool in the command.\n"
+        "- Examples: STRIPE_API_KEY, GITHUB_TOKEN, REDIS_PASSWORD, DB_PASSWORD.\n"
+        "- NEVER use generic prefixes like ACME_.\n\n"
         "ONLY flag these types of values:\n"
-        "- API tokens or keys (long alphanumeric/base64 strings like eyJhbG..., sk-...)\n"
-        "- Passwords passed inline (after --password, -p, etc.)\n"
+        "- API tokens or keys (long alphanumeric/base64 strings)\n"
+        "- Passwords passed inline (after --password, -p, -a, etc.)\n"
         "- Bearer tokens in Authorization headers\n"
-        "- Database connection strings with embedded passwords\n\n"
+        "- Embedded passwords in connection strings\n\n"
         "DO NOT flag:\n"
-        "- URLs, hostnames, or IP addresses\n"
-        "- The command name or subcommands\n"
+        "- URLs, hostnames, IP addresses, or domain names\n"
+        "- The command name, subcommands, or usernames\n"
         "- Short strings, regular arguments, or file paths\n"
-        "- Port numbers or known constants\n\n"
-        "If the command contains NO credentials, return an EMPTY list with no entries.\n\n"
+        "- Port numbers, known constants, or registry addresses\n\n"
+        "If NO credentials found, return an EMPTY list.\n\n"
         f"Command: {cmd}"
     )
 
