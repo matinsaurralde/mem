@@ -409,13 +409,20 @@ def save(
         command = groups.get_last_captured_command(repo)
 
     # Parse --var flags into (name, default) tuples
+    import re as _re
+
     explicit_vars: list[tuple[str, str | None]] = []
     for v in var_flags:
         if "=" in v:
             name, default = v.split("=", 1)
-            explicit_vars.append((name, default))
         else:
-            explicit_vars.append((v, None))
+            name, default = v, None
+        if not _re.match(r"^[A-Z][A-Z0-9_]+$", name):
+            raise click.ClickException(
+                f"Invalid variable name '{name}'. "
+                "Use uppercase letters, digits, and underscores (min 2 chars)."
+            )
+        explicit_vars.append((name, default))
 
     # AI credential detection (only if interactive and SDK available)
     if _is_interactive():

@@ -171,8 +171,11 @@ def resolve_variables(
             resolved[name] = (stored_vars[name].value, "store")
             continue
 
-        # Priority 4: default value
+        # Priority 4: default value (resolve immediately when prompts disabled)
         if var.default is not None:
+            if not allow_prompt:
+                resolved[name] = (var.default, "default")
+                continue
             needs_prompt.append(var)
             continue
 
@@ -181,8 +184,6 @@ def resolve_variables(
 
     # Prompt for all unresolved variables upfront
     for var in needs_prompt:
-        if not allow_prompt:
-            continue  # Will be caught as missing by caller
         value = prompt_fn(f"  ${var.name}", default=var.default or "")
         # If user accepted default, use default
         if value == "" and var.default is not None:
