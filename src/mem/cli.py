@@ -420,25 +420,37 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
     if global_flag and repo_flag:
         raise click.ClickException("Cannot use --global and --repo together.")
 
-    if repo_flag:
-        repo = _current_repo()
-        if not repo:
-            raise click.ClickException("Not in a git repository. Cannot use --repo.")
+    repo = _current_repo()
+
+    if repo_flag and not repo:
+        raise click.ClickException("Not in a git repository. Cannot use --repo.")
 
     global_path = storage.GROUPS_GLOBAL_FILE
     repo_path = None
 
-    if not global_flag:
-        repo = _current_repo()
-        if repo:
-            sanitized = storage.sanitize_repo_name(repo)
-            repo_path = storage.group_file_path(sanitized)
+    if not global_flag and repo:
+        sanitized = storage.sanitize_repo_name(repo)
+        repo_path = storage.group_file_path(sanitized)
 
     # Show a specific group's commands
     if group_name is not None:
-        grp, scope_label, _file_path, shadows = groups.resolve_group(
-            group_name, repo_path, global_path, force_global=global_flag,
-        )
+        if repo_flag:
+            # --repo: only look in repo scope, never fall back to global
+            if repo_path is None:
+                raise click.ClickException(f"Group '{group_name}' not found in repo scope.")
+            repo_data = groups._load_group_file(repo_path)
+            if group_name not in repo_data.groups:
+                raise click.ClickException(f"Group '{group_name}' not found in repo scope.")
+            grp = repo_data.groups[group_name]
+            scope_label = repo or repo_path.stem
+            shadows = set()
+        else:
+            grp, scope_label, _file_path, shadows = groups.resolve_group(
+                group_name, repo_path, global_path, force_global=global_flag,
+            )
+            # Use real repo path for display if scope is not global
+            if scope_label != "global" and repo:
+                scope_label = repo
 
         if as_json:
             click.echo(groups.export_json(group_name, grp))
@@ -458,11 +470,14 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
 
     result = groups.list_all(repo_path, global_path)
 
+    # Use real repo path for display instead of sanitized filename
+    repo_display = repo if not global_flag and repo_path else result["repo_name"]
+
     if as_json:
         output: dict = {}
         if result["repo_data"]:
             output["repo"] = {
-                "name": result["repo_name"],
+                "name": repo_display,
                 "saved": [s.model_dump() for s in result["repo_data"].saved],
                 "groups": {n: g.model_dump() for n, g in result["repo_data"].groups.items()},
             }
@@ -481,7 +496,7 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
     # Repo saved commands
     if result["repo_data"] and result["repo_data"].saved:
         has_data = True
-        console.print(f"\n● Saved commands in {result['repo_name']}")
+        console.print(f"\n● Saved commands in {repo_display}")
         for s in result["repo_data"].saved:
             comment_str = f"   # {s.comment}" if s.comment else ""
             console.print(f"  {s.cmd}{comment_str}")
@@ -489,7 +504,7 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
     # Repo groups
     if result["repo_data"] and result["repo_data"].groups:
         has_data = True
-        console.print(f"\n● Groups in {result['repo_name']}")
+        console.print(f"\n● Groups in {repo_display}")
         for name, grp in result["repo_data"].groups.items():
             count = len(grp.commands)
             desc = f'  "{grp.description}"' if grp.description else ""
@@ -633,17 +648,20 @@ def _copy_to_clipboard(text: str) -> bool:
     import shutil
     import subprocess as sp
 
-    # macOS
-    if shutil.which("pbcopy"):
-        sp.run(["pbcopy"], input=text.encode(), check=True)
-        return True
-    # Linux (X11)
-    if shutil.which("xclip"):
-        sp.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=True)
-        return True
-    if shutil.which("xsel"):
-        sp.run(["xsel", "--clipboard", "--input"], input=text.encode(), check=True)
-        return True
+    try:
+        # macOS
+        if shutil.which("pbcopy"):
+            sp.run(["pbcopy"], input=text.encode(), check=True)
+            return True
+        # Linux (X11)
+        if shutil.which("xclip"):
+            sp.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=True)
+            return True
+        if shutil.which("xsel"):
+            sp.run(["xsel", "--clipboard", "--input"], input=text.encode(), check=True)
+            return True
+    except sp.CalledProcessError:
+        return False
     return False
 
 

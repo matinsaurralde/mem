@@ -1531,3 +1531,82 @@ class TestImportAutoDetect:
         )
         assert result.exit_code == 0
         assert "Imported 1 commands" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Review fix: clipboard failure falls back to stdout
+# ---------------------------------------------------------------------------
+
+
+class TestClipboardFailure:
+    def test_clipboard_crash_falls_back(self, tmp_mem_dir: Path):
+        """If clipboard tool exists but fails, fall back to stdout."""
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo hi")])}),
+        )
+        runner = CliRunner(mix_stderr=False)
+        # _copy_to_clipboard returns False when CalledProcessError is caught
+        with patch("mem.cli._copy_to_clipboard", return_value=False):
+            result = runner.invoke(cli, ["export", "grp", "--global"])
+        assert result.exit_code == 0
+        assert "no clipboard tool found" in result.stderr
+        # stdout should contain valid JSON
+        data = json.loads(result.output)
+        assert "grp" in data
+
+
+# ---------------------------------------------------------------------------
+# Review fix: --repo with group_name restricts to repo scope
+# ---------------------------------------------------------------------------
+
+
+class TestListRepoGroupScope:
+    def test_repo_flag_with_group_does_not_fallback_to_global(self, tmp_mem_dir: Path):
+        """mem list <group> --repo should NOT show a global group."""
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"deploy": Group(commands=[GroupCommand(cmd="echo global")])}),
+        )
+        runner = CliRunner()
+        with _mock_repo():
+            result = runner.invoke(cli, ["list", "deploy", "--repo"])
+        assert result.exit_code != 0
+        assert "not found in repo scope" in result.output
+
+    def test_repo_flag_with_group_shows_repo_group(self, tmp_mem_dir: Path):
+        """mem list <group> --repo shows the repo group."""
+        repo_name = storage.sanitize_repo_name(FAKE_REPO)
+        repo_path = storage.group_file_path(repo_name)
+        storage.write_group_file(
+            repo_path,
+            GroupFile(groups={"deploy": Group(commands=[GroupCommand(cmd="echo repo")])}),
+        )
+        runner = CliRunner()
+        with _mock_repo():
+            result = runner.invoke(cli, ["list", "deploy", "--repo"])
+        assert result.exit_code == 0
+        assert "echo repo" in result.output
+
+
+# ---------------------------------------------------------------------------
+# UX fix: repo display uses real path, not sanitized name
+# ---------------------------------------------------------------------------
+
+
+class TestRepoDisplayPath:
+    def test_list_shows_real_repo_path(self, tmp_mem_dir: Path):
+        """mem list should show /Users/test/projects/myapp, not Users-test-projects-myapp."""
+        repo_name = storage.sanitize_repo_name(FAKE_REPO)
+        repo_path = storage.group_file_path(repo_name)
+        storage.write_group_file(
+            repo_path,
+            GroupFile(saved=[SavedCommand(cmd="echo x")]),
+        )
+        runner = CliRunner()
+        with _mock_repo():
+            result = runner.invoke(cli, ["list"])
+        assert result.exit_code == 0
+        assert FAKE_REPO in result.output
+        # Sanitized name should NOT appear
+        assert repo_name not in result.output
