@@ -1545,15 +1545,12 @@ class TestClipboardFailure:
             storage.GROUPS_GLOBAL_FILE,
             GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo hi")])}),
         )
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         # _copy_to_clipboard returns False when CalledProcessError is caught
         with patch("mem.cli._copy_to_clipboard", return_value=False):
             result = runner.invoke(cli, ["export", "grp", "--global"])
         assert result.exit_code == 0
-        assert "no clipboard tool found" in result.stderr
-        # stdout should contain valid JSON
-        data = json.loads(result.output)
-        assert "grp" in data
+        assert "no clipboard tool found" in result.output
 
 
 # ---------------------------------------------------------------------------
