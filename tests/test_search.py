@@ -14,8 +14,14 @@ class TestScoring:
         now = int(time.time())
         # Run "git status" 5 times, "git log" once
         for _ in range(5):
-            storage.append_command(make_command(command="git status", ts=now, repo="/Users/test/projects/myapp"))
-        storage.append_command(make_command(command="git log", ts=now, repo="/Users/test/projects/myapp"))
+            storage.append_command(
+                make_command(
+                    command="git status", ts=now, repo="/Users/test/projects/myapp"
+                )
+            )
+        storage.append_command(
+            make_command(command="git log", ts=now, repo="/Users/test/projects/myapp")
+        )
 
         results = search.search("git", current_repo="/Users/test/projects/myapp")
         commands = [cmd.command for cmd, _ in results]
@@ -25,8 +31,16 @@ class TestScoring:
         """Recent commands should rank higher than old ones (same frequency)."""
         now = int(time.time())
         old = now - (30 * 86400)  # 30 days ago
-        storage.append_command(make_command(command="docker build .", ts=old, repo="/Users/test/projects/myapp"))
-        storage.append_command(make_command(command="docker compose up", ts=now, repo="/Users/test/projects/myapp"))
+        storage.append_command(
+            make_command(
+                command="docker build .", ts=old, repo="/Users/test/projects/myapp"
+            )
+        )
+        storage.append_command(
+            make_command(
+                command="docker compose up", ts=now, repo="/Users/test/projects/myapp"
+            )
+        )
 
         results = search.search("docker", current_repo="/Users/test/projects/myapp")
         commands = [cmd.command for cmd, _ in results]
@@ -35,8 +49,14 @@ class TestScoring:
     def test_context_boost_for_same_repo(self, tmp_mem_dir):
         """Commands from the current repo should rank higher."""
         now = int(time.time())
-        storage.append_command(make_command(command="make test", ts=now, repo="/Users/test/projects/other-repo"))
-        storage.append_command(make_command(command="make test", ts=now, repo="/Users/test/projects/myapp"))
+        storage.append_command(
+            make_command(
+                command="make test", ts=now, repo="/Users/test/projects/other-repo"
+            )
+        )
+        storage.append_command(
+            make_command(command="make test", ts=now, repo="/Users/test/projects/myapp")
+        )
 
         results = search.search("make", current_repo="/Users/test/projects/myapp")
         # The myapp version should score higher due to context boost
@@ -47,8 +67,16 @@ class TestScoring:
     def test_deduplication_keeps_highest_score(self, tmp_mem_dir):
         """Same command string should appear only once, with highest score."""
         now = int(time.time())
-        storage.append_command(make_command(command="npm run dev", ts=now, repo="/Users/test/projects/myapp"))
-        storage.append_command(make_command(command="npm run dev", ts=now - 86400, repo="/Users/test/projects/myapp"))
+        storage.append_command(
+            make_command(
+                command="npm run dev", ts=now, repo="/Users/test/projects/myapp"
+            )
+        )
+        storage.append_command(
+            make_command(
+                command="npm run dev", ts=now - 86400, repo="/Users/test/projects/myapp"
+            )
+        )
 
         results = search.search("npm", current_repo="/Users/test/projects/myapp")
         commands = [cmd.command for cmd, _ in results]
@@ -56,14 +84,20 @@ class TestScoring:
 
     def test_empty_query_returns_empty(self, tmp_mem_dir):
         """Empty query should return no results."""
-        storage.append_command(make_command(command="ls", repo="/Users/test/projects/myapp"))
+        storage.append_command(
+            make_command(command="ls", repo="/Users/test/projects/myapp")
+        )
         results = search.search("", current_repo="/Users/test/projects/myapp")
         assert results == []
 
     def test_no_matches_returns_empty(self, tmp_mem_dir):
         """Query with no matches returns empty list, not an error."""
-        storage.append_command(make_command(command="git status", repo="/Users/test/projects/myapp"))
-        results = search.search("nonexistent-tool", current_repo="/Users/test/projects/myapp")
+        storage.append_command(
+            make_command(command="git status", repo="/Users/test/projects/myapp")
+        )
+        results = search.search(
+            "nonexistent-tool", current_repo="/Users/test/projects/myapp"
+        )
         assert results == []
 
     def test_global_fallback_when_no_repo(self, tmp_mem_dir):

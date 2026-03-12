@@ -23,7 +23,8 @@ import click
 
 from mem import storage
 from mem.capture import get_git_repo
-from mem.models import Group, GroupCommand, GroupFile, SavedCommand
+from mem.models import Group, GroupCommand, GroupFile, SavedCommand, VarDeclaration
+from mem.variables import merge_var_declarations, parse_variables, process_escapes
 
 GROUP_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
 
@@ -73,7 +74,8 @@ def save_command(
     comment: str | None = None,
     group_name: str | None = None,
     description_callback: Any = None,
-) -> bool:
+    explicit_vars: list[tuple[str, str | None]] | None = None,
+) -> tuple[bool, list[VarDeclaration]]:
     """Save a command to the saved list or a named group.
 
     Returns True if saved, False if duplicate (same cmd string).
@@ -82,11 +84,25 @@ def save_command(
     """
     data = _load_group_file(scope_path)
 
+    # Detect $VAR_NAME tokens BEFORE escape processing — the regex
+    # negative lookbehind (?<!\$) correctly skips $$VAR in the original text.
+    # If we escaped first, $$VAR would become $VAR and be falsely detected.
+    detected_names = parse_variables(cmd)
+
+    # Process escape sequences ($$VAR -> $VAR in stored text)
+    stored_cmd = process_escapes(cmd)
+
+    # Merge detected vars with explicit --var declarations
+    var_list = merge_var_declarations(detected_names, explicit_vars or [])
+    vars_field = var_list if var_list else None
+
     if group_name is None:
         # Save to the flat saved list
-        if any(s.cmd == cmd for s in data.saved):
-            return False
-        data.saved.append(SavedCommand(cmd=cmd, comment=comment))
+        if any(s.cmd == stored_cmd for s in data.saved):
+            return False, []
+        data.saved.append(
+            SavedCommand(cmd=stored_cmd, comment=comment, vars=vars_field)
+        )
     else:
         validate_group_name(group_name)
         if group_name not in data.groups:
@@ -96,12 +112,14 @@ def save_command(
             data.groups[group_name] = Group(description=desc, commands=[])
 
         group = data.groups[group_name]
-        if any(c.cmd == cmd for c in group.commands):
-            return False
-        group.commands.append(GroupCommand(cmd=cmd, comment=comment))
+        if any(c.cmd == stored_cmd for c in group.commands):
+            return False, []
+        group.commands.append(
+            GroupCommand(cmd=stored_cmd, comment=comment, vars=vars_field)
+        )
 
     storage.write_group_file(scope_path, data)
-    return True
+    return True, var_list
 
 
 def get_last_captured_command(repo: str | None) -> str:
@@ -252,9 +270,7 @@ def import_from_json(file_path: Path) -> list[GroupCommand]:
     try:
         return [GroupCommand(cmd=c["cmd"], comment=c.get("comment")) for c in cmds]
     except (KeyError, TypeError) as e:
-        raise click.ClickException(
-            f"Malformed command entry in {file_path}: {e}"
-        )
+        raise click.ClickException(f"Malformed command entry in {file_path}: {e}")
 
 
 def import_from_markdown(file_path: Path) -> list[GroupCommand]:

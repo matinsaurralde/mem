@@ -86,11 +86,32 @@ class SessionState(BaseModel):
 # --- Named Groups (active memory) ---
 
 
+class VarDeclaration(BaseModel):
+    """A variable placeholder in a saved command."""
+
+    name: str = Field(min_length=2, pattern=r"^[A-Z][A-Z0-9_]+$")
+    default: str | None = None
+
+
+class StoredVariable(BaseModel):
+    """A persistent variable value managed by mem vars."""
+
+    value: str
+    last_used: int = 0
+
+
+class VarsFile(BaseModel):
+    """On-disk representation of the persistent variable store."""
+
+    vars: dict[str, StoredVariable] = {}
+
+
 class SavedCommand(BaseModel):
     """A single bookmarked command in the saved list."""
 
     cmd: str = Field(min_length=1)
     comment: str | None = None
+    vars: list[VarDeclaration] | None = None
 
 
 class GroupCommand(BaseModel):
@@ -98,6 +119,7 @@ class GroupCommand(BaseModel):
 
     cmd: str = Field(min_length=1)
     comment: str | None = None
+    vars: list[VarDeclaration] | None = None
 
 
 class Group(BaseModel):

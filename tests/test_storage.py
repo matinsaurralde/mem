@@ -12,7 +12,12 @@ from mem.models import CommandPattern, PatternFile
 class TestAppendAndRead:
     def test_append_and_read_command(self, tmp_mem_dir):
         """Append a command, read it back, verify all fields match."""
-        cmd = make_command(command="docker compose up -d", repo="/Users/test/projects/myapp", exit_code=0, duration_ms=3200)
+        cmd = make_command(
+            command="docker compose up -d",
+            repo="/Users/test/projects/myapp",
+            exit_code=0,
+            duration_ms=3200,
+        )
         storage.append_command(cmd)
 
         results = list(storage.read_commands("Users-test-projects-myapp"))
@@ -58,7 +63,11 @@ class TestPatterns:
         pf = PatternFile(
             tool="kubectl",
             patterns=[
-                CommandPattern(pattern="kubectl get <resource>", example="kubectl get pods", frequency=42),
+                CommandPattern(
+                    pattern="kubectl get <resource>",
+                    example="kubectl get pods",
+                    frequency=42,
+                ),
             ],
             last_updated=int(time.time()),
         )
@@ -84,8 +93,12 @@ class TestPatterns:
 class TestReadAll:
     def test_read_all_commands(self, tmp_mem_dir):
         """read_all_commands iterates across all repo files."""
-        storage.append_command(make_command(command="cmd1", repo="/Users/test/projects/repo-a"))
-        storage.append_command(make_command(command="cmd2", repo="/Users/test/projects/repo-b"))
+        storage.append_command(
+            make_command(command="cmd1", repo="/Users/test/projects/repo-a")
+        )
+        storage.append_command(
+            make_command(command="cmd2", repo="/Users/test/projects/repo-b")
+        )
         storage.append_command(make_command(command="cmd3", repo=None))
 
         results = list(storage.read_all_commands())

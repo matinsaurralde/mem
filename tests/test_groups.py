@@ -163,13 +163,13 @@ class TestValidateGroupName:
     @pytest.mark.parametrize(
         "name",
         [
-            "Deploy",          # uppercase
-            "my group",        # spaces
-            "123abc",          # starts with number
-            "-leading",        # starts with hyphen
-            "special!",        # special chars
-            "",                # empty
-            "ALLCAPS",         # all caps
+            "Deploy",  # uppercase
+            "my group",  # spaces
+            "123abc",  # starts with number
+            "-leading",  # starts with hyphen
+            "special!",  # special chars
+            "",  # empty
+            "ALLCAPS",  # all caps
         ],
     )
     def test_invalid_names(self, name: str):
@@ -210,8 +210,8 @@ class TestDetectShadows:
 class TestSaveCommand:
     def test_save_to_saved_list(self, tmp_mem_dir: Path):
         path = tmp_mem_dir / "groups" / "test.json"
-        result = groups.save_command(path, "git status")
-        assert result is True
+        saved, _vars = groups.save_command(path, "git status")
+        assert saved is True
         data = storage.read_group_file(path)
         assert len(data.saved) == 1
         assert data.saved[0].cmd == "git status"
@@ -225,15 +225,15 @@ class TestSaveCommand:
     def test_duplicate_saved_returns_false(self, tmp_mem_dir: Path):
         path = tmp_mem_dir / "groups" / "test.json"
         groups.save_command(path, "echo x")
-        result = groups.save_command(path, "echo x")
-        assert result is False
+        saved, _vars = groups.save_command(path, "echo x")
+        assert saved is False
         data = storage.read_group_file(path)
         assert len(data.saved) == 1
 
     def test_save_to_group(self, tmp_mem_dir: Path):
         path = tmp_mem_dir / "groups" / "test.json"
-        result = groups.save_command(path, "echo deploy", group_name="deploy")
-        assert result is True
+        saved, _vars = groups.save_command(path, "echo deploy", group_name="deploy")
+        assert saved is True
         data = storage.read_group_file(path)
         assert "deploy" in data.groups
         assert len(data.groups["deploy"].commands) == 1
@@ -242,7 +242,9 @@ class TestSaveCommand:
     def test_save_creates_group_with_description_callback(self, tmp_mem_dir: Path):
         path = tmp_mem_dir / "groups" / "test.json"
         groups.save_command(
-            path, "echo 1", group_name="my-group",
+            path,
+            "echo 1",
+            group_name="my-group",
             description_callback=lambda n: f"Description for {n}",
         )
         data = storage.read_group_file(path)
@@ -258,8 +260,8 @@ class TestSaveCommand:
     def test_duplicate_in_group_returns_false(self, tmp_mem_dir: Path):
         path = tmp_mem_dir / "groups" / "test.json"
         groups.save_command(path, "echo same", group_name="g")
-        result = groups.save_command(path, "echo same", group_name="g")
-        assert result is False
+        saved, _vars = groups.save_command(path, "echo same", group_name="g")
+        assert saved is False
 
     def test_invalid_group_name_raises(self, tmp_mem_dir: Path):
         path = tmp_mem_dir / "groups" / "test.json"
@@ -278,6 +280,7 @@ class TestGetLastCapturedCommand:
         path = storage.repo_file(repo_name)
         path.parent.mkdir(parents=True, exist_ok=True)
         from conftest import make_command
+
         cmd1 = make_command(command="first", repo="/test")
         cmd2 = make_command(command="second", repo="/test")
         with path.open("w", encoding="utf-8") as f:
@@ -340,16 +343,26 @@ class TestResolveGroup:
 
         storage.write_group_file(
             repo_path,
-            GroupFile(groups={
-                "deploy": Group(description="repo deploy", commands=[GroupCommand(cmd="echo repo")]),
-            }),
+            GroupFile(
+                groups={
+                    "deploy": Group(
+                        description="repo deploy",
+                        commands=[GroupCommand(cmd="echo repo")],
+                    ),
+                }
+            ),
         )
         storage.write_group_file(
             global_path,
-            GroupFile(groups={
-                "deploy": Group(description="global deploy", commands=[GroupCommand(cmd="echo global")]),
-                "ssh": Group(commands=[GroupCommand(cmd="ssh user@host")]),
-            }),
+            GroupFile(
+                groups={
+                    "deploy": Group(
+                        description="global deploy",
+                        commands=[GroupCommand(cmd="echo global")],
+                    ),
+                    "ssh": Group(commands=[GroupCommand(cmd="ssh user@host")]),
+                }
+            ),
         )
         return repo_path, global_path
 
@@ -368,7 +381,9 @@ class TestResolveGroup:
 
     def test_force_global(self, tmp_mem_dir: Path):
         repo_path, global_path = self._setup_scopes(tmp_mem_dir)
-        grp, scope, _, _ = groups.resolve_group("deploy", repo_path, global_path, force_global=True)
+        grp, scope, _, _ = groups.resolve_group(
+            "deploy", repo_path, global_path, force_global=True
+        )
         assert grp.description == "global deploy"
         assert scope == "global"
 
@@ -430,15 +445,17 @@ class TestExportJson:
 
 class TestImportFromJson:
     def test_export_format(self, tmp_path: Path):
-        content = json.dumps({
-            "test": {
-                "description": "test group",
-                "commands": [
-                    {"cmd": "echo 1", "comment": "first"},
-                    {"cmd": "echo 2"},
-                ],
+        content = json.dumps(
+            {
+                "test": {
+                    "description": "test group",
+                    "commands": [
+                        {"cmd": "echo 1", "comment": "first"},
+                        {"cmd": "echo 2"},
+                    ],
+                }
             }
-        })
+        )
         f = tmp_path / "input.json"
         f.write_text(content, encoding="utf-8")
         cmds = groups.import_from_json(f)
@@ -448,9 +465,11 @@ class TestImportFromJson:
         assert cmds[1].comment is None
 
     def test_flat_format(self, tmp_path: Path):
-        content = json.dumps({
-            "commands": [{"cmd": "ls"}, {"cmd": "pwd"}],
-        })
+        content = json.dumps(
+            {
+                "commands": [{"cmd": "ls"}, {"cmd": "pwd"}],
+            }
+        )
         f = tmp_path / "flat.json"
         f.write_text(content, encoding="utf-8")
         cmds = groups.import_from_json(f)
@@ -471,7 +490,9 @@ class TestImportFromJson:
     def test_commands_not_a_list_raises(self, tmp_path: Path):
         f = tmp_path / "bad.json"
         f.write_text('{"commands": "not-a-list"}', encoding="utf-8")
-        with pytest.raises(click.ClickException, match="Expected 'commands' to be a list"):
+        with pytest.raises(
+            click.ClickException, match="Expected 'commands' to be a list"
+        ):
             groups.import_from_json(f)
 
     def test_malformed_command_entry_raises(self, tmp_path: Path):
@@ -588,7 +609,8 @@ class TestSaveCLI:
     def test_save_to_group_global(self, tmp_mem_dir: Path):
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["save", "echo deploy", "--global", "-g", "deploy", "-c", "run deploy"],
+            cli,
+            ["save", "echo deploy", "--global", "-g", "deploy", "-c", "run deploy"],
             input="\n",  # empty description prompt
         )
         assert result.exit_code == 0
@@ -605,8 +627,10 @@ class TestSaveCLI:
 
     def test_save_outside_repo_falls_back_to_global(self, tmp_mem_dir: Path):
         runner = CliRunner()
-        with patch("mem.cli._current_repo", return_value=None), \
-             patch("mem.groups.get_git_repo", return_value=None):
+        with (
+            patch("mem.cli._current_repo", return_value=None),
+            patch("mem.groups.get_git_repo", return_value=None),
+        ):
             result = runner.invoke(cli, ["save", "echo hello"])
         assert result.exit_code == 0
         data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
@@ -634,10 +658,12 @@ class TestListCLI:
             storage.GROUPS_GLOBAL_FILE,
             GroupFile(
                 saved=[SavedCommand(cmd="echo global")],
-                groups={"deploy": Group(
-                    description="deploy steps",
-                    commands=[GroupCommand(cmd="make deploy")],
-                )},
+                groups={
+                    "deploy": Group(
+                        description="deploy steps",
+                        commands=[GroupCommand(cmd="make deploy")],
+                    )
+                },
             ),
         )
         runner = CliRunner()
@@ -663,11 +689,15 @@ class TestListCLI:
         repo_path = storage.group_file_path(repo_name)
         storage.write_group_file(
             repo_path,
-            GroupFile(groups={"shared": Group(commands=[GroupCommand(cmd="repo cmd")])}),
+            GroupFile(
+                groups={"shared": Group(commands=[GroupCommand(cmd="repo cmd")])}
+            ),
         )
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={"shared": Group(commands=[GroupCommand(cmd="global cmd")])}),
+            GroupFile(
+                groups={"shared": Group(commands=[GroupCommand(cmd="global cmd")])}
+            ),
         )
 
         runner = CliRunner()
@@ -679,13 +709,17 @@ class TestListCLI:
     def test_list_specific_group(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={"deploy": Group(
-                description="deploy steps",
-                commands=[
-                    GroupCommand(cmd="make build", comment="compile"),
-                    GroupCommand(cmd="make push"),
-                ],
-            )}),
+            GroupFile(
+                groups={
+                    "deploy": Group(
+                        description="deploy steps",
+                        commands=[
+                            GroupCommand(cmd="make build", comment="compile"),
+                            GroupCommand(cmd="make push"),
+                        ],
+                    )
+                }
+            ),
         )
         runner = CliRunner()
         result = runner.invoke(cli, ["list", "deploy", "--global"])
@@ -704,9 +738,13 @@ class TestListCLI:
     def test_list_specific_group_json(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={"g": Group(
-                commands=[GroupCommand(cmd="echo hi")],
-            )}),
+            GroupFile(
+                groups={
+                    "g": Group(
+                        commands=[GroupCommand(cmd="echo hi")],
+                    )
+                }
+            ),
         )
         runner = CliRunner()
         result = runner.invoke(cli, ["list", "g", "--global", "--json"])
@@ -719,16 +757,18 @@ class TestRunCLI:
     def _setup_group(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "test": Group(
-                    description="test group",
-                    commands=[
-                        GroupCommand(cmd="echo 1", comment="first"),
-                        GroupCommand(cmd="echo 2", comment="second"),
-                        GroupCommand(cmd="echo 3", comment="third"),
-                    ],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "test": Group(
+                        description="test group",
+                        commands=[
+                            GroupCommand(cmd="echo 1", comment="first"),
+                            GroupCommand(cmd="echo 2", comment="second"),
+                            GroupCommand(cmd="echo 3", comment="third"),
+                        ],
+                    ),
+                }
+            ),
         )
 
     def test_run_yes_executes_all(self, tmp_mem_dir: Path):
@@ -743,7 +783,10 @@ class TestRunCLI:
         with _mock_repo(), patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             result = runner.invoke(cli, ["run", "nonexistent", "--yes"])
         assert result.exit_code != 0
-        assert "not found" in result.output.lower() or "not found" in str(result.exception).lower()
+        assert (
+            "not found" in result.output.lower()
+            or "not found" in str(result.exception).lower()
+        )
 
     def test_run_pick_single(self, tmp_mem_dir: Path):
         self._setup_group(tmp_mem_dir)
@@ -789,21 +832,25 @@ class TestExportCLI:
     def _setup_group(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "deploy": Group(
-                    description="deploy steps",
-                    commands=[
-                        GroupCommand(cmd="make build", comment="build first"),
-                        GroupCommand(cmd="make deploy", comment="then deploy"),
-                    ],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "deploy": Group(
+                        description="deploy steps",
+                        commands=[
+                            GroupCommand(cmd="make build", comment="build first"),
+                            GroupCommand(cmd="make deploy", comment="then deploy"),
+                        ],
+                    ),
+                }
+            ),
         )
 
     def test_export_markdown(self, tmp_mem_dir: Path):
         self._setup_group(tmp_mem_dir)
         runner = CliRunner()
-        result = runner.invoke(cli, ["export", "deploy", "--global", "-f", "markdown", "--stdout"])
+        result = runner.invoke(
+            cli, ["export", "deploy", "--global", "-f", "markdown", "--stdout"]
+        )
         assert result.exit_code == 0
         assert "## deploy" in result.output
         assert "| `make build` | build first |" in result.output
@@ -811,7 +858,9 @@ class TestExportCLI:
     def test_export_json(self, tmp_mem_dir: Path):
         self._setup_group(tmp_mem_dir)
         runner = CliRunner()
-        result = runner.invoke(cli, ["export", "deploy", "--global", "-f", "json", "--stdout"])
+        result = runner.invoke(
+            cli, ["export", "deploy", "--global", "-f", "json", "--stdout"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "deploy" in data
@@ -825,18 +874,21 @@ class TestExportCLI:
 
 class TestImportCLI:
     def test_import_json(self, tmp_mem_dir: Path, tmp_path: Path):
-        content = json.dumps({
-            "commands": [
-                {"cmd": "echo 1", "comment": "first"},
-                {"cmd": "echo 2"},
-            ]
-        })
+        content = json.dumps(
+            {
+                "commands": [
+                    {"cmd": "echo 1", "comment": "first"},
+                    {"cmd": "echo 2"},
+                ]
+            }
+        )
         import_file = tmp_path / "import.json"
         import_file.write_text(content, encoding="utf-8")
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(import_file), "-g", "imported", "--global"],
+            cli,
+            ["import", str(import_file), "-g", "imported", "--global"],
         )
         assert result.exit_code == 0
         assert "Imported 2 commands" in result.output
@@ -849,23 +901,28 @@ class TestImportCLI:
         # Pre-populate existing group
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "existing": Group(commands=[GroupCommand(cmd="echo old")]),
-            }),
+            GroupFile(
+                groups={
+                    "existing": Group(commands=[GroupCommand(cmd="echo old")]),
+                }
+            ),
         )
 
-        content = json.dumps({
-            "commands": [
-                {"cmd": "echo old"},     # duplicate
-                {"cmd": "echo new"},     # new
-            ]
-        })
+        content = json.dumps(
+            {
+                "commands": [
+                    {"cmd": "echo old"},  # duplicate
+                    {"cmd": "echo new"},  # new
+                ]
+            }
+        )
         import_file = tmp_path / "merge.json"
         import_file.write_text(content, encoding="utf-8")
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(import_file), "-g", "existing", "--global"],
+            cli,
+            ["import", str(import_file), "-g", "existing", "--global"],
             input="m\n",  # merge
         )
         assert result.exit_code == 0
@@ -880,23 +937,28 @@ class TestImportCLI:
     def test_import_replace(self, tmp_mem_dir: Path, tmp_path: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "existing": Group(
-                    description="keep this description",
-                    commands=[GroupCommand(cmd="echo old")],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "existing": Group(
+                        description="keep this description",
+                        commands=[GroupCommand(cmd="echo old")],
+                    ),
+                }
+            ),
         )
 
-        content = json.dumps({
-            "commands": [{"cmd": "echo new"}],
-        })
+        content = json.dumps(
+            {
+                "commands": [{"cmd": "echo new"}],
+            }
+        )
         import_file = tmp_path / "replace.json"
         import_file.write_text(content, encoding="utf-8")
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(import_file), "-g", "existing", "--global"],
+            cli,
+            ["import", str(import_file), "-g", "existing", "--global"],
             input="r\n",  # replace
         )
         assert result.exit_code == 0
@@ -919,7 +981,8 @@ class TestImportCLI:
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(f), "-g", "from-md", "--global", "-f", "markdown"],
+            cli,
+            ["import", str(f), "-g", "from-md", "--global", "-f", "markdown"],
         )
         assert result.exit_code == 0
         data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
@@ -930,17 +993,20 @@ class TestGroupRemoveCLI:
     def test_remove_with_confirmation(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "to-delete": Group(
-                    description="will be deleted",
-                    commands=[GroupCommand(cmd="echo bye")],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "to-delete": Group(
+                        description="will be deleted",
+                        commands=[GroupCommand(cmd="echo bye")],
+                    ),
+                }
+            ),
         )
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["group", "remove", "to-delete", "--global"],
+            cli,
+            ["group", "remove", "to-delete", "--global"],
             input="y\n",
         )
         assert result.exit_code == 0
@@ -967,7 +1033,8 @@ class TestGroupRemoveCLI:
         )
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["group", "remove", "keep", "--global"],
+            cli,
+            ["group", "remove", "keep", "--global"],
             input="n\n",
         )
         assert result.exit_code == 0
@@ -985,16 +1052,19 @@ class TestGroupRenameCLI:
     def test_rename_success(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "old-name": Group(
-                    description="test",
-                    commands=[GroupCommand(cmd="echo x")],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "old-name": Group(
+                        description="test",
+                        commands=[GroupCommand(cmd="echo x")],
+                    ),
+                }
+            ),
         )
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["group", "rename", "old-name", "new-name", "--global"],
+            cli,
+            ["group", "rename", "old-name", "new-name", "--global"],
         )
         assert result.exit_code == 0
         assert "Renamed" in result.output
@@ -1008,23 +1078,31 @@ class TestGroupRenameCLI:
         runner = CliRunner()
         with _mock_repo(), patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             result = runner.invoke(
-                cli, ["group", "rename", "nope", "new", "--global"],
+                cli,
+                ["group", "rename", "nope", "new", "--global"],
             )
         assert result.exit_code != 0
 
     def test_rename_target_exists(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "a": Group(), "b": Group(),
-            }),
+            GroupFile(
+                groups={
+                    "a": Group(),
+                    "b": Group(),
+                }
+            ),
         )
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["group", "rename", "a", "b", "--global"],
+            cli,
+            ["group", "rename", "a", "b", "--global"],
         )
         assert result.exit_code != 0
-        assert "already exists" in result.output.lower() or "already exists" in str(result.exception).lower()
+        assert (
+            "already exists" in result.output.lower()
+            or "already exists" in str(result.exception).lower()
+        )
 
     def test_rename_invalid_new_name(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1033,7 +1111,8 @@ class TestGroupRenameCLI:
         )
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["group", "rename", "valid", "BAD NAME", "--global"],
+            cli,
+            ["group", "rename", "valid", "BAD NAME", "--global"],
         )
         assert result.exit_code != 0
 
@@ -1044,12 +1123,14 @@ class TestGroupCopyCLI:
         repo_path = storage.group_file_path(repo_name)
         storage.write_group_file(
             repo_path,
-            GroupFile(groups={
-                "deploy": Group(
-                    description="repo deploy",
-                    commands=[GroupCommand(cmd="make deploy")],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "deploy": Group(
+                        description="repo deploy",
+                        commands=[GroupCommand(cmd="make deploy")],
+                    ),
+                }
+            ),
         )
 
         runner = CliRunner()
@@ -1065,9 +1146,11 @@ class TestGroupCopyCLI:
     def test_copy_global_to_repo(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "ssh": Group(commands=[GroupCommand(cmd="ssh host")]),
-            }),
+            GroupFile(
+                groups={
+                    "ssh": Group(commands=[GroupCommand(cmd="ssh host")]),
+                }
+            ),
         )
 
         runner = CliRunner()
@@ -1101,7 +1184,10 @@ class TestGroupCopyCLI:
         with _mock_repo(), patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             result = runner.invoke(cli, ["group", "copy", "dup", "--global"])
         assert result.exit_code != 0
-        assert "already exists" in result.output.lower() or "already exists" in str(result.exception).lower()
+        assert (
+            "already exists" in result.output.lower()
+            or "already exists" in str(result.exception).lower()
+        )
 
 
 class TestGroupCopyAdditionalCLI:
@@ -1124,25 +1210,31 @@ class TestRunCLIAdditional:
     def _setup_group(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "test": Group(
-                    description="test group",
-                    commands=[
-                        GroupCommand(cmd="echo 1", comment="first"),
-                        GroupCommand(cmd="echo 2", comment="second"),
-                    ],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "test": Group(
+                        description="test group",
+                        commands=[
+                            GroupCommand(cmd="echo 1", comment="first"),
+                            GroupCommand(cmd="echo 2", comment="second"),
+                        ],
+                    ),
+                }
+            ),
         )
 
     def test_run_yes_exits_on_failure(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "fail": Group(commands=[
-                    GroupCommand(cmd="exit 42"),
-                ]),
-            }),
+            GroupFile(
+                groups={
+                    "fail": Group(
+                        commands=[
+                            GroupCommand(cmd="exit 42"),
+                        ]
+                    ),
+                }
+            ),
         )
         runner = CliRunner()
         result = runner.invoke(cli, ["run", "fail", "--global", "--yes"])
@@ -1172,18 +1264,22 @@ class TestExportCLIAdditional:
     def test_export_json_has_commands(self, tmp_mem_dir: Path):
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={
-                "g": Group(
-                    description="test",
-                    commands=[
-                        GroupCommand(cmd="echo a", comment="first"),
-                        GroupCommand(cmd="echo b"),
-                    ],
-                ),
-            }),
+            GroupFile(
+                groups={
+                    "g": Group(
+                        description="test",
+                        commands=[
+                            GroupCommand(cmd="echo a", comment="first"),
+                            GroupCommand(cmd="echo b"),
+                        ],
+                    ),
+                }
+            ),
         )
         runner = CliRunner()
-        result = runner.invoke(cli, ["export", "g", "--global", "-f", "json", "--stdout"])
+        result = runner.invoke(
+            cli, ["export", "g", "--global", "-f", "json", "--stdout"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert len(data["g"]["commands"]) == 2
@@ -1191,7 +1287,9 @@ class TestExportCLIAdditional:
 
 
 class TestSaveCLIDuplicateComment:
-    def test_duplicate_with_different_comment_preserves_original(self, tmp_mem_dir: Path):
+    def test_duplicate_with_different_comment_preserves_original(
+        self, tmp_mem_dir: Path
+    ):
         runner = CliRunner()
         runner.invoke(cli, ["save", "echo x", "--global", "-c", "original comment"])
         runner.invoke(cli, ["save", "echo x", "--global", "-c", "new comment"])
@@ -1225,7 +1323,8 @@ class TestSaveNonInteractive:
         runner = CliRunner()
         with patch("mem.cli._is_interactive", return_value=False):
             result = runner.invoke(
-                cli, ["save", "echo hi", "--global", "-g", "ci-group"],
+                cli,
+                ["save", "echo hi", "--global", "-g", "ci-group"],
             )
         assert result.exit_code == 0
         data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
@@ -1236,7 +1335,8 @@ class TestSaveNonInteractive:
         runner = CliRunner()
         with patch("mem.cli._is_interactive", return_value=True):
             result = runner.invoke(
-                cli, ["save", "echo hi", "--global", "-g", "my-group"],
+                cli,
+                ["save", "echo hi", "--global", "-g", "my-group"],
                 input="My description\n",
             )
         assert result.exit_code == 0
@@ -1253,8 +1353,10 @@ class TestEditorParsing:
             GroupFile(groups={"test": Group(commands=[GroupCommand(cmd="echo x")])}),
         )
         runner = CliRunner()
-        with patch.dict(os.environ, {"EDITOR": "code -w"}), \
-             patch("subprocess.run") as mock_run:
+        with (
+            patch.dict(os.environ, {"EDITOR": "code -w"}),
+            patch("subprocess.run") as mock_run,
+        ):
             result = runner.invoke(cli, ["group", "edit", "test", "--global"])
         assert result.exit_code == 0
         args = mock_run.call_args[0][0]
@@ -1267,8 +1369,10 @@ class TestEditorParsing:
             GroupFile(saved=[SavedCommand(cmd="echo x")]),
         )
         runner = CliRunner()
-        with patch.dict(os.environ, {"EDITOR": "vim -u NONE"}), \
-             patch("subprocess.run") as mock_run:
+        with (
+            patch.dict(os.environ, {"EDITOR": "vim -u NONE"}),
+            patch("subprocess.run") as mock_run,
+        ):
             result = runner.invoke(cli, ["saved", "edit", "--global"])
         assert result.exit_code == 0
         args = mock_run.call_args[0][0]
@@ -1488,34 +1592,36 @@ class TestImportAutoDetect:
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(f), "-g", "auto-grp", "--global"],
+            cli,
+            ["import", str(f), "-g", "auto-grp", "--global"],
         )
         assert result.exit_code == 0
         assert "Imported 1 commands" in result.output
 
     def test_auto_detect_markdown(self, tmp_mem_dir: Path, tmp_path: Path):
         md = (
-            "## test\n\n"
-            "| Command | Description |\n"
-            "|---|---|\n"
-            "| `echo md` | from md |\n"
+            "## test\n\n| Command | Description |\n|---|---|\n| `echo md` | from md |\n"
         )
         f = tmp_path / "data.md"
         f.write_text(md, encoding="utf-8")
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(f), "-g", "md-grp", "--global"],
+            cli,
+            ["import", str(f), "-g", "md-grp", "--global"],
         )
         assert result.exit_code == 0
 
-    def test_auto_detect_unknown_extension_errors(self, tmp_mem_dir: Path, tmp_path: Path):
+    def test_auto_detect_unknown_extension_errors(
+        self, tmp_mem_dir: Path, tmp_path: Path
+    ):
         f = tmp_path / "data.txt"
         f.write_text("hello", encoding="utf-8")
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(f), "-g", "grp", "--global"],
+            cli,
+            ["import", str(f), "-g", "grp", "--global"],
         )
         assert result.exit_code != 0
         assert "Cannot detect format" in result.output
@@ -1527,7 +1633,8 @@ class TestImportAutoDetect:
 
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["import", str(f), "-g", "grp", "--global", "-f", "json"],
+            cli,
+            ["import", str(f), "-g", "grp", "--global", "-f", "json"],
         )
         assert result.exit_code == 0
         assert "Imported 1 commands" in result.output
@@ -1563,7 +1670,9 @@ class TestListRepoGroupScope:
         """mem list <group> --repo should NOT show a global group."""
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
-            GroupFile(groups={"deploy": Group(commands=[GroupCommand(cmd="echo global")])}),
+            GroupFile(
+                groups={"deploy": Group(commands=[GroupCommand(cmd="echo global")])}
+            ),
         )
         runner = CliRunner()
         with _mock_repo():
@@ -1577,7 +1686,9 @@ class TestListRepoGroupScope:
         repo_path = storage.group_file_path(repo_name)
         storage.write_group_file(
             repo_path,
-            GroupFile(groups={"deploy": Group(commands=[GroupCommand(cmd="echo repo")])}),
+            GroupFile(
+                groups={"deploy": Group(commands=[GroupCommand(cmd="echo repo")])}
+            ),
         )
         runner = CliRunner()
         with _mock_repo():

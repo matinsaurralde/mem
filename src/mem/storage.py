@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from mem.models import CapturedCommand, GroupFile, PatternFile, WorkSession
+from mem.models import CapturedCommand, GroupFile, PatternFile, VarsFile, WorkSession
 
 MEM_DIR = Path.home() / ".mem"
 
@@ -27,6 +27,9 @@ MEM_DIR = Path.home() / ".mem"
 GROUPS_DIR = MEM_DIR / "groups"
 GROUPS_REPOS_DIR = GROUPS_DIR / "repos"
 GROUPS_GLOBAL_FILE = GROUPS_DIR / "_global.json"
+
+# --- Variable store ---
+VARS_FILE = MEM_DIR / "vars.json"
 
 
 def repo_file(repo: str) -> Path:
@@ -221,9 +224,7 @@ def rotate(
                     # Atomic write: write to temp file then rename to avoid
                     # data loss if the process is interrupted mid-write.
                     tmp = path.with_suffix(".jsonl.tmp")
-                    tmp.write_text(
-                        "\n".join(lines_kept) + "\n", encoding="utf-8"
-                    )
+                    tmp.write_text("\n".join(lines_kept) + "\n", encoding="utf-8")
                     tmp.rename(path)
                 else:
                     path.unlink()
@@ -232,9 +233,9 @@ def rotate(
     session_files_removed = 0
     sessions_dir = MEM_DIR / "sessions"
     if sessions_dir.exists():
-        cutoff_date = datetime.fromtimestamp(
-            session_cutoff, tz=timezone.utc
-        ).strftime("%Y-%m-%d")
+        cutoff_date = datetime.fromtimestamp(session_cutoff, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
         for path in sessions_dir.glob("*.jsonl"):
             if path.stem < cutoff_date:
                 path.unlink()
@@ -275,9 +276,7 @@ def forget_commands(query: str) -> int:
 
             if lines_kept:
                 tmp = path.with_suffix(".jsonl.tmp")
-                tmp.write_text(
-                    "\n".join(lines_kept) + "\n", encoding="utf-8"
-                )
+                tmp.write_text("\n".join(lines_kept) + "\n", encoding="utf-8")
                 tmp.rename(path)
             else:
                 path.unlink()
@@ -295,23 +294,17 @@ def forget_commands(query: str) -> int:
                     try:
                         data = json.loads(line_stripped)
                         # Remove matching commands from the session's command list
-                        cmds = [
-                            c for c in data.get("commands", []) if query not in c
-                        ]
+                        cmds = [c for c in data.get("commands", []) if query not in c]
                         if cmds:
                             data["commands"] = cmds
-                            sessions_kept.append(
-                                json.dumps(data, ensure_ascii=False)
-                            )
+                            sessions_kept.append(json.dumps(data, ensure_ascii=False))
                         # If all commands removed, drop the entire session
                     except json.JSONDecodeError:
                         sessions_kept.append(line_stripped)
 
             if sessions_kept:
                 tmp = path.with_suffix(".jsonl.tmp")
-                tmp.write_text(
-                    "\n".join(sessions_kept) + "\n", encoding="utf-8"
-                )
+                tmp.write_text("\n".join(sessions_kept) + "\n", encoding="utf-8")
                 tmp.rename(path)
             else:
                 path.unlink()
@@ -358,3 +351,39 @@ def write_group_file(path: Path, data: GroupFile) -> None:
     tmp_path = path.with_suffix(".json.tmp")
     tmp_path.write_text(data.model_dump_json(indent=2), encoding="utf-8")
     tmp_path.rename(path)
+
+
+# --- Variable store ---
+
+
+def read_vars_file() -> VarsFile:
+    """Read the persistent variable store. Returns empty if missing/corrupted.
+
+    The vars file is global (not repo-scoped) because credentials and
+    environment values typically apply across projects.
+    """
+    if not VARS_FILE.exists():
+        return VarsFile()
+    try:
+        return VarsFile.model_validate_json(VARS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        print(
+            f"warning: corrupted vars file {VARS_FILE}, treating as empty",
+            file=sys.stderr,
+        )
+        return VarsFile()
+
+
+def write_vars_file(data: VarsFile) -> None:
+    """Write the variable store atomically with restrictive permissions.
+
+    Uses tmp+rename pattern for crash safety. File permissions are set
+    to 0600 (owner read/write only) since the file may contain secrets.
+    """
+    import os as _os
+
+    VARS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = VARS_FILE.with_suffix(".json.tmp")
+    tmp_path.write_text(data.model_dump_json(indent=2), encoding="utf-8")
+    _os.chmod(tmp_path, 0o600)
+    tmp_path.rename(VARS_FILE)

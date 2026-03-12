@@ -52,6 +52,7 @@ def _is_interactive() -> bool:
 def _relative_time(ts: int) -> str:
     """Format a timestamp as a human-readable relative time."""
     import time
+
     delta = int(time.time()) - ts
     if delta < 60:
         return "just now"
@@ -72,7 +73,9 @@ def _relative_time(ts: int) -> str:
 
 @click.group(cls=MemGroup, invoke_without_command=True)
 @click.version_option(__version__, prog_name="mem")
-@click.option("--pattern", "-p", is_flag=True, help="Show extracted patterns instead of commands")
+@click.option(
+    "--pattern", "-p", is_flag=True, help="Show extracted patterns instead of commands"
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--limit", "-n", default=10, help="Maximum results")
 @click.pass_context
@@ -97,9 +100,9 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
             click.echo(json.dumps([p.model_dump() for p in patterns], indent=2))
             return
         if not patterns:
-            console.print(f"No patterns found for \"{query}\".")
+            console.print(f'No patterns found for "{query}".')
             return
-        console.print(f"\nPatterns for \"{query}\":\n")
+        console.print(f'\nPatterns for "{query}":\n')
         for p in patterns:
             # Highlight placeholders in yellow
             text = Text(f"  {p.pattern}")
@@ -148,6 +151,7 @@ def capture_cmd(command: str, dir: str, exit_code: int, duration_ms: int) -> Non
     """Internal: called by the shell hook after each command. Always silent, always exits 0."""
     try:
         from mem.capture import capture_command
+
         capture_command(command, dir, exit_code, duration_ms)
     except Exception:
         # Silent failure — never disrupt the user's shell
@@ -162,11 +166,15 @@ def init(shell: str) -> None:
     future = {"bash", "fish"}
 
     if shell not in supported and shell not in future:
-        click.echo(f'Error: unsupported shell "{shell}". Supported: zsh, bash, fish', err=True)
+        click.echo(
+            f'Error: unsupported shell "{shell}". Supported: zsh, bash, fish', err=True
+        )
         sys.exit(1)
 
     if shell in future:
-        click.echo(f'Error: {shell} support coming in v1.5. Currently supported: zsh', err=True)
+        click.echo(
+            f"Error: {shell} support coming in v1.5. Currently supported: zsh", err=True
+        )
         sys.exit(1)
 
     # Print hook code to stdout
@@ -178,7 +186,7 @@ def init(shell: str) -> None:
         click.echo(_ZSH_HOOK)
 
 
-_ZSH_HOOK = '''# mem shell hook
+_ZSH_HOOK = """# mem shell hook
 
 _mem_preexec() {
   _mem_cmd="$1"
@@ -198,7 +206,7 @@ _mem_precmd() {
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _mem_preexec
 add-zsh-hook precmd _mem_precmd
-'''
+"""
 
 
 @cli.command()
@@ -355,7 +363,9 @@ def forget(query: str, yes: bool) -> None:
         for i, cmd in enumerate(matches[:20], 1):
             repo_text = cmd.repo or "global"
             time_text = _relative_time(cmd.ts)
-            console.print(f"  {i:>2}  {cmd.command:<40}  [dim cyan]{repo_text}[/]  [dim]{time_text}[/]")
+            console.print(
+                f"  {i:>2}  {cmd.command:<40}  [dim cyan]{repo_text}[/]  [dim]{time_text}[/]"
+            )
         if len(matches) > 20:
             console.print(f"  ... and {len(matches) - 20} more")
         console.print()
@@ -375,14 +385,59 @@ def forget(query: str, yes: bool) -> None:
 @click.option("--group", "-g", "group_name", default=None, help="Target group name")
 @click.option("--global", "global_flag", is_flag=True, help="Save to global scope")
 @click.option("--comment", "-c", default=None, help="Inline annotation")
-def save(command: str, group_name: str | None, global_flag: bool, comment: str | None) -> None:
+@click.option(
+    "--var",
+    "-v",
+    "var_flags",
+    multiple=True,
+    help="Declare variable: NAME or NAME=default",
+)
+def save(
+    command: str,
+    group_name: str | None,
+    global_flag: bool,
+    comment: str | None,
+    var_flags: tuple[str, ...],
+) -> None:
     """Save a command to the saved list or to a named group."""
     from mem import groups
+    from mem.variables import detect_credentials
 
     # Resolve ! to last captured command
     if command == "!":
         repo = _current_repo()
         command = groups.get_last_captured_command(repo)
+
+    # Parse --var flags into (name, default) tuples
+    import re as _re
+
+    explicit_vars: list[tuple[str, str | None]] = []
+    for v in var_flags:
+        if "=" in v:
+            name, default = v.split("=", 1)
+        else:
+            name, default = v, None
+        if not _re.match(r"^[A-Z][A-Z0-9_]+$", name):
+            raise click.ClickException(
+                f"Invalid variable name '{name}'. "
+                "Use uppercase letters, digits, and underscores (min 2 chars)."
+            )
+        explicit_vars.append((name, default))
+
+    # AI credential detection (only if interactive and SDK available)
+    if _is_interactive():
+        credentials = detect_credentials(command)
+        for original_value, suggested_name, reason in credentials:
+            err_console.print(f"\n  Detected possible credential: {reason}")
+            proposed = command.replace(original_value, f"${suggested_name}")
+            err_console.print(f"  Suggested: {proposed}")
+            var_name = click.prompt(
+                "  Variable name",
+                default=suggested_name,
+                err=True,
+            )
+            if click.confirm("  Save with variable?", default=True, err=True):
+                command = command.replace(original_value, f"${var_name}")
 
     scope_path = groups.resolve_scope(global_flag)
 
@@ -396,24 +451,40 @@ def save(command: str, group_name: str | None, global_flag: bool, comment: str |
         )
         return desc or None
 
-    saved = groups.save_command(
-        scope_path, command, comment, group_name,
+    saved, var_list = groups.save_command(
+        scope_path,
+        command,
+        comment,
+        group_name,
         description_callback=ask_description,
+        explicit_vars=explicit_vars,
     )
 
     if saved:
         target = f"group '{group_name}'" if group_name else "saved commands"
         err_console.print(f"Saved to {target}: {command}")
+        if var_list:
+            var_strs = []
+            for v in var_list:
+                s = v.name
+                if v.default is not None:
+                    s += f" (default: {v.default})"
+                var_strs.append(s)
+            err_console.print(f"  Variables: {', '.join(var_strs)}")
     else:
         err_console.print(f"Already saved: {command}")
 
 
 @cli.command(name="list")
 @click.argument("group_name", required=False, default=None)
-@click.option("--global", "-g", "global_flag", is_flag=True, help="Show only global scope")
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Show only global scope"
+)
 @click.option("--repo", "-r", "repo_flag", is_flag=True, help="Show only repo scope")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json: bool) -> None:
+def list_cmd(
+    group_name: str | None, global_flag: bool, repo_flag: bool, as_json: bool
+) -> None:
     """List saved commands and groups, or show a group's commands."""
     from mem import groups, storage
 
@@ -437,16 +508,23 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
         if repo_flag:
             # --repo: only look in repo scope, never fall back to global
             if repo_path is None:
-                raise click.ClickException(f"Group '{group_name}' not found in repo scope.")
+                raise click.ClickException(
+                    f"Group '{group_name}' not found in repo scope."
+                )
             repo_data = groups._load_group_file(repo_path)
             if group_name not in repo_data.groups:
-                raise click.ClickException(f"Group '{group_name}' not found in repo scope.")
+                raise click.ClickException(
+                    f"Group '{group_name}' not found in repo scope."
+                )
             grp = repo_data.groups[group_name]
             scope_label = repo or repo_path.stem
             shadows = set()
         else:
             grp, scope_label, _file_path, shadows = groups.resolve_group(
-                group_name, repo_path, global_path, force_global=global_flag,
+                group_name,
+                repo_path,
+                global_path,
+                force_global=global_flag,
             )
             # Use real repo path for display if scope is not global
             if scope_label != "global" and repo:
@@ -460,11 +538,31 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
         if grp.description:
             console.print(f'  "{grp.description}"')
         if group_name in shadows and scope_label != "global":
-            console.print("  [dim](global group with same name exists — use --global to see it)[/]")
+            console.print(
+                "  [dim](global group with same name exists — use --global to see it)[/]"
+            )
         console.print("  " + "─" * 50)
+
+        # Load variable store for status display
+        from mem.variables import check_resolution_status
+
+        vars_data = storage.read_vars_file()
+
         for i, cmd in enumerate(grp.commands, 1):
             comment_str = f"   # {cmd.comment}" if cmd.comment else ""
             console.print(f"  {i}. {cmd.cmd}{comment_str}")
+            # Show variable resolution status if command has variables
+            if cmd.vars:
+                statuses = check_resolution_status(
+                    cmd.vars,
+                    vars_data.vars,
+                    group_name,
+                )
+                for name, status, hint in statuses:
+                    if status == "resolved":
+                        console.print(f"     [green]✓[/] ${name}  {hint}")
+                    else:
+                        console.print(f"     [yellow]⚠[/] ${name}  unset — {hint}")
         console.print()
         return
 
@@ -479,12 +577,16 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
             output["repo"] = {
                 "name": repo_display,
                 "saved": [s.model_dump() for s in result["repo_data"].saved],
-                "groups": {n: g.model_dump() for n, g in result["repo_data"].groups.items()},
+                "groups": {
+                    n: g.model_dump() for n, g in result["repo_data"].groups.items()
+                },
             }
         if not repo_flag:
             output["global"] = {
                 "saved": [s.model_dump() for s in result["global_data"].saved],
-                "groups": {n: g.model_dump() for n, g in result["global_data"].groups.items()},
+                "groups": {
+                    n: g.model_dump() for n, g in result["global_data"].groups.items()
+                },
             }
             if result["shadows"]:
                 output["shadows"] = sorted(result["shadows"])
@@ -508,7 +610,9 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
         for name, grp in result["repo_data"].groups.items():
             count = len(grp.commands)
             desc = f'  "{grp.description}"' if grp.description else ""
-            console.print(f"  {name:<20} {count} command{'s' if count != 1 else ''}{desc}")
+            console.print(
+                f"  {name:<20} {count} command{'s' if count != 1 else ''}{desc}"
+            )
 
     # Global saved commands
     if not repo_flag and result["global_data"].saved:
@@ -542,18 +646,38 @@ def list_cmd(group_name: str | None, global_flag: bool, repo_flag: bool, as_json
 
 @cli.command()
 @click.argument("group_name", metavar="GROUP")
+@click.argument("var_args", nargs=-1)
 @click.option("--global", "-g", "global_flag", is_flag=True, help="Force global scope")
 @click.option("--yes", "-y", is_flag=True, help="Skip all confirmation prompts")
-def run(group_name: str, global_flag: bool, yes: bool) -> None:
-    """Execute a group's commands interactively."""
+def run(
+    group_name: str, var_args: tuple[str, ...], global_flag: bool, yes: bool
+) -> None:
+    """Execute a group's commands interactively.
+
+    Pass VAR=VALUE after the group name to set variables inline.
+    """
     import subprocess as sp
+    import time
 
     from mem import groups, storage
+    from mem.models import VarDeclaration
+    from mem.variables import resolve_variables, substitute_variables
 
     if not _is_interactive() and not yes:
         raise click.ClickException(
             "Non-interactive mode detected. Use --yes to run without prompts."
         )
+
+    # Parse inline VAR=VALUE arguments
+    inline_args: dict[str, str] = {}
+    for arg in var_args:
+        if "=" in arg:
+            name, value = arg.split("=", 1)
+            inline_args[name] = value
+        else:
+            raise click.ClickException(
+                f"Invalid argument '{arg}'. Use VAR=VALUE format."
+            )
 
     global_path = storage.GROUPS_GLOBAL_FILE
     repo_path = None
@@ -563,7 +687,10 @@ def run(group_name: str, global_flag: bool, yes: bool) -> None:
         repo_path = storage.group_file_path(sanitized)
 
     grp, scope_label, _file_path, shadows = groups.resolve_group(
-        group_name, repo_path, global_path, force_global=global_flag,
+        group_name,
+        repo_path,
+        global_path,
+        force_global=global_flag,
     )
 
     # Display header
@@ -571,7 +698,9 @@ def run(group_name: str, global_flag: bool, yes: bool) -> None:
     if grp.description:
         console.print(f'  "{grp.description}"')
     if group_name in shadows and scope_label != "global":
-        console.print("  [dim](global group with same name exists — use --global to see it)[/]")
+        console.print(
+            "  [dim](global group with same name exists — use --global to see it)[/]"
+        )
     console.print("  " + "─" * 50)
 
     # Display commands
@@ -613,16 +742,75 @@ def run(group_name: str, global_flag: bool, yes: bool) -> None:
     else:
         commands_to_run = list(enumerate(grp.commands, 1))
 
+    # Resolve all variables upfront (FR-006, FR-015)
+    # Collect unique variables across all commands to run, resolve once
+    all_vars: dict[str, VarDeclaration] = {}
+    for _i, cmd in commands_to_run:
+        if cmd.vars:
+            for v in cmd.vars:
+                if v.name not in all_vars:
+                    all_vars[v.name] = v
+
+    resolved: dict[str, tuple[str, str]] = {}
+    if all_vars:
+        vars_data = storage.read_vars_file()
+        unique_var_list = list(all_vars.values())
+
+        # In --yes mode, check for unresolvable variables first
+        if yes:
+            missing = []
+            for v in unique_var_list:
+                name = v.name
+                if (
+                    name not in inline_args
+                    and name not in os.environ
+                    and name not in vars_data.vars
+                    and v.default is None
+                ):
+                    missing.append(name)
+            if missing:
+                raise click.ClickException(
+                    f"Unresolved variables: {', '.join(missing)}\n"
+                    f"Pass them inline: mem run {group_name} "
+                    + " ".join(f"{n}=<value>" for n in missing)
+                )
+
+        resolved = resolve_variables(
+            unique_var_list,
+            inline_args,
+            vars_data.vars,
+            allow_prompt=not yes,
+        )
+
+        # Display resolution summary
+        console.print()
+        for name, (value, source) in resolved.items():
+            console.print(f"  [green]✓[/] ${name} resolved from {source}")
+
+        # Update last_used for store-resolved variables
+        updated_store = False
+        for name, (_value, source) in resolved.items():
+            if source == "store" and name in vars_data.vars:
+                vars_data.vars[name].last_used = int(time.time())
+                updated_store = True
+        if updated_store:
+            storage.write_vars_file(vars_data)
+
     # Execute
     console.print()
     for i, cmd in commands_to_run:
+        # Substitute variables in command
+        run_cmd = cmd.cmd
+        if cmd.vars and resolved:
+            run_cmd = substitute_variables(run_cmd, resolved)
+
         if not run_all and len(commands_to_run) > 1:
-            if not click.confirm(f"  Run [{i}] {cmd.cmd}?", default=True, err=True):
+            if not click.confirm(f"  Run [{i}] {run_cmd}?", default=True, err=True):
                 continue
 
-        console.print(f"  [dim]$ {cmd.cmd}[/]")
+        console.print(f"  [dim]$ {run_cmd}[/]")
         try:
-            result = sp.run(cmd.cmd, shell=True)
+            result = sp.run(run_cmd, shell=True)
         except KeyboardInterrupt:
             console.print("\n  Interrupted.")
             if yes:
@@ -655,7 +843,9 @@ def _copy_to_clipboard(text: str) -> bool:
             return True
         # Linux (X11)
         if shutil.which("xclip"):
-            sp.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=True)
+            sp.run(
+                ["xclip", "-selection", "clipboard"], input=text.encode(), check=True
+            )
             return True
         if shutil.which("xsel"):
             sp.run(["xsel", "--clipboard", "--input"], input=text.encode(), check=True)
@@ -667,10 +857,20 @@ def _copy_to_clipboard(text: str) -> bool:
 
 @cli.command()
 @click.argument("group_name", metavar="GROUP")
-@click.option("--format", "-f", "fmt", type=click.Choice(["markdown", "json"]),
-              default="json", help="Output format (default: json)")
-@click.option("--global", "-g", "global_flag", is_flag=True, help="Export from global scope")
-@click.option("--stdout", "use_stdout", is_flag=True, help="Print to stdout instead of clipboard")
+@click.option(
+    "--format",
+    "-f",
+    "fmt",
+    type=click.Choice(["markdown", "json"]),
+    default="json",
+    help="Output format (default: json)",
+)
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Export from global scope"
+)
+@click.option(
+    "--stdout", "use_stdout", is_flag=True, help="Print to stdout instead of clipboard"
+)
 def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> None:
     """Export a group as markdown or JSON."""
     from mem import groups, storage
@@ -683,7 +883,10 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
         repo_path = storage.group_file_path(sanitized)
 
     grp, _, _, _ = groups.resolve_group(
-        group_name, repo_path, global_path, force_global=global_flag,
+        group_name,
+        repo_path,
+        global_path,
+        force_global=global_flag,
     )
 
     if fmt == "markdown":
@@ -704,8 +907,14 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
 @cli.command(name="import")
 @click.argument("file", type=click.Path(exists=True))
 @click.option("--group", "-g", "group_name", required=True, help="Target group name")
-@click.option("--format", "-f", "fmt", type=click.Choice(["json", "markdown"]),
-              default=None, help="Input format (auto-detected from extension if omitted)")
+@click.option(
+    "--format",
+    "-f",
+    "fmt",
+    type=click.Choice(["json", "markdown"]),
+    default=None,
+    help="Input format (auto-detected from extension if omitted)",
+)
 @click.option("--global", "global_flag", is_flag=True, help="Import to global scope")
 def import_cmd(file: str, group_name: str, fmt: str | None, global_flag: bool) -> None:
     """Import a group from a file."""
@@ -743,7 +952,8 @@ def import_cmd(file: str, group_name: str, fmt: str | None, global_flag: bool) -
         )
         if choice.lower() == "r":
             data.groups[group_name] = Group(
-                description=data.groups[group_name].description, commands=commands,
+                description=data.groups[group_name].description,
+                commands=commands,
             )
             added = len(commands)
         else:
@@ -793,7 +1003,9 @@ def group_edit(name: str, global_flag: bool) -> None:
 
 @group_grp.command(name="remove")
 @click.argument("name")
-@click.option("--global", "-g", "global_flag", is_flag=True, help="Remove from global scope")
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Remove from global scope"
+)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def group_remove(name: str, global_flag: bool, yes: bool) -> None:
     """Delete an entire group."""
@@ -828,7 +1040,9 @@ def group_remove(name: str, global_flag: bool, yes: bool) -> None:
 @group_grp.command(name="rename")
 @click.argument("old")
 @click.argument("new")
-@click.option("--global", "-g", "global_flag", is_flag=True, help="Rename in global scope")
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Rename in global scope"
+)
 def group_rename(old: str, new: str, global_flag: bool) -> None:
     """Rename a group."""
     from mem import groups, storage
@@ -849,7 +1063,9 @@ def group_rename(old: str, new: str, global_flag: bool) -> None:
 
 @group_grp.command(name="copy")
 @click.argument("name")
-@click.option("--global", "-g", "global_flag", is_flag=True, help="Copy to global scope")
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Copy to global scope"
+)
 @click.option("--repo", "repo_flag", is_flag=True, help="Copy to current repo scope")
 def group_copy(name: str, global_flag: bool, repo_flag: bool) -> None:
     """Copy a group between scopes."""
@@ -882,7 +1098,9 @@ def group_copy(name: str, global_flag: bool, repo_flag: bool) -> None:
     if name not in source_data.groups:
         raise click.ClickException(f"Group '{name}' not found in {source_scope} scope.")
     if name in target_data.groups:
-        raise click.ClickException(f"Group '{name}' already exists in {target_scope} scope.")
+        raise click.ClickException(
+            f"Group '{name}' already exists in {target_scope} scope."
+        )
 
     target_data.groups[name] = source_data.groups[name].model_copy(deep=True)
     storage.write_group_file(target_path, target_data)
@@ -908,10 +1126,116 @@ def saved_edit(global_flag: bool) -> None:
     scope_path = groups.resolve_scope(global_flag)
 
     if not scope_path.exists():
-        raise click.ClickException("No saved data yet. Save something first with 'mem save'.")
+        raise click.ClickException(
+            "No saved data yet. Save something first with 'mem save'."
+        )
 
     editor = os.environ.get("EDITOR", "vi")
     try:
         sp.run([*shlex.split(editor), str(scope_path)])
     except FileNotFoundError:
         err_console.print(f"Editor '{editor}' not found. Edit manually: {scope_path}")
+
+
+# --- Variable store subgroup ---
+
+
+@cli.group(name="vars")
+def vars_grp() -> None:
+    """Manage persistent variables."""
+
+
+@vars_grp.command(name="set")
+@click.argument("name")
+@click.argument("value", required=False, default=None)
+def vars_set(name: str, value: str | None) -> None:
+    """Set a persistent variable value."""
+    import re
+
+    from mem import storage
+    from mem.models import StoredVariable
+
+    if not re.match(r"^[A-Z][A-Z0-9_]+$", name):
+        raise click.ClickException(
+            f"Invalid variable name '{name}'. Use uppercase letters, digits, and underscores."
+        )
+
+    if value is None:
+        value = click.prompt(f"  Value for {name}")
+
+    vars_data = storage.read_vars_file()
+    vars_data.vars[name] = StoredVariable(value=value, last_used=0)
+    storage.write_vars_file(vars_data)
+    err_console.print(f"Stored: {name}")
+
+
+@vars_grp.command(name="list")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def vars_list(as_json: bool) -> None:
+    """List stored variables (values hidden)."""
+    from mem import storage
+
+    vars_data = storage.read_vars_file()
+
+    if as_json:
+        output = {
+            "variables": [
+                {"name": name, "last_used": sv.last_used}
+                for name, sv in sorted(vars_data.vars.items())
+            ]
+        }
+        click.echo(json.dumps(output, indent=2))
+        return
+
+    if not vars_data.vars:
+        console.print("No stored variables.")
+        return
+
+    console.print("\nStored variables (values hidden)")
+    for name, sv in sorted(vars_data.vars.items()):
+        if sv.last_used == 0:
+            time_str = "never used"
+        else:
+            time_str = f"last used {_relative_time(sv.last_used)}"
+        console.print(f"  {name:<20} {time_str}")
+    console.print()
+
+
+@vars_grp.command(name="remove")
+@click.argument("name")
+def vars_remove(name: str) -> None:
+    """Remove a stored variable."""
+    from mem import storage
+
+    vars_data = storage.read_vars_file()
+
+    if name not in vars_data.vars:
+        raise click.ClickException(f"Variable '{name}' not found.")
+
+    del vars_data.vars[name]
+    storage.write_vars_file(vars_data)
+    err_console.print(f"Removed: {name}")
+
+
+@vars_grp.command(name="clear")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def vars_clear(yes: bool) -> None:
+    """Remove all stored variables."""
+    from mem import storage
+
+    vars_data = storage.read_vars_file()
+
+    if not vars_data.vars:
+        console.print("No stored variables to clear.")
+        return
+
+    count = len(vars_data.vars)
+
+    if not yes:
+        if not click.confirm(f"Clear all {count} variable(s)?", default=False):
+            return
+
+    from mem.models import VarsFile
+
+    storage.write_vars_file(VarsFile())
+    err_console.print(f"Cleared {count} variable(s).")
