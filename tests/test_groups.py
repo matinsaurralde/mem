@@ -803,7 +803,7 @@ class TestExportCLI:
     def test_export_markdown(self, tmp_mem_dir: Path):
         self._setup_group(tmp_mem_dir)
         runner = CliRunner()
-        result = runner.invoke(cli, ["export", "deploy", "--global", "-f", "markdown"])
+        result = runner.invoke(cli, ["export", "deploy", "--global", "-f", "markdown", "--stdout"])
         assert result.exit_code == 0
         assert "## deploy" in result.output
         assert "| `make build` | build first |" in result.output
@@ -811,7 +811,7 @@ class TestExportCLI:
     def test_export_json(self, tmp_mem_dir: Path):
         self._setup_group(tmp_mem_dir)
         runner = CliRunner()
-        result = runner.invoke(cli, ["export", "deploy", "--global", "-f", "json"])
+        result = runner.invoke(cli, ["export", "deploy", "--global", "-f", "json", "--stdout"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "deploy" in data
@@ -1183,7 +1183,7 @@ class TestExportCLIAdditional:
             }),
         )
         runner = CliRunner()
-        result = runner.invoke(cli, ["export", "g", "--global", "-f", "json"])
+        result = runner.invoke(cli, ["export", "g", "--global", "-f", "json", "--stdout"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert len(data["g"]["commands"]) == 2
@@ -1275,3 +1275,259 @@ class TestEditorParsing:
         assert args[0] == "vim"
         assert args[1] == "-u"
         assert args[2] == "NONE"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: -g short flag for --global
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalShortFlag:
+    """Verify -g works as short flag for --global on applicable commands."""
+
+    def test_list_short_g(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(saved=[SavedCommand(cmd="echo test")]),
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["list", "-g"])
+        assert result.exit_code == 0
+        assert "echo test" in result.output
+
+    def test_run_short_g(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo hi")])}),
+        )
+        runner = CliRunner()
+        with patch("mem.cli._is_interactive", return_value=True):
+            result = runner.invoke(cli, ["run", "grp", "-g"], input="n\n")
+        assert result.exit_code == 0
+
+    def test_export_short_g(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo hi")])}),
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["export", "grp", "-g", "--stdout"])
+        assert result.exit_code == 0
+
+    def test_group_edit_short_g(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo x")])}),
+        )
+        runner = CliRunner()
+        with patch("subprocess.run"):
+            result = runner.invoke(cli, ["group", "edit", "grp", "-g"])
+        assert result.exit_code == 0
+
+    def test_group_remove_short_g(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo x")])}),
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["group", "remove", "grp", "-g", "-y"])
+        assert result.exit_code == 0
+
+    def test_group_rename_short_g(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"old": Group(commands=[GroupCommand(cmd="echo x")])}),
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["group", "rename", "old", "new", "-g"])
+        assert result.exit_code == 0
+
+    def test_saved_edit_short_g(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(saved=[SavedCommand(cmd="echo x")]),
+        )
+        runner = CliRunner()
+        with patch("subprocess.run"):
+            result = runner.invoke(cli, ["saved", "edit", "-g"])
+        assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: mem list --repo
+# ---------------------------------------------------------------------------
+
+
+class TestListRepoFlag:
+    """Verify --repo / -r flag on mem list."""
+
+    def test_repo_flag_shows_only_repo(self, tmp_mem_dir: Path):
+        repo_name = storage.sanitize_repo_name(FAKE_REPO)
+        repo_path = storage.group_file_path(repo_name)
+        storage.write_group_file(
+            repo_path,
+            GroupFile(saved=[SavedCommand(cmd="repo cmd")]),
+        )
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(saved=[SavedCommand(cmd="global cmd")]),
+        )
+        runner = CliRunner()
+        with _mock_repo():
+            result = runner.invoke(cli, ["list", "--repo"])
+        assert result.exit_code == 0
+        assert "repo cmd" in result.output
+        assert "global cmd" not in result.output
+
+    def test_repo_short_r(self, tmp_mem_dir: Path):
+        repo_name = storage.sanitize_repo_name(FAKE_REPO)
+        repo_path = storage.group_file_path(repo_name)
+        storage.write_group_file(
+            repo_path,
+            GroupFile(saved=[SavedCommand(cmd="repo cmd")]),
+        )
+        runner = CliRunner()
+        with _mock_repo():
+            result = runner.invoke(cli, ["list", "-r"])
+        assert result.exit_code == 0
+        assert "repo cmd" in result.output
+
+    def test_repo_and_global_mutual_exclusion(self, tmp_mem_dir: Path):
+        runner = CliRunner()
+        with _mock_repo():
+            result = runner.invoke(cli, ["list", "--repo", "--global"])
+        assert result.exit_code != 0
+        assert "Cannot use --global and --repo together" in result.output
+
+    def test_repo_outside_git_repo(self, tmp_mem_dir: Path):
+        runner = CliRunner()
+        with patch("mem.cli._current_repo", return_value=None):
+            result = runner.invoke(cli, ["list", "--repo"])
+        assert result.exit_code != 0
+        assert "Not in a git repository" in result.output
+
+    def test_repo_json_excludes_global(self, tmp_mem_dir: Path):
+        repo_name = storage.sanitize_repo_name(FAKE_REPO)
+        repo_path = storage.group_file_path(repo_name)
+        storage.write_group_file(
+            repo_path,
+            GroupFile(saved=[SavedCommand(cmd="repo cmd")]),
+        )
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(saved=[SavedCommand(cmd="global cmd")]),
+        )
+        runner = CliRunner()
+        with _mock_repo():
+            result = runner.invoke(cli, ["list", "--repo", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "repo" in data
+        assert "global" not in data
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: mem export defaults to JSON + clipboard
+# ---------------------------------------------------------------------------
+
+
+class TestExportClipboard:
+    """Verify export defaults and clipboard behavior."""
+
+    def _setup(self, tmp_mem_dir: Path):
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE,
+            GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo hi")])}),
+        )
+
+    def test_export_default_is_json(self, tmp_mem_dir: Path):
+        self._setup(tmp_mem_dir)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["export", "grp", "--global", "--stdout"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "grp" in data
+
+    def test_export_stdout_flag(self, tmp_mem_dir: Path):
+        self._setup(tmp_mem_dir)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["export", "grp", "--global", "--stdout"])
+        assert result.exit_code == 0
+        assert result.output.strip()  # something was printed
+
+    def test_export_clipboard_copies(self, tmp_mem_dir: Path):
+        self._setup(tmp_mem_dir)
+        runner = CliRunner()
+        with patch("mem.cli._copy_to_clipboard", return_value=True) as mock_cp:
+            result = runner.invoke(cli, ["export", "grp", "--global"])
+        assert result.exit_code == 0
+        mock_cp.assert_called_once()
+        assert "Copied json to clipboard" in result.output
+
+    def test_export_clipboard_fallback(self, tmp_mem_dir: Path):
+        self._setup(tmp_mem_dir)
+        runner = CliRunner()
+        with patch("mem.cli._copy_to_clipboard", return_value=False):
+            result = runner.invoke(cli, ["export", "grp", "--global"])
+        assert result.exit_code == 0
+        assert "no clipboard tool found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: mem import auto-detect format
+# ---------------------------------------------------------------------------
+
+
+class TestImportAutoDetect:
+    """Verify import auto-detects format from file extension."""
+
+    def test_auto_detect_json(self, tmp_mem_dir: Path, tmp_path: Path):
+        content = json.dumps({"commands": [{"cmd": "echo auto"}]})
+        f = tmp_path / "data.json"
+        f.write_text(content, encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["import", str(f), "-g", "auto-grp", "--global"],
+        )
+        assert result.exit_code == 0
+        assert "Imported 1 commands" in result.output
+
+    def test_auto_detect_markdown(self, tmp_mem_dir: Path, tmp_path: Path):
+        md = (
+            "## test\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `echo md` | from md |\n"
+        )
+        f = tmp_path / "data.md"
+        f.write_text(md, encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["import", str(f), "-g", "md-grp", "--global"],
+        )
+        assert result.exit_code == 0
+
+    def test_auto_detect_unknown_extension_errors(self, tmp_mem_dir: Path, tmp_path: Path):
+        f = tmp_path / "data.txt"
+        f.write_text("hello", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["import", str(f), "-g", "grp", "--global"],
+        )
+        assert result.exit_code != 0
+        assert "Cannot detect format" in result.output
+
+    def test_explicit_format_overrides(self, tmp_mem_dir: Path, tmp_path: Path):
+        content = json.dumps({"commands": [{"cmd": "echo override"}]})
+        f = tmp_path / "data.txt"
+        f.write_text(content, encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["import", str(f), "-g", "grp", "--global", "-f", "json"],
+        )
+        assert result.exit_code == 0
+        assert "Imported 1 commands" in result.output
