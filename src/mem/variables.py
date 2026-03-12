@@ -290,10 +290,6 @@ async def _detect_credentials_async(cmd: str) -> list[tuple[str, str, str]]:
             "Why this looks like a credential (e.g., 'JWT token', 'API key')"
         )
 
-    @fm.generable("List of credentials detected in a shell command")
-    class CredentialList:
-        credentials: list[CredentialDetection] = fm.guide("All detected credentials")
-
     session = fm.LanguageModelSession()
     prompt = (
         "Analyze this shell command and identify any sensitive values "
@@ -303,8 +299,10 @@ async def _detect_credentials_async(cmd: str) -> list[tuple[str, str, str]]:
         f"Command: {cmd}"
     )
 
-    result = await session.respond(prompt, generating=CredentialList)
-    return [(c.original_value, c.suggested_name, c.reason) for c in result.credentials]
+    result = await session.respond(prompt, generating=CredentialDetection)
+    if isinstance(result, list):
+        return [(c.original_value, c.suggested_name, c.reason) for c in result]
+    return [(result.original_value, result.suggested_name, result.reason)]
 
 
 def detect_credentials(cmd: str) -> list[tuple[str, str, str]]:
