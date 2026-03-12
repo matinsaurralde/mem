@@ -95,18 +95,24 @@ async def _generalize_commands(tool: str, unique_commands: list[str]) -> dict[st
     """Generalize each unique command via Apple FM guided generation.
 
     Returns a mapping from concrete command -> generalized pattern.
-    Uses one LanguageModelSession per tool to share context.
+    Uses a fresh session per command to avoid exceeding the on-device
+    model's context window when processing many commands.
     """
     import apple_fm_sdk as fm
 
     GeneralizedCommand = _get_generable_types()
-    session = fm.LanguageModelSession()
     cmd_to_pattern: dict[str, str] = {}
 
     for cmd in unique_commands:
-        prompt = GENERALIZE_PROMPT.format(tool=tool, command=cmd)
-        result = await session.respond(prompt, generating=GeneralizedCommand)
-        cmd_to_pattern[cmd] = result.pattern
+        try:
+            session = fm.LanguageModelSession()
+            prompt = GENERALIZE_PROMPT.format(tool=tool, command=cmd)
+            result = await session.respond(prompt, generating=GeneralizedCommand)
+            cmd_to_pattern[cmd] = result.pattern
+        except Exception:
+            # Skip commands that fail (too long, context issues, etc.)
+            # Fall back to the raw command as its own pattern.
+            cmd_to_pattern[cmd] = cmd
 
     return cmd_to_pattern
 
