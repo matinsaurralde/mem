@@ -431,11 +431,19 @@ def save(
             err_console.print(f"\n  Detected possible credential: {reason}")
             proposed = command.replace(original_value, f"${suggested_name}")
             err_console.print(f"  Suggested: {proposed}")
-            var_name = click.prompt(
-                "  Variable name",
-                default=suggested_name,
-                err=True,
-            )
+            # Prompt for variable name with validation loop
+            while True:
+                var_name = click.prompt(
+                    "  Variable name",
+                    default=suggested_name,
+                    err=True,
+                )
+                if _re.match(r"^[A-Z][A-Z0-9_]+$", var_name):
+                    break
+                err_console.print(
+                    f"  Invalid name '{var_name}'. "
+                    "Must be UPPERCASE letters, digits, underscores (min 2 chars)."
+                )
             if click.confirm("  Save with variable?", default=True, err=True):
                 command = command.replace(original_value, f"${var_name}")
 

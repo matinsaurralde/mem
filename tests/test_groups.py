@@ -1718,3 +1718,143 @@ class TestRepoDisplayPath:
         assert FAKE_REPO in result.output
         # Sanitized name should NOT appear
         assert repo_name not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Credential detection helpers (pre-filter, deduplication, normalization)
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialPreFilter:
+    """Fix 4: skip AI detection on simple commands."""
+
+    def test_simple_echo_skipped(self):
+        from mem.variables import _command_may_contain_credentials
+
+        assert _command_may_contain_credentials("echo hello") is False
+
+    def test_ls_skipped(self):
+        from mem.variables import _command_may_contain_credentials
+
+        assert _command_may_contain_credentials("ls -la") is False
+
+    def test_short_command_skipped(self):
+        from mem.variables import _command_may_contain_credentials
+
+        assert _command_may_contain_credentials("cd /tmp") is False
+
+    def test_bearer_token_detected(self):
+        from mem.variables import _command_may_contain_credentials
+
+        cmd = "curl -H 'Authorization: Bearer eyJhbGciOi...' https://api.example.com"
+        assert _command_may_contain_credentials(cmd) is True
+
+    def test_long_token_detected(self):
+        from mem.variables import _command_may_contain_credentials
+
+        cmd = "curl -H 'X-Api-Key: abcdefghijklmnopqrstuvwxyz' https://api.example.com"
+        assert _command_may_contain_credentials(cmd) is True
+
+    def test_password_keyword_detected(self):
+        from mem.variables import _command_may_contain_credentials
+
+        cmd = "mysql -u root --password=secret"
+        assert _command_may_contain_credentials(cmd) is True
+
+
+class TestNormalizeVarName:
+    """AI often suggests CamelCase names — normalize to UPPER_SNAKE_CASE."""
+
+    def test_camel_case(self):
+        from mem.variables import _normalize_var_name
+
+        assert _normalize_var_name("ShellCommandExecution") == "SHELL_COMMAND_EXECUTION"
+
+    def test_already_upper_snake(self):
+        from mem.variables import _normalize_var_name
+
+        assert _normalize_var_name("ACME_API_TOKEN") == "ACME_API_TOKEN"
+
+    def test_lowercase(self):
+        from mem.variables import _normalize_var_name
+
+        assert _normalize_var_name("acme_var") == "ACME_VAR"
+
+    def test_mixed_with_invalid_chars(self):
+        from mem.variables import _normalize_var_name
+
+        assert _normalize_var_name("my-api.key") == "MY_API_KEY"
+
+
+class TestDeduplicateDetections:
+    """Fix 3: filter out hallucinations, URLs, and overlapping detections."""
+
+    def test_filters_hallucinated_values(self):
+        from mem.variables import _deduplicate_detections
+
+        cmd = "echo hello"
+        detections = [("not_in_command", "SOME_VAR", "hallucination")]
+        assert _deduplicate_detections(detections, cmd) == []
+
+    def test_filters_urls(self):
+        from mem.variables import _deduplicate_detections
+
+        cmd = "curl https://api.example.com/users"
+        detections = [
+            ("https://api.example.com/users", "API_URL", "URL endpoint"),
+        ]
+        assert _deduplicate_detections(detections, cmd) == []
+
+    def test_filters_short_values(self):
+        from mem.variables import _deduplicate_detections
+
+        cmd = "echo short"
+        detections = [("short", "MY_VAR", "too short")]
+        assert _deduplicate_detections(detections, cmd) == []
+
+    def test_keeps_valid_credential(self):
+        from mem.variables import _deduplicate_detections
+
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        cmd = f"curl -H 'Authorization: Bearer {token}' https://api.example.com"
+        detections = [(token, "ACME_API_TOKEN", "JWT token")]
+        result = _deduplicate_detections(detections, cmd)
+        assert len(result) == 1
+        assert result[0][0] == token
+        assert result[0][1] == "ACME_API_TOKEN"
+
+    def test_removes_subset_detections(self):
+        from mem.variables import _deduplicate_detections
+
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        full_header = f"Bearer {token}"
+        cmd = f"curl -H 'Authorization: {full_header}' https://api.example.com"
+        detections = [
+            (token, "API_TOKEN", "JWT token"),
+            (full_header, "AUTH_HEADER", "Bearer token"),
+        ]
+        result = _deduplicate_detections(detections, cmd)
+        # Should keep only the longer one (full_header contains token)
+        assert len(result) == 1
+        assert result[0][0] == full_header
+
+    def test_deduplicates_same_value(self):
+        from mem.variables import _deduplicate_detections
+
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        cmd = f"curl -H 'Authorization: Bearer {token}'"
+        detections = [
+            (token, "TOKEN_A", "reason 1"),
+            (token, "TOKEN_B", "reason 2"),
+        ]
+        result = _deduplicate_detections(detections, cmd)
+        assert len(result) == 1
+
+    def test_normalizes_suggested_names(self):
+        from mem.variables import _deduplicate_detections
+
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        cmd = f"curl -H 'Bearer {token}'"
+        detections = [(token, "AcmeApiToken", "JWT")]
+        result = _deduplicate_detections(detections, cmd)
+        assert result[0][1] == "ACME_API_TOKEN"

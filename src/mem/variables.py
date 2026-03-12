@@ -261,6 +261,109 @@ def check_resolution_status(
     return result
 
 
+# Minimum token length that could plausibly be a hardcoded credential.
+# Real secrets (JWTs, API keys, base64 strings) are almost always 16+ chars.
+_MIN_CREDENTIAL_TOKEN_LEN = 16
+
+
+def _command_may_contain_credentials(cmd: str) -> bool:
+    """Quick heuristic to skip AI detection on simple commands.
+
+    Returns True only if the command plausibly contains hardcoded secrets.
+    Avoids sending trivial commands (echo, ls, cd) to the on-device model.
+    """
+    import shlex
+
+    # Known credential-context keywords — if present, always check
+    _CREDENTIAL_KEYWORDS = {
+        "bearer",
+        "authorization",
+        "password",
+        "token",
+        "secret",
+        "api_key",
+        "apikey",
+        "private_key",
+        "access_key",
+    }
+    lower = cmd.lower()
+    if any(kw in lower for kw in _CREDENTIAL_KEYWORDS):
+        return True
+
+    # Check for any token long enough to be a credential
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    return any(len(t.strip("'\"")) >= _MIN_CREDENTIAL_TOKEN_LEN for t in tokens)
+
+
+def _normalize_var_name(name: str) -> str:
+    """Normalize a suggested variable name to UPPER_SNAKE_CASE.
+
+    Handles CamelCase, mixed-case, and invalid characters from AI output.
+    """
+    # Convert CamelCase to UPPER_SNAKE
+    result = re.sub(r"(?<=[a-z])(?=[A-Z])", "_", name)
+    result = result.upper()
+    # Strip invalid characters
+    result = re.sub(r"[^A-Z0-9_]", "_", result)
+    # Collapse multiple underscores
+    result = re.sub(r"_+", "_", result)
+    return result.strip("_")
+
+
+def _deduplicate_detections(
+    detections: list[tuple[str, str, str]],
+    cmd: str,
+) -> list[tuple[str, str, str]]:
+    """Filter out invalid and duplicate credential detections.
+
+    Removes:
+    - Values not actually present in the command (AI hallucinations)
+    - URLs and hostnames (not credentials)
+    - Very short values (< 8 chars, not plausible secrets)
+    - Duplicate original_value entries
+    - Values that are substrings of other detected values
+    """
+    result: list[tuple[str, str, str]] = []
+    seen_values: set[str] = set()
+
+    for original_value, suggested_name, reason in detections:
+        # Skip hallucinated values not in the command
+        if original_value not in cmd:
+            continue
+        # Skip URLs
+        if original_value.startswith(("http://", "https://")):
+            continue
+        # Skip very short values
+        if len(original_value) < 8:
+            continue
+        # Skip duplicates
+        if original_value in seen_values:
+            continue
+        # Normalize suggested name to UPPER_SNAKE_CASE
+        normalized = _normalize_var_name(suggested_name)
+        if not re.match(r"^[A-Z][A-Z0-9_]+$", normalized):
+            continue
+
+        seen_values.add(original_value)
+        result.append((original_value, normalized, reason))
+
+    # Remove values that are substrings of other detected values
+    filtered: list[tuple[str, str, str]] = []
+    for i, (val_i, name_i, reason_i) in enumerate(result):
+        is_subset = any(
+            val_i in val_j and val_i != val_j
+            for j, (val_j, _, _) in enumerate(result)
+            if i != j
+        )
+        if not is_subset:
+            filtered.append((val_i, name_i, reason_i))
+
+    return filtered
+
+
 def _apple_fm_available() -> bool:
     """Check if Apple Foundation Models SDK is available."""
     try:
@@ -282,10 +385,19 @@ async def _detect_credentials_async(cmd: str) -> list[tuple[str, str, str]]:
 
     session = fm.LanguageModelSession()
     prompt = (
-        "Analyze this shell command and identify any sensitive values "
-        "(API tokens, passwords, secrets, keys, long base64 strings). "
-        "For each one, suggest a descriptive variable name based on the "
-        "context of the command.\n\n"
+        "Analyze this shell command and find ONLY hardcoded sensitive values "
+        "that should be replaced with environment variables.\n\n"
+        "ONLY flag these types of values:\n"
+        "- API tokens or keys (long alphanumeric/base64 strings like eyJhbG..., sk-...)\n"
+        "- Passwords passed inline (after --password, -p, etc.)\n"
+        "- Bearer tokens in Authorization headers\n"
+        "- Database connection strings with embedded passwords\n\n"
+        "DO NOT flag:\n"
+        "- URLs, hostnames, or IP addresses\n"
+        "- The command name or subcommands\n"
+        "- Short strings, regular arguments, or file paths\n"
+        "- Port numbers or known constants\n\n"
+        "If the command contains NO credentials, return an EMPTY list with no entries.\n\n"
         f"Command: {cmd}"
     )
 
@@ -302,9 +414,14 @@ def detect_credentials(cmd: str) -> list[tuple[str, str, str]]:
     if not _apple_fm_available():
         return []
 
+    # Pre-filter: skip commands unlikely to contain credentials
+    if not _command_may_contain_credentials(cmd):
+        return []
+
     try:
         import asyncio
 
-        return asyncio.run(_detect_credentials_async(cmd))
+        raw = asyncio.run(_detect_credentials_async(cmd))
+        return _deduplicate_detections(raw, cmd)
     except Exception:
         return []
