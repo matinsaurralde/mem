@@ -434,7 +434,7 @@ def save(
             # Prompt for variable name with validation loop
             while True:
                 var_name = click.prompt(
-                    "  Variable name",
+                    "  Variable name (Enter to accept, or type to rename)",
                     default=suggested_name,
                     err=True,
                 )
