@@ -209,29 +209,21 @@ add-zsh-hook precmd _mem_precmd
 """
 
 
-@cli.command()
-@click.option("--keep-commands", type=int, default=90, help="Days to retain commands")
-@click.option("--keep-sessions", type=int, default=30, help="Days to retain sessions")
-def sync(keep_commands: int, keep_sessions: int) -> None:
-    """Extract patterns and rotate old data."""
-    from rich.progress import Progress
+@cli.command(name="_sync", hidden=True)
+def sync_cmd() -> None:
+    """Internal: background pattern extraction and data rotation.
 
-    from mem.patterns import sync_all_patterns
-    from mem import storage
+    Triggered automatically every 20 captured commands. Runs silently —
+    no output, no errors. Never called by the user directly.
+    """
+    try:
+        from mem.patterns import sync_all_patterns
+        from mem import storage
 
-    # Pattern extraction
-    with Progress(console=console) as progress:
-        task = progress.add_task("Extracting patterns...", total=None)
-        new, updated = sync_all_patterns()
-        progress.update(task, completed=100, total=100)
-
-    console.print(f"Patterns: {new} new, {updated} updated\n")
-
-    # Rotation
-    cmd_removed, sess_removed = storage.rotate(keep_commands, keep_sessions)
-    console.print("Rotation:")
-    console.print(f"  Commands older than {keep_commands}d: {cmd_removed} removed")
-    console.print(f"  Sessions older than {keep_sessions}d: {sess_removed} removed")
+        sync_all_patterns(silent=True)
+        storage.rotate()
+    except Exception:
+        pass  # Background task — never surface errors
 
 
 @cli.command()

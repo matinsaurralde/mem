@@ -70,6 +70,32 @@ def capture_command(raw: str, directory: str, exit_code: int, duration_ms: int) 
     except Exception:
         pass  # Session tracking failure should never block capture
 
+    # Auto-sync: trigger background pattern extraction every N captures
+    try:
+        count = storage.increment_sync_counter()
+        if count >= storage.SYNC_THRESHOLD:
+            storage.reset_sync_counter()
+            _spawn_background_sync()
+    except Exception:
+        pass  # Auto-sync failure should never block capture
+
+
+def _spawn_background_sync() -> None:
+    """Spawn `mem _sync` as a fully detached background process.
+
+    The subprocess inherits nothing from the parent — no stdout, no stderr,
+    no wait. It runs and exits silently.
+    """
+    import sys as _sys
+
+    mem_exe = _sys.executable
+    subprocess.Popen(
+        [mem_exe, "-m", "mem.cli", "_sync"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
 
 class SessionTracker:
     """Tracks work sessions across shell commands.

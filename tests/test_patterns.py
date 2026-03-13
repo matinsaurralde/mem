@@ -463,7 +463,7 @@ class TestDeduplication:
 
 class TestSyncAllPatterns:
     def test_sync_warns_without_sdk(self, tmp_mem_dir, capsys):
-        """sync_all_patterns prints warning when SDK is unavailable."""
+        """sync_all_patterns prints warning when SDK is unavailable (non-silent)."""
         now = int(time.time())
         for i in range(6):
             storage.append_command(
@@ -480,6 +480,25 @@ class TestSyncAllPatterns:
         assert new == 1
         captured = capsys.readouterr()
         assert "pip install cli-mem[ai]" in captured.err
+
+    def test_sync_silent_no_output(self, tmp_mem_dir, capsys):
+        """sync_all_patterns(silent=True) produces no output."""
+        now = int(time.time())
+        for i in range(6):
+            storage.append_command(
+                make_command(
+                    command=f"make target-{i}",
+                    ts=now,
+                    repo="/Users/test/projects/myapp",
+                )
+            )
+
+        with patch.object(patterns, "_apple_fm_available", return_value=False):
+            new, updated = patterns.sync_all_patterns(silent=True)
+
+        assert new == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
 
     def test_sync_skips_tools_below_threshold(self, tmp_mem_dir):
         """Tools with <5 commands are skipped entirely."""
@@ -522,6 +541,93 @@ class TestSyncAllPatterns:
         assert storage.read_patterns("tool-a") is not None
         assert storage.read_patterns("tool-b") is not None
         assert storage.read_patterns("tool-c") is None
+
+
+class TestPatternCaching:
+    """Verify that already-processed commands skip the LLM."""
+
+    @pytest.mark.asyncio
+    async def test_cached_commands_skip_llm(self):
+        """Commands in already_processed set should not trigger LLM calls."""
+        call_count = 0
+
+        async def _counting_respond(prompt: str, generating=None):
+            nonlocal call_count
+            call_count += 1
+            for line in prompt.splitlines():
+                if line.startswith("Command:"):
+                    cmd = line.split("Command:", 1)[1].strip()
+                    return _make_mock_generalized(f"{cmd} <generalized>")
+            return _make_mock_generalized("unknown")
+
+        mock_session = MockSession(respond_fn=_counting_respond)
+
+        with (
+            patch.object(patterns, "_apple_fm_available", return_value=True),
+            patch("mem.patterns._get_generable_types", return_value=MagicMock()),
+            patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
+        ):
+            # First call: 3 unique commands, all new
+            commands = ["git status", "git log", "git diff", "git status", "git log"]
+            await patterns.extract_patterns_for_tool("git", commands)
+
+        assert call_count == 3  # 3 unique commands
+
+        # Second call with cache: only 1 new command
+        call_count = 0
+        already_done = {"git status", "git log", "git diff"}
+
+        with (
+            patch.object(patterns, "_apple_fm_available", return_value=True),
+            patch("mem.patterns._get_generable_types", return_value=MagicMock()),
+            patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
+        ):
+            commands2 = commands + ["git push"]
+            await patterns.extract_patterns_for_tool(
+                "git", commands2, already_done
+            )
+
+        assert call_count == 1  # Only "git push" is new
+
+
+class TestAutoSync:
+    """Verify the sync counter and auto-trigger logic."""
+
+    def test_counter_increment(self, tmp_mem_dir):
+        assert storage.read_sync_counter() == 0
+        assert storage.increment_sync_counter() == 1
+        assert storage.increment_sync_counter() == 2
+        assert storage.read_sync_counter() == 2
+
+    def test_counter_reset(self, tmp_mem_dir):
+        storage.increment_sync_counter()
+        storage.increment_sync_counter()
+        storage.reset_sync_counter()
+        assert storage.read_sync_counter() == 0
+
+    def test_capture_triggers_sync_at_threshold(self, tmp_mem_dir):
+        """After SYNC_THRESHOLD captures, _spawn_background_sync is called."""
+        from mem import capture
+
+        with (
+            patch.object(storage, "SYNC_THRESHOLD", 3),
+            patch.object(capture, "_spawn_background_sync") as mock_spawn,
+            patch.object(capture, "get_git_repo", return_value=None),
+        ):
+            capture.capture_command("cmd1", "/tmp", 0, 100)
+            capture.capture_command("cmd2", "/tmp", 0, 100)
+            assert mock_spawn.call_count == 0
+
+            capture.capture_command("cmd3", "/tmp", 0, 100)
+            assert mock_spawn.call_count == 1
+
+            # Counter reset, so next 3 should trigger again
+            capture.capture_command("cmd4", "/tmp", 0, 100)
+            capture.capture_command("cmd5", "/tmp", 0, 100)
+            assert mock_spawn.call_count == 1
+
+            capture.capture_command("cmd6", "/tmp", 0, 100)
+            assert mock_spawn.call_count == 2
 
 
 # ---------------------------------------------------------------------------

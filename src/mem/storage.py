@@ -312,6 +312,36 @@ def forget_commands(query: str) -> int:
     return removed
 
 
+# --- Sync counter ---
+
+SYNC_COUNTER_FILE = MEM_DIR / ".sync_counter"
+SYNC_THRESHOLD = 20
+
+
+def read_sync_counter() -> int:
+    """Read the number of captures since last sync."""
+    if not SYNC_COUNTER_FILE.exists():
+        return 0
+    try:
+        return int(SYNC_COUNTER_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return 0
+
+
+def increment_sync_counter() -> int:
+    """Increment capture counter and return new value."""
+    count = read_sync_counter() + 1
+    ensure_dirs()
+    SYNC_COUNTER_FILE.write_text(str(count), encoding="utf-8")
+    return count
+
+
+def reset_sync_counter() -> None:
+    """Reset capture counter after a sync."""
+    ensure_dirs()
+    SYNC_COUNTER_FILE.write_text("0", encoding="utf-8")
+
+
 # --- Named Groups storage ---
 
 

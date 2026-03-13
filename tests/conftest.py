@@ -21,6 +21,10 @@ def tmp_mem_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
         storage, "GROUPS_GLOBAL_FILE", tmp_path / "groups" / "_global.json"
     )
+    monkeypatch.setattr(
+        storage, "SYNC_COUNTER_FILE", tmp_path / ".sync_counter"
+    )
+    monkeypatch.setattr(storage, "VARS_FILE", tmp_path / "vars.json")
     return tmp_path
 
 
