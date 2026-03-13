@@ -193,7 +193,7 @@ _mem_capturing=""
 _mem_debug_trap() {
   if [[ -z "$_mem_capturing" && -n "$BASH_COMMAND" ]]; then
     _mem_capturing=1
-    _mem_cmd="$(HISTTIMEFORMAT= history 1 | sed 's/^[ ]*[0-9]*[ ]*//')"
+    _mem_cmd="$BASH_COMMAND"
     _mem_start=$SECONDS
   fi
 }
