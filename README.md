@@ -1,99 +1,84 @@
 <p align="center">
   <h1 align="center">mem</h1>
   <p align="center">
-    <strong>Your shell history, understood. Not just searched.</strong>
+    <strong>Your shell, remembered.</strong>
   </p>
   <p align="center">
-    A privacy-first CLI that turns your terminal history into an intelligent,<br>
-    searchable memory system — powered by on-device AI, with zero cloud dependencies.
+    A privacy-first CLI that captures, searches, and organizes your terminal history<br>
+    with on-device AI. Nothing ever leaves your machine.
   </p>
   <p align="center">
-    <a href="#installation"><img alt="macOS 26+" src="https://img.shields.io/badge/macOS-26%2B-blue?logo=apple&logoColor=white"></a>
-    <a href="#installation"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white"></a>
+    <a href="#install"><img alt="macOS 26+" src="https://img.shields.io/badge/macOS-26%2B-blue?logo=apple&logoColor=white"></a>
+    <a href="#install"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white"></a>
     <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
-    <a href="PHILOSOPHY.md"><img alt="Privacy: 100% on-device" src="https://img.shields.io/badge/privacy-100%25%20on--device-brightgreen"></a>
+    <a href="PHILOSOPHY.md"><img alt="Privacy: on-device" src="https://img.shields.io/badge/privacy-100%25%20on--device-brightgreen"></a>
   </p>
 </p>
-
-<p align="center">
-  <img src="assets/demo.gif" alt="mem demo" width="700">
-</p>
-
-<!-- TODO: Record a demo GIF showing: mem deploy → results from different repos -->
-<!-- Use https://github.com/faressoft/terminalizer or asciinema + agg -->
 
 ---
 
-Unlike `Ctrl+R`, mem knows *where* you are. The same query returns different results depending on your current git repository — because `kubectl apply` means something different in your infra repo than in your backend repo.
+## What mem does
 
-Unlike cloud-based history tools, **nothing ever leaves your machine**. Every command, pattern, and session stays in plain text files you can `cat`, `grep`, and `tail`.
+mem silently captures every command you type, then lets you search, save, and replay them — scoped to the git repo you're in.
 
-## Features
+```bash
+mem deploy             # search your history
+mem save "cmd" -g ops  # save a command to a group
+mem run ops            # run the group interactively
+mem vars set API_KEY   # store a secret for saved commands
+```
 
-- **Context-aware search** — results ranked by your current git repo, not just recency
-- **AI pattern extraction** — learns that `kubectl get pods`, `kubectl get services`, `kubectl get deployments` are all `kubectl get <resource>`
-- **100% on-device** — uses Apple Foundation Models locally. Zero network. Zero telemetry
-- **Plain text storage** — everything in `~/.mem/` as JSONL files. Inspect with `cat`. Search with `grep`
-- **Silent capture** — shell hook adds <5ms to prompt. You won't notice it
-- **Session replay** — recall the exact sequence of commands from last Tuesday's debugging session
+Unlike `Ctrl+R`, mem ranks results by frequency, recency, and the repo you're currently in. Unlike cloud-based tools, everything stays on your machine as plain text files in `~/.mem/`.
 
-## Quick start
+---
 
-### 1. Install
+## Install
 
 ```bash
 # Homebrew (recommended)
 brew install matinsaurralde/tap/mem
 
-# Quick install script
-curl -fsSL https://raw.githubusercontent.com/matinsaurralde/mem/main/install.sh | bash
+# pip
+pip install cli-mem
 
-# pip / pipx
-pipx install mem-cli
+# With AI features (pattern extraction + credential detection)
+pip install "cli-mem[ai]"
 ```
 
-### 2. Activate
+Then activate the shell hook:
 
 ```bash
 echo 'eval "$(mem init zsh)"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-### 3. Use your terminal
+That's it. Every command you type is now silently captured with full context (directory, git repo, exit code, duration).
 
-Every command is silently captured with full context — directory, git repo, exit code, duration.
+---
 
-### 4. Search
+## Search
 
-```bash
-mem deploy
-```
-
-```
- 1  kubectl apply -f deployment.yaml    infra       2h ago
- 2  docker compose up -d                backend     1d ago
- 3  fly deploy                          api         3d ago
-```
-
-That's it. mem gets smarter the more you use it.
-
-## Usage
-
-### Search history
+Just type `mem` followed by any keyword. Results are ranked by your current repo.
 
 ```bash
-mem kubectl                    # search by keyword
-mem "docker compose"           # search by phrase
-mem deploy -n 20               # show more results
-mem deploy --json              # machine-readable output
+mem kubectl              # search by keyword
+mem "docker compose"     # search by phrase
+mem deploy -n 20         # more results
+mem deploy --json        # machine-readable output
 ```
 
-### See patterns
+```
+  1  kubectl apply -f deployment.yaml    infra       2h ago
+  2  docker compose up -d                backend     1d ago
+  3  fly deploy                          api         3d ago
+```
 
-After running `mem sync`, mem uses on-device AI to extract structural patterns from your history:
+### Patterns
+
+mem automatically learns structural patterns from your history using on-device AI. No manual step needed — extraction runs in the background every 20 commands.
 
 ```bash
-mem kubectl --pattern
+mem kubectl -p
 ```
 
 ```
@@ -105,60 +90,197 @@ Patterns for "kubectl":
   kubectl apply -f <file>
 ```
 
-### Recall sessions
+---
+
+## Groups
+
+Groups are named collections of commands — like runbooks you can execute.
+
+### Save commands to a group
 
 ```bash
-mem session "api outage"
+mem save "kubectl get pods -n production" --group k8s --comment "list pods"
+mem save "docker compose up -d" -g deploy -c "start services"
+```
+
+Save the last command you ran:
+
+```bash
+mem save "!" -g troubleshooting
+```
+
+### List groups
+
+```bash
+mem list                 # show all groups and saved commands
+mem list k8s             # show commands in a specific group
+mem list -g              # global scope only
+mem list -r              # current repo only
+mem list --json          # JSON output
+```
+
+### Run a group
+
+```bash
+mem run k8s              # run interactively (pick one or all)
+mem run deploy -y        # run all without prompts
+```
+
+### Manage groups
+
+```bash
+mem group rename old new       # rename a group
+mem group remove k8s           # delete a group
+mem group copy k8s --global    # copy from repo to global scope
+mem group edit k8s             # open in $EDITOR
+```
+
+### Export and import
+
+```bash
+mem export k8s                       # copy JSON to clipboard
+mem export k8s --format markdown     # copy as markdown
+mem export k8s --stdout              # print instead of clipboard
+
+mem import runbook.json -g ops       # import from file (auto-detects format)
+mem import runbook.md -g ops         # markdown works too
+```
+
+---
+
+## Variables
+
+Saved commands can contain `$VAR_NAME` placeholders that get resolved at runtime. Values never get stored in group files.
+
+### Save commands with variables
+
+```bash
+# Variables are detected automatically from $VAR_NAME tokens
+mem save "ssh -i ~/.ssh/\$KEY_NAME ubuntu@\$BASTION_HOST" -g ssh
+
+# Set a default value with --var
+mem save "kubectl get pods -n \$NAMESPACE" -g k8s --var NAMESPACE=production
+
+# AI detects hardcoded credentials and suggests variables
+mem save "curl -H 'Authorization: Bearer eyJhbGci...' https://api.example.com/users" -g api
+#  Detected possible credential: Bearer token
+#  Suggested: curl -H 'Authorization: Bearer $API_TOKEN' ...
+#  Variable name [API_TOKEN]: █
+```
+
+### Resolution priority
+
+When `mem run` encounters variables, it resolves them in this order:
+
+1. **Inline arguments** — `mem run api API_TOKEN=abc123`
+2. **Shell environment** — `export API_TOKEN=abc123`
+3. **Persistent store** — `mem vars set API_TOKEN`
+4. **Default value** — from `--var NAME=default` at save time
+5. **Interactive prompt** — asks you, only as a last resort
+
+All prompts are collected upfront before any command runs. With `--yes`, unresolved variables cause an immediate error listing what's missing.
+
+### Variable store
+
+For values that persist across sessions but shouldn't be in `.zshrc`:
+
+```bash
+mem vars set API_TOKEN           # hidden input (like sudo)
+mem vars set DB_HOST staging.db  # inline for non-sensitive values
+mem vars list                    # shows names only, never values
+mem vars remove API_TOKEN
+mem vars clear
+```
+
+### Variable status in listings
+
+`mem list` shows whether each variable is ready:
+
+```
+● backend / api
+  ──────────────────────────────────────────────────────
+  1. curl -H 'Authorization: Bearer $API_TOKEN' .../users/$USER_ID
+     ✓ $API_TOKEN  resolved from environment
+     ⚠ $USER_ID    unset — pass inline: mem run api USER_ID=42
+```
+
+---
+
+## Scoping
+
+Every group and saved command lives in either **repo scope** (tied to the current git repo) or **global scope** (available everywhere).
+
+- Inside a git repo: defaults to repo scope
+- Outside a git repo: defaults to global scope
+- Use `--global` / `-g` to force global scope
+- A repo group **shadows** a global group with the same name
+
+---
+
+## Sessions
+
+mem groups your commands into work sessions (based on 5-minute idle gaps and repo changes) so you can recall exactly what you did.
+
+```bash
+mem session "api outage"       # search sessions by keyword
+mem session debug --json       # machine-readable output
 ```
 
 ```
-+-----------------------------------------+
-| Session: 2026-03-07 14:30  myapp        |
-|-----------------------------------------|
-|  1  kubectl logs api-7f9b --tail=100    |
-|  2  kubectl get pods -n production      |
-|  3  kubectl rollout restart deploy api  |
-|  4  curl -s localhost:8080/health       |
-+-----------------------------------------+
+┌ [1] Session: 2026-03-07 14:30  myapp ──────────────────┐
+│   1  kubectl logs api-7f9b --tail=100                   │
+│   2  kubectl get pods -n production                     │
+│   3  kubectl rollout restart deploy api                 │
+│   4  curl -s localhost:8080/health                      │
+└─────────────────────────────────────────────────────────┘
 
 Replay a session? [number/n]: _
 ```
 
-### More commands
+Replaying a session executes each command with per-command confirmation.
+
+---
+
+## Other commands
 
 ```bash
-mem stats                      # top commands, repos, totals
-mem sync                       # extract patterns + clean old data
-mem forget "API_KEY=sk-..."    # permanently delete sensitive commands
-mem init zsh                   # print shell hook code
+mem stats                        # top commands, repos, totals
+mem stats --json                 # machine-readable stats
+mem forget "API_KEY=sk-..."      # permanently delete matching commands
+mem forget "password" --yes      # skip confirmation
+mem init zsh                     # print shell hook code
 ```
+
+---
 
 ## How it works
 
 ```
 You type a command
-        │
-        ▼
-   Shell hook (preexec/precmd)
-        │
-        ▼
-   mem _capture  ← runs in background, <5ms
-        │
-        ▼
-   Append one JSON line to ~/.mem/repos/<repo>.jsonl
+       │
+       ▼
+  Shell hook (preexec/precmd)
+       │
+       ▼
+  mem _capture  ← runs in background, <5ms
+       │
+       ├─→ Append to ~/.mem/repos/<repo>.jsonl
+       └─→ Every 20 captures: background pattern extraction
 ```
 
-When you search, mem reads the JSONL file for your current repo and scores each command:
+**Search scoring:**
 
 ```
 score = (frequency × 0.4) + (recency × 0.4) + (context × 0.2)
 ```
 
-- **Frequency** — how often you've run this exact command
-- **Recency** — exponential decay with a 7-day half-life
-- **Context** — 1.0 if same repo, 0.5 if same directory prefix, 0.0 otherwise
+- **Frequency** — how often you've run this command
+- **Recency** — exponential decay, 7-day half-life
+- **Context** — 1.0 same repo, 0.5 same directory prefix, 0.0 otherwise
 
-Pattern extraction uses [Apple Foundation Models](https://developer.apple.com/machine-learning/api/) running entirely on-device. No API keys, no cloud calls, no data exfiltration — just your Mac's neural engine.
+**AI features** use [Apple Foundation Models](https://developer.apple.com/machine-learning/api/) running entirely on your Mac's neural engine. No API keys, no cloud, no data leaves the machine. If Apple Intelligence isn't available, everything still works — you just don't get pattern extraction or credential detection.
+
+---
 
 ## Storage
 
@@ -167,112 +289,72 @@ All data lives in `~/.mem/` as human-readable plain text:
 ```
 ~/.mem/
   repos/
-    infra-k8s.jsonl          # commands from this git repo
-    backend.jsonl
+    myapp.jsonl              # commands captured in this git repo
     _global.jsonl            # commands outside any repo
   sessions/
-    2026-03-05.jsonl         # grouped work sessions
+    2026-03-07.jsonl         # work sessions by date
   patterns/
-    kubectl.json             # AI-extracted patterns
+    kubectl.json             # AI-extracted command patterns
     docker.json
+  groups/
+    repos/
+      myapp.json             # repo-scoped groups and saved commands
+    _global.json             # global groups and saved commands
+  vars.json                  # persistent variable store (0600 permissions)
 ```
 
-Every file is inspectable:
+Inspect anything:
 
 ```bash
 cat ~/.mem/repos/myapp.jsonl
 tail -f ~/.mem/repos/myapp.jsonl    # watch commands arrive in real-time
-grep "docker" ~/.mem/repos/*.jsonl  # search across all repos with grep
+grep "docker" ~/.mem/repos/*.jsonl  # search across repos
 ```
+
+Data rotation happens automatically in the background:
+
+| Data | Retention |
+|------|-----------|
+| Commands | 90 days |
+| Sessions | 30 days |
+| Patterns | Forever |
+
+---
 
 ## Privacy
 
-mem is built on a simple promise: **your shell history never leaves your machine**.
-
 - Zero network requests — not even update checks
-- Zero telemetry — no usage tracking, no analytics, no crash reports
-- Zero cloud dependencies — works fully offline, always
-- On-device AI only — Apple Foundation Models run on your Mac's neural engine
-- Plain text storage — no proprietary formats, no encrypted blobs. You own your data
+- Zero telemetry — no analytics, no crash reports
+- Zero cloud dependencies — fully offline, always
+- On-device AI only — runs on your Mac's neural engine
+- Plain text storage — no proprietary formats, you own your data
 
 Read more in [PHILOSOPHY.md](PHILOSOPHY.md).
+
+---
 
 ## Requirements
 
 | Requirement | Version |
 |-------------|---------|
-| macOS       | 26.0+  |
-| Python      | 3.10+  |
-| Apple Intelligence | Enabled (for pattern extraction) |
+| macOS | 26.0+ |
+| Python | 3.10+ |
+| Apple Intelligence | Optional (for patterns + credential detection) |
 
-> **Note:** mem works without Apple Intelligence — you just won't get AI-extracted patterns. Search, capture, and everything else works fine.
-
-## Installation
-
-### Homebrew
-
-```bash
-brew tap matinsaurralde/tap
-brew install mem
-```
-
-### Quick install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/matinsaurralde/mem/main/install.sh | bash
-```
-
-### pipx (recommended for Python users)
-
-```bash
-pipx install mem-cli
-```
-
-### From source
-
-```bash
-git clone https://github.com/matinsaurralde/mem.git
-cd mem
-pip install -e ".[ai]"     # with AI pattern extraction
-pip install -e "."         # without AI (search-only)
-```
-
-### Shell setup
-
-After installation, add the hook to your shell:
-
-```bash
-# zsh (v1)
-echo 'eval "$(mem init zsh)"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-Bash and fish support coming in v1.5.
-
-## Data retention
-
-mem never grows unbounded. Running `mem sync` automatically cleans old data:
-
-| Data | Retention | Rationale |
-|------|-----------|-----------|
-| Commands | 90 days | High-volume, older ones rarely recalled |
-| Sessions | 30 days | Useful for recent postmortems |
-| Patterns | Forever | Small files, accumulated learning |
-
-Override defaults: `mem sync --keep-commands 180 --keep-sessions 60`
+---
 
 ## Uninstall
 
 ```bash
-brew uninstall mem          # or: pipx uninstall mem-cli
+brew uninstall mem          # or: pip uninstall cli-mem
 rm -rf ~/.mem               # remove all captured data
 ```
 
-Remove the `eval "$(mem init zsh)"` line from your `~/.zshrc`.
+Remove the `eval "$(mem init zsh)"` line from `~/.zshrc`.
+
+---
 
 ## Contributing
-
-Contributions are welcome. Please read the [PHILOSOPHY.md](PHILOSOPHY.md) first to understand the principles that guide this project.
 
 ```bash
 git clone https://github.com/matinsaurralde/mem.git
@@ -280,6 +362,8 @@ cd mem
 pip install -e ".[dev]"
 pytest
 ```
+
+Read [PHILOSOPHY.md](PHILOSOPHY.md) first.
 
 ## License
 

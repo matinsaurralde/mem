@@ -76,10 +76,13 @@ passively and speaks only when asked.
 
 - Shell hooks append one line per command execution — no
   prompts, no confirmations, no output.
-- Pattern extraction and session grouping run only when the user
-  explicitly invokes `mem sync`.
-- No background daemons, no cron jobs, no scheduled processes.
-- The user is always in control of when analysis happens.
+- Pattern extraction runs automatically in a detached background
+  process every 20 captures. Completely invisible — no stdout,
+  no stderr, no wait. The user never notices it.
+- No daemons, no cron jobs, no persistent processes. The
+  background subprocess runs, finishes, and exits on its own.
+- When the user searches or lists, results reflect the latest
+  patterns without any manual step.
 
 **Why**: A tool that nags or slows the shell will be uninstalled
 within a day. Silence is a feature.

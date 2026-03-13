@@ -17,12 +17,15 @@ Technical overview of how mem works under the hood.
 ┌─────────────────────────────────────────────────────────┐
 │                    src/mem/cli.py                        │
 │                                                         │
-│  mem <query>          mem sync         mem session       │
-│  mem init <shell>     mem stats        mem forget        │
-│  mem _capture (hidden)                                   │
-└───┬────────────┬──────────────┬──────────────┬──────────┘
-    │            │              │              │
-    ▼            ▼              ▼              ▼
+│  mem <query>       mem save         mem run              │
+│  mem list          mem session      mem stats            │
+│  mem forget        mem export       mem import           │
+│  mem group *       mem saved *      mem vars *           │
+│  mem init <shell>                                       │
+│  mem _capture (hidden)  mem _sync (hidden)              │
+└───┬────────────┬──────────┬──────────┬──────────────────┘
+    │            │          │          │
+    ▼            ▼          ▼          ▼
 ┌────────┐ ┌─────────┐ ┌──────────┐ ┌──────────────────┐
 │capture │ │ search  │ │ patterns │ │    storage        │
 │  .py   │ │   .py   │ │   .py    │ │      .py         │
@@ -30,19 +33,36 @@ Technical overview of how mem works under the hood.
 │ hook   │ │ score   │ │ Apple FM │ │ JSONL read/write  │
 │ capture│ │ rank    │ │ SDK      │ │ JSON read/write   │
 │ session│ │ filter  │ │ guided   │ │ rotate / forget   │
-│ tracker│ │ dedup   │ │ gen      │ │                   │
+│ tracker│ │ dedup   │ │ gen      │ │ groups / vars     │
+│ auto-  │ │         │ │ caching  │ │                   │
+│ sync   │ │         │ │          │ │                   │
 └───┬────┘ └────┬────┘ └────┬─────┘ └────────┬──────────┘
     │           │           │                 │
-    └───────────┴───────────┴─────────────────┘
+    ▼           ▼           ▼                 ▼
+┌────────┐ ┌─────────┐ ┌──────────┐ ┌──────────────────┐
+│groups  │ │variables│ │_generable│ │   models.py      │
+│  .py   │ │   .py   │ │   .py    │ │                  │
+│        │ │         │ │          │ │ Pydantic schemas  │
+│ save   │ │ parse   │ │ @fm.     │ │ CapturedCommand  │
+│ list   │ │ resolve │ │ generable│ │ WorkSession      │
+│ export │ │ detect  │ │ types    │ │ GroupFile / Group │
+│ import │ │ credent.│ │          │ │ VarsFile          │
+│ scope  │ │ store   │ │          │ │ PatternFile       │
+└────────┘ └─────────┘ └──────────┘ └──────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────┐
-│                    ~/.mem/ (filesystem)                   │
+│                    ~/.mem/ (filesystem)                  │
 │                                                         │
-│  repos/              sessions/           patterns/       │
+│  repos/              sessions/           patterns/      │
 │    myapp.jsonl         2026-03-05.jsonl    kubectl.json  │
 │    infra.jsonl         2026-03-06.jsonl    docker.json   │
 │    _global.jsonl                           git.json      │
+│                                                         │
+│  groups/                                                │
+│    repos/                                               │
+│      myapp.json      vars.json            .sync_counter │
+│    _global.json      .session_state.json                │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -75,6 +95,11 @@ storage.append_command()
 capture.SessionTracker.update()
     │ checks idle time and repo change
     │ closes session if boundary detected
+    ▼
+Auto-sync check
+    │ increments capture counter
+    │ every 20 captures: spawns `mem _sync` as detached background process
+    │   └── pattern extraction + data rotation, fully silent
     ▼
 Done (total overhead: <5ms added to prompt)
 ```
@@ -112,13 +137,17 @@ Deduplicate by command string (keep highest score)
 Return top N sorted by score descending
 ```
 
-### Pattern Extraction
+### Automatic Pattern Extraction
 
 ```
-User runs: mem sync
+Every 20 captured commands:
     │
     ▼
-patterns.sync_all_patterns()
+capture.py spawns `mem _sync` as detached background process
+    │ subprocess.Popen with start_new_session=True
+    │ no stdout, no stderr — completely invisible
+    ▼
+patterns.sync_all_patterns(silent=True)
     │ reads ALL commands from all repo files
     │ groups by tool (first token)
     │ skips tools with <5 commands
@@ -126,10 +155,14 @@ patterns.sync_all_patterns()
     ▼ (for each tool with enough data)
 patterns.extract_patterns_for_tool()
     │
+    ├── Load cached processed_commands from existing PatternFile
+    ├── Skip already-processed commands (cache hit)
+    │
     ├── If apple-fm-sdk available:
-    │   │ builds prompt with command list
-    │   │ calls Apple FM with Pydantic guided generation
-    │   └── returns PatternExtractionResult
+    │   │ generalize each NEW unique command individually
+    │   │   └── fresh LanguageModelSession per command (context safety)
+    │   │ merge with cached generalizations
+    │   └── aggregate frequencies by pattern (code)
     │
     └── If not available:
         │ groups identical commands
@@ -138,14 +171,76 @@ patterns.extract_patterns_for_tool()
     ▼
 storage.write_patterns()
     │ writes to ~/.mem/patterns/<tool>.json
+    │ includes processed_commands list for caching
     │ atomic: write tmp file, then rename
     ▼
 storage.rotate()
     │ removes commands older than 90 days
     │ deletes session files older than 30 days
-    │ NEVER touches patterns/
+    │ NEVER touches patterns/ (accumulated learning)
+    ▼
+Done (user never sees any of this)
+```
+
+### Saving Commands with Variables
+
+```
+User runs: mem save "curl -H 'Bearer eyJhbG...' https://api.example.com" -g api
+    │
+    ▼
+cli.save()
+    │ interactive terminal detected
+    ▼
+variables.detect_credentials(cmd)
+    │
+    ├── _command_may_contain_credentials() — heuristic pre-filter
+    │   checks for credential keywords + long tokens (≥16 chars)
+    │   skips simple commands (echo, ls, cd) entirely
+    │
+    ├── If pre-filter passes and apple-fm-sdk available:
+    │   │ _detect_credentials_async() via Apple FM
+    │   │   └── guided generation with CredentialList generable
+    │   │
+    │   └── _deduplicate_detections() — post-filter
+    │       removes: hallucinations, URLs, hostnames, short values, subsets
+    │       extracts: actual secret from --flag=value syntax
+    │       normalizes: CamelCase → UPPER_SNAKE_CASE
+    │
+    └── If SDK unavailable: returns empty list (save proceeds normally)
+    │
+    ▼
+User confirms/renames each detected credential
+    │ command text updated with $VAR_NAME tokens
+    ▼
+variables.parse_variables() — detect $VAR_NAME tokens
+variables.merge_var_declarations() — merge with --var flags
+    ▼
+groups.save_command()
+    │ stores command structure + var declarations (never values)
     ▼
 Done
+```
+
+### Running Commands with Variables
+
+```
+User runs: mem run api API_TOKEN=abc123
+    │
+    ▼
+Parse inline VAR=VALUE arguments
+    ▼
+Resolve all variables upfront (before any execution):
+    1. Inline arguments  ← highest priority
+    2. Shell environment (os.environ)
+    3. Persistent store (~/.mem/vars.json)
+    4. Default value (from --var at save time)
+    5. Interactive prompt ← last resort
+    ▼
+Display resolution summary
+    ✓ $API_TOKEN resolved from arguments
+    ✓ $NAMESPACE resolved from default
+    ▼
+Execute commands with substituted values
 ```
 
 ## JSONL Schemas
@@ -157,7 +252,7 @@ Done
   "command": "kubectl rollout restart deployment api",
   "ts": 1709600000,
   "dir": "/Users/mati/projects/services/api",
-  "repo": "services",
+  "repo": "/Users/mati/projects/services/api",
   "exit_code": 0,
   "duration_ms": 312,
   "session": "abc123def456"
@@ -173,7 +268,7 @@ Done
   "started_at": 1709599500,
   "ended_at": 1709600400,
   "dir": "/Users/mati/projects/services/api",
-  "repo": "services",
+  "repo": "/Users/mati/projects/services/api",
   "commands": [
     "kubectl logs api-7f9b --tail=100",
     "kubectl get pods -n production",
@@ -192,14 +287,49 @@ Done
       "pattern": "kubectl get <resource>",
       "example": "kubectl get pods",
       "frequency": 42
-    },
-    {
-      "pattern": "kubectl describe <resource> <name>",
-      "example": "kubectl describe pod api-7f9b",
-      "frequency": 17
     }
   ],
-  "last_updated": 1709600000
+  "last_updated": 1709600000,
+  "processed_commands": [
+    "kubectl get pods",
+    "kubectl get services",
+    "kubectl describe pod api-7f9b"
+  ]
+}
+```
+
+### Group File (`groups/repos/<repo>.json` or `groups/_global.json`)
+
+```json
+{
+  "saved": [
+    { "cmd": "echo hello", "comment": "test" }
+  ],
+  "groups": {
+    "api": {
+      "description": "API troubleshooting",
+      "commands": [
+        {
+          "cmd": "curl -H 'Authorization: Bearer $API_TOKEN' https://api.example.com/users",
+          "comment": "list users",
+          "vars": [
+            { "name": "API_TOKEN", "default": null }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+### Variable Store (`vars.json`)
+
+```json
+{
+  "vars": {
+    "API_TOKEN": { "value": "sk-abc123...", "last_used": 1709600000 },
+    "DB_HOST": { "value": "staging.db.internal", "last_used": 1709500000 }
+  }
 }
 ```
 
@@ -215,5 +345,5 @@ See `docs/decisions/` for detailed ADRs:
 
 - [001: JSONL Over SQLite](docs/decisions/001-jsonl-over-sqlite.md)
 - [002: Apple FM SDK for Patterns](docs/decisions/002-apple-fm-sdk-for-patterns.md)
-- [003: No Background Daemon](docs/decisions/003-no-daemon.md)
+- [003: No Daemon, Background Subprocess Instead](docs/decisions/003-no-daemon.md)
 - [004: Per-Repository JSONL Files](docs/decisions/004-per-repo-jsonl.md)
