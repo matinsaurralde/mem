@@ -1925,7 +1925,9 @@ class TestExtractValueFromSyntax:
         from mem.variables import _extract_value_from_syntax
 
         cmd = "GITHUB_TOKEN=ghp_abc123 gh pr create"
-        assert _extract_value_from_syntax("GITHUB_TOKEN=ghp_abc123", cmd) == "ghp_abc123"
+        assert (
+            _extract_value_from_syntax("GITHUB_TOKEN=ghp_abc123", cmd) == "ghp_abc123"
+        )
 
     def test_plain_value_unchanged(self):
         from mem.variables import _extract_value_from_syntax
@@ -1965,3 +1967,309 @@ class TestLooksLikeHostname:
         from mem.variables import _looks_like_hostname
 
         assert _looks_like_hostname("S3cretP@ssw0rd") is False
+
+
+# ---------------------------------------------------------------------------
+# String-based import functions
+# ---------------------------------------------------------------------------
+
+
+class TestImportFromJsonStr:
+    """Tests for import_from_json_str — parses JSON content and detects group name."""
+
+    def test_export_format_detects_name(self):
+        content = json.dumps(
+            {
+                "k8s": {
+                    "description": "kubernetes",
+                    "commands": [
+                        {"cmd": "kubectl get pods", "comment": "list pods"},
+                        {"cmd": "kubectl get svc"},
+                    ],
+                }
+            }
+        )
+        name, cmds = groups.import_from_json_str(content)
+        assert name == "k8s"
+        assert len(cmds) == 2
+        assert cmds[0].cmd == "kubectl get pods"
+        assert cmds[0].comment == "list pods"
+
+    def test_flat_format_no_name(self):
+        content = json.dumps({"commands": [{"cmd": "ls"}, {"cmd": "pwd"}]})
+        name, cmds = groups.import_from_json_str(content)
+        assert name is None
+        assert len(cmds) == 2
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(click.ClickException, match="Invalid JSON"):
+            groups.import_from_json_str("NOT JSON")
+
+    def test_wrong_structure_raises(self):
+        with pytest.raises(click.ClickException, match="Expected a JSON object"):
+            groups.import_from_json_str("[1,2,3]")
+
+
+class TestImportFromMarkdownStr:
+    """Tests for import_from_markdown_str — parses markdown and detects group name."""
+
+    def test_detects_group_name_from_heading(self):
+        md = (
+            "## deploy\n"
+            "> Start services\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `docker compose up -d` | start |\n"
+        )
+        name, cmds = groups.import_from_markdown_str(md)
+        assert name == "deploy"
+        assert len(cmds) == 1
+        assert cmds[0].cmd == "docker compose up -d"
+
+    def test_heading_with_spaces_becomes_kebab(self):
+        md = (
+            "## my deploy\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `echo 1` | test |\n"
+        )
+        name, cmds = groups.import_from_markdown_str(md)
+        assert name == "my-deploy"
+        assert len(cmds) == 1
+
+    def test_invalid_heading_ignored(self):
+        md = (
+            "## Invalid Name!!\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `echo 1` | test |\n"
+        )
+        name, cmds = groups.import_from_markdown_str(md)
+        assert name is None
+        assert len(cmds) == 1
+
+    def test_no_table_raises(self):
+        with pytest.raises(click.ClickException, match="No commands found"):
+            groups.import_from_markdown_str("# Just text\nNo table here.")
+
+
+class TestImportFromJsonDelegation:
+    """Ensure the file-based function still works via delegation."""
+
+    def test_file_based_still_works(self, tmp_path: Path):
+        content = json.dumps({"ops": {"commands": [{"cmd": "echo 1"}]}})
+        f = tmp_path / "test.json"
+        f.write_text(content, encoding="utf-8")
+        cmds = groups.import_from_json(f)
+        assert len(cmds) == 1
+        assert cmds[0].cmd == "echo 1"
+
+
+class TestImportFromMarkdownDelegation:
+    """Ensure the file-based function still works via delegation."""
+
+    def test_file_based_still_works(self, tmp_path: Path):
+        md = (
+            "## test\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `echo hello` | greeting |\n"
+        )
+        f = tmp_path / "test.md"
+        f.write_text(md, encoding="utf-8")
+        cmds = groups.import_from_markdown(f)
+        assert len(cmds) == 1
+        assert cmds[0].cmd == "echo hello"
+
+
+# ---------------------------------------------------------------------------
+# Clipboard import CLI tests
+# ---------------------------------------------------------------------------
+
+
+class TestClipboardImportCLI:
+    """Tests for 'mem import' reading from clipboard."""
+
+    def test_clipboard_json_with_auto_detect(self, tmp_mem_dir: Path):
+        clipboard_content = json.dumps(
+            {
+                "k8s": {
+                    "commands": [
+                        {"cmd": "kubectl get pods", "comment": "list pods"},
+                        {"cmd": "kubectl get svc"},
+                    ],
+                }
+            }
+        )
+
+        runner = CliRunner()
+        with (
+            patch("mem.cli._read_from_clipboard", return_value=clipboard_content),
+            patch("mem.cli._is_interactive", return_value=True),
+        ):
+            result = runner.invoke(
+                cli,
+                ["import", "--global"],
+                input="y\n",
+            )
+        assert result.exit_code == 0
+        assert "Found 2 commands" in result.output
+        assert "k8s" in result.output
+
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert "k8s" in data.groups
+        assert len(data.groups["k8s"].commands) == 2
+
+    def test_clipboard_markdown_detected(self, tmp_mem_dir: Path):
+        md = (
+            "## deploy\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `docker compose up -d` | start |\n"
+            "| `docker compose logs -f` | logs |\n"
+        )
+
+        runner = CliRunner()
+        with (
+            patch("mem.cli._read_from_clipboard", return_value=md),
+            patch("mem.cli._is_interactive", return_value=True),
+        ):
+            result = runner.invoke(
+                cli,
+                ["import", "--global"],
+                input="y\n",
+            )
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert "deploy" in data.groups
+
+    def test_clipboard_with_group_override(self, tmp_mem_dir: Path):
+        clipboard_content = json.dumps(
+            {"k8s": {"commands": [{"cmd": "kubectl get pods"}]}}
+        )
+
+        runner = CliRunner()
+        with (
+            patch("mem.cli._read_from_clipboard", return_value=clipboard_content),
+            patch("mem.cli._is_interactive", return_value=True),
+        ):
+            result = runner.invoke(
+                cli,
+                ["import", "-g", "renamed", "--global"],
+                input="y\n",
+            )
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert "renamed" in data.groups
+        assert "k8s" not in data.groups
+
+    def test_clipboard_empty_errors(self, tmp_mem_dir: Path):
+        runner = CliRunner()
+        with patch("mem.cli._read_from_clipboard", return_value=None):
+            result = runner.invoke(cli, ["import", "--global"])
+        assert result.exit_code != 0
+        assert "Clipboard is empty" in result.output
+
+    def test_clipboard_unparseable_errors(self, tmp_mem_dir: Path):
+        runner = CliRunner()
+        with patch("mem.cli._read_from_clipboard", return_value="just some text"):
+            result = runner.invoke(cli, ["import", "--global"])
+        assert result.exit_code != 0
+        assert "No group data found" in result.output
+
+    def test_clipboard_no_name_prompts(self, tmp_mem_dir: Path):
+        clipboard_content = json.dumps({"commands": [{"cmd": "echo 1"}]})
+
+        runner = CliRunner()
+        with (
+            patch("mem.cli._read_from_clipboard", return_value=clipboard_content),
+            patch("mem.cli._is_interactive", return_value=True),
+        ):
+            result = runner.invoke(
+                cli,
+                ["import", "--global"],
+                input="my-group\ny\n",
+            )
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert "my-group" in data.groups
+
+    def test_clipboard_declined_aborts(self, tmp_mem_dir: Path):
+        clipboard_content = json.dumps(
+            {"k8s": {"commands": [{"cmd": "kubectl get pods"}]}}
+        )
+
+        runner = CliRunner()
+        with (
+            patch("mem.cli._read_from_clipboard", return_value=clipboard_content),
+            patch("mem.cli._is_interactive", return_value=True),
+        ):
+            result = runner.invoke(
+                cli,
+                ["import", "--global"],
+                input="n\n",
+            )
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert "k8s" not in data.groups
+
+    def test_clipboard_non_interactive_skips_confirm(self, tmp_mem_dir: Path):
+        """In non-interactive mode (e.g., piped), skip confirmation and import directly."""
+        clipboard_content = json.dumps(
+            {"k8s": {"commands": [{"cmd": "kubectl get pods"}]}}
+        )
+
+        runner = CliRunner()
+        with (
+            patch("mem.cli._read_from_clipboard", return_value=clipboard_content),
+            patch("mem.cli._is_interactive", return_value=False),
+        ):
+            result = runner.invoke(cli, ["import", "--global"])
+        assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert "k8s" in data.groups
+
+    def test_file_import_still_requires_group(self, tmp_mem_dir: Path, tmp_path: Path):
+        f = tmp_path / "data.json"
+        f.write_text(json.dumps({"commands": [{"cmd": "echo 1"}]}), encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["import", str(f), "--global"])
+        assert result.exit_code != 0
+        assert "Group name required" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Shell hook init tests
+# ---------------------------------------------------------------------------
+
+
+class TestInitShellHooks:
+    """Tests for mem init with bash and fish support."""
+
+    def test_init_bash(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["init", "bash"])
+        assert result.exit_code == 0
+        assert "_mem_debug_trap" in result.output
+        assert "PROMPT_COMMAND" in result.output
+        assert "mem _capture" in result.output
+
+    def test_init_fish(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["init", "fish"])
+        assert result.exit_code == 0
+        assert "_mem_postexec" in result.output
+        assert "fish_postexec" in result.output
+        assert "CMD_DURATION" in result.output
+
+    def test_init_zsh_still_works(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["init", "zsh"])
+        assert result.exit_code == 0
+        assert "_mem_preexec" in result.output
+
+    def test_init_unsupported_shell(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["init", "powershell"])
+        assert result.exit_code != 0

@@ -162,18 +162,16 @@ def capture_cmd(command: str, dir: str, exit_code: int, duration_ms: int) -> Non
 @click.argument("shell")
 def init(shell: str) -> None:
     """Print shell hook code for automatic command capture."""
-    supported = {"zsh"}
-    future = {"bash", "fish"}
+    supported = {"zsh", "bash", "fish"}
+    fallback_hooks = {
+        "zsh": _ZSH_HOOK,
+        "bash": _BASH_HOOK,
+        "fish": _FISH_HOOK,
+    }
 
-    if shell not in supported and shell not in future:
+    if shell not in supported:
         click.echo(
             f'Error: unsupported shell "{shell}". Supported: zsh, bash, fish', err=True
-        )
-        sys.exit(1)
-
-    if shell in future:
-        click.echo(
-            f"Error: {shell} support coming in v1.5. Currently supported: zsh", err=True
         )
         sys.exit(1)
 
@@ -183,8 +181,47 @@ def init(shell: str) -> None:
         click.echo(hook_path.read_text())
     else:
         # Fallback: inline the hook if the file isn't found (e.g., installed via pip)
-        click.echo(_ZSH_HOOK)
+        click.echo(fallback_hooks[shell])
 
+
+_BASH_HOOK = """# mem shell hook for bash
+
+_mem_cmd=""
+_mem_start=0
+_mem_capturing=""
+
+_mem_debug_trap() {
+  if [[ -z "$_mem_capturing" && -n "$BASH_COMMAND" ]]; then
+    _mem_capturing=1
+    _mem_cmd="$(HISTTIMEFORMAT= history 1 | sed 's/^[ ]*[0-9]*[ ]*//')"
+    _mem_start=$SECONDS
+  fi
+}
+
+_mem_prompt_cmd() {
+  local exit_code=$?
+  _mem_capturing=""
+  if [[ -n "$_mem_cmd" ]]; then
+    local duration=$(( (SECONDS - _mem_start) * 1000 ))
+    mem _capture "$_mem_cmd" "$PWD" "$exit_code" "$duration" 2>/dev/null &
+    disown 2>/dev/null
+    _mem_cmd=""
+  fi
+}
+
+trap '_mem_debug_trap' DEBUG
+PROMPT_COMMAND="_mem_prompt_cmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+"""
+
+_FISH_HOOK = """# mem shell hook for fish
+
+function _mem_postexec --on-event fish_postexec
+    set -l exit_code $status
+    # $CMD_DURATION is set by fish automatically (milliseconds)
+    command mem _capture "$argv" "$PWD" "$exit_code" "$CMD_DURATION" 2>/dev/null &
+    disown 2>/dev/null
+end
+"""
 
 _ZSH_HOOK = """# mem shell hook
 
@@ -831,6 +868,41 @@ def run(
     console.print()
 
 
+def _read_from_clipboard() -> str | None:
+    """Read text from system clipboard. Returns None if unavailable or empty."""
+    import shutil
+    import subprocess as sp
+
+    try:
+        # macOS
+        if shutil.which("pbpaste"):
+            result = sp.run(["pbpaste"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout
+        # Linux (X11)
+        if shutil.which("xclip"):
+            result = sp.run(
+                ["xclip", "-selection", "clipboard", "-o"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout
+        if shutil.which("xsel"):
+            result = sp.run(
+                ["xsel", "--clipboard", "--output"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout
+    except (sp.CalledProcessError, sp.TimeoutExpired):
+        return None
+    return None
+
+
 def _copy_to_clipboard(text: str) -> bool:
     """Copy text to system clipboard. Returns True on success."""
     import shutil
@@ -905,8 +977,15 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
 
 
 @cli.command(name="import")
-@click.argument("file", type=click.Path(exists=True))
-@click.option("--group", "-g", "group_name", required=True, help="Target group name")
+@click.argument("file", type=click.Path(exists=True), required=False, default=None)
+@click.option(
+    "--group",
+    "-g",
+    "group_name",
+    required=False,
+    default=None,
+    help="Target group name",
+)
 @click.option(
     "--format",
     "-f",
@@ -916,33 +995,98 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
     help="Input format (auto-detected from extension if omitted)",
 )
 @click.option("--global", "global_flag", is_flag=True, help="Import to global scope")
-def import_cmd(file: str, group_name: str, fmt: str | None, global_flag: bool) -> None:
-    """Import a group from a file."""
+def import_cmd(
+    file: str | None, group_name: str | None, fmt: str | None, global_flag: bool
+) -> None:
+    """Import a group from a file or clipboard.
+
+    When FILE is omitted, reads from the system clipboard and auto-detects
+    the format and group name. Use -g to override the detected group name.
+    """
     from mem import groups, storage
-    from mem.models import Group
+    from mem.models import Group, GroupCommand
 
-    groups.validate_group_name(group_name)
-    scope_path = groups.resolve_scope(global_flag)
-    data = groups._load_group_file(scope_path)
+    detected_name: str | None = None
 
-    file_path = Path(file)
-
-    # Auto-detect format from extension if not specified
-    if fmt is None:
-        ext = file_path.suffix.lower()
-        if ext == ".json":
-            fmt = "json"
-        elif ext in (".md", ".markdown"):
-            fmt = "markdown"
-        else:
+    if file is None:
+        # --- Clipboard import mode ---
+        content = _read_from_clipboard()
+        if content is None:
             raise click.ClickException(
-                f"Cannot detect format from extension '{ext}'. Use --format to specify."
+                "Clipboard is empty or unavailable.\n"
+                "Usage: mem import                     (read from clipboard)\n"
+                "       mem import runbook.json -g ops  (read from file)"
             )
 
-    if fmt == "json":
-        commands = groups.import_from_json(file_path)
+        # Try JSON first, then markdown
+        commands: list[GroupCommand] | None = None
+        try:
+            detected_name, commands = groups.import_from_json_str(content)
+        except click.ClickException:
+            pass
+
+        if commands is None:
+            try:
+                detected_name, commands = groups.import_from_markdown_str(content)
+            except click.ClickException:
+                pass
+
+        if not commands:
+            raise click.ClickException(
+                "No group data found in clipboard.\n"
+                "Expected JSON (from mem export) or markdown with a command table.\n"
+                "Try: mem export mygroup   then   mem import"
+            )
+
+        # Resolve group name: --group flag > auto-detected > prompt
+        if group_name is None:
+            group_name = detected_name
+        if group_name is None:
+            if _is_interactive():
+                group_name = click.prompt("Group name")
+            else:
+                raise click.ClickException(
+                    "Could not detect group name. Use -g to specify one."
+                )
+
+        groups.validate_group_name(group_name)
+
+        # Confirm before importing
+        if _is_interactive():
+            err_console.print(
+                f"Found {len(commands)} commands. Import to group '{group_name}'?"
+            )
+            if not click.confirm("Proceed?", default=True, err=True):
+                return
     else:
-        commands = groups.import_from_markdown(file_path)
+        # --- File import mode ---
+        if group_name is None:
+            raise click.ClickException(
+                "Group name required for file import. Use -g to specify one."
+            )
+        groups.validate_group_name(group_name)
+
+        file_path = Path(file)
+
+        # Auto-detect format from extension if not specified
+        if fmt is None:
+            ext = file_path.suffix.lower()
+            if ext == ".json":
+                fmt = "json"
+            elif ext in (".md", ".markdown"):
+                fmt = "markdown"
+            else:
+                raise click.ClickException(
+                    f"Cannot detect format from extension '{ext}'. Use --format to specify."
+                )
+
+        if fmt == "json":
+            commands = groups.import_from_json(file_path)
+        else:
+            commands = groups.import_from_markdown(file_path)
+
+    scope_path = groups.resolve_scope(global_flag)
+    data = groups._load_group_file(scope_path)
 
     if group_name in data.groups:
         choice = click.prompt(
