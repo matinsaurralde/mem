@@ -1,0 +1,31 @@
+{
+  "ssl-audit": {
+    "description": "TLS/SSL certificate and configuration audit",
+    "commands": [
+      {
+        "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | openssl x509 -noout -dates -subject -issuer",
+        "comment": "certificate details -- expiry, issuer, subject"
+      },
+      {
+        "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | openssl x509 -noout -ext subjectAltName",
+        "comment": "SAN entries -- reveals other domains on the same cert"
+      },
+      {
+        "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | grep -E 'Protocol|Cipher'",
+        "comment": "negotiated protocol version and cipher suite"
+      },
+      {
+        "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN -tls1 2>&1 | grep -q 'handshake failure' && echo 'TLS 1.0: disabled (good)' || echo 'TLS 1.0: ENABLED (bad)'",
+        "comment": "verify TLS 1.0 is disabled"
+      },
+      {
+        "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN -tls1_1 2>&1 | grep -q 'handshake failure' && echo 'TLS 1.1: disabled (good)' || echo 'TLS 1.1: ENABLED (bad)'",
+        "comment": "verify TLS 1.1 is disabled"
+      },
+      {
+        "cmd": "curl -s 'https://crt.sh/?q=%25.$DOMAIN&output=json' | jq -r '.[].not_after' | sort -u | head -5",
+        "comment": "upcoming cert expirations across all issued certs"
+      }
+    ]
+  }
+}

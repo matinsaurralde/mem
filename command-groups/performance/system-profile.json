@@ -1,0 +1,35 @@
+{
+  "system-profile": {
+    "description": "System performance profiling -- find the bottleneck",
+    "commands": [
+      {
+        "cmd": "uptime && sysctl -n hw.ncpu 2>/dev/null || nproc",
+        "comment": "load average vs CPU count -- load > ncpu means saturation"
+      },
+      {
+        "cmd": "top -l 1 -n 10 -o cpu -stats pid,command,cpu,mem,time 2>/dev/null || top -bn1 | head -17",
+        "comment": "top processes by CPU right now"
+      },
+      {
+        "cmd": "vm_stat 2>/dev/null | awk '/Pages (free|active|inactive|speculative|wired)/' || free -h",
+        "comment": "memory pressure -- pageouts mean real trouble"
+      },
+      {
+        "cmd": "df -h / /tmp /var 2>/dev/null | grep -v '^Filesystem'",
+        "comment": "disk space on critical mounts -- 90%+ needs attention"
+      },
+      {
+        "cmd": "iostat -d 2 3 2>/dev/null || echo 'iostat not available'",
+        "comment": "disk I/O throughput -- high wait% means disk-bound"
+      },
+      {
+        "cmd": "lsof -iTCP -sTCP:LISTEN -n -P | sort -t: -k2 -n",
+        "comment": "all listening TCP ports -- what's actually running"
+      },
+      {
+        "cmd": "netstat -an | awk '/^tcp/ {print $6}' | sort | uniq -c | sort -rn",
+        "comment": "TCP connection states -- too many TIME_WAIT or CLOSE_WAIT is a leak"
+      }
+    ]
+  }
+}

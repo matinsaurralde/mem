@@ -1,0 +1,31 @@
+{
+  "incident-response": {
+    "description": "First 5 minutes of a production incident -- gather signal fast",
+    "commands": [
+      {
+        "cmd": "kubectl get pods -n $NAMESPACE | grep -vE 'Running|Completed'",
+        "comment": "unhealthy pods right now"
+      },
+      {
+        "cmd": "kubectl logs -l app=$SERVICE -n $NAMESPACE --tail=50 --since=5m | grep -iE 'error|fatal|panic|exception'",
+        "comment": "recent errors across all pods of the service"
+      },
+      {
+        "cmd": "kubectl top pods -n $NAMESPACE --sort-by=cpu | head -5",
+        "comment": "CPU spikes -- runaway processes or hot loops"
+      },
+      {
+        "cmd": "kubectl rollout history deployment/$SERVICE -n $NAMESPACE | tail -5",
+        "comment": "recent deploys -- was something just shipped?"
+      },
+      {
+        "cmd": "kubectl get endpoints $SERVICE -n $NAMESPACE -o yaml | grep -c 'ip:'",
+        "comment": "how many pods are actually receiving traffic"
+      },
+      {
+        "cmd": "kubectl describe ingress -n $NAMESPACE | grep -A2 $SERVICE",
+        "comment": "ingress rules -- is traffic even reaching the right service?"
+      }
+    ]
+  }
+}

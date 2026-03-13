@@ -1,0 +1,35 @@
+{
+  "recon": {
+    "description": "Passive recon workflow for bug bounty -- no active scanning",
+    "commands": [
+      {
+        "cmd": "curl -s 'https://crt.sh/?q=%25.$DOMAIN&output=json' | jq -r '.[].name_value' | sort -u",
+        "comment": "subdomain discovery via certificate transparency"
+      },
+      {
+        "cmd": "dig $DOMAIN A +short && dig $DOMAIN MX +short && dig $DOMAIN TXT +short",
+        "comment": "DNS records -- reveals stack, email provider, SPF/DMARC"
+      },
+      {
+        "cmd": "curl -sIL https://$DOMAIN",
+        "comment": "HTTP headers + redirect chain -- technology fingerprinting"
+      },
+      {
+        "cmd": "whois $DOMAIN | grep -E 'Registrar:|Creation Date:|Expir|Name Server:'",
+        "comment": "domain registration info"
+      },
+      {
+        "cmd": "curl -s 'https://web.archive.org/cdx/search/cdx?url=*.$DOMAIN&output=text&fl=original&collapse=urlkey' | sort -u | head -50",
+        "comment": "historical URLs from Wayback Machine -- deleted endpoints"
+      },
+      {
+        "cmd": "curl -s https://$DOMAIN/robots.txt",
+        "comment": "disallowed paths -- often the most interesting ones"
+      },
+      {
+        "cmd": "curl -s 'https://api.shodan.io/dns/resolve?hostnames=$DOMAIN&key=$SHODAN_API_KEY'",
+        "comment": "IP resolution + exposure check via Shodan"
+      }
+    ]
+  }
+}
