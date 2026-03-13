@@ -44,6 +44,7 @@ class PatternFile(BaseModel):
     tool: str = Field(min_length=1)
     patterns: list[CommandPattern]
     last_updated: int
+    processed_commands: list[str] = []
 
 
 class WorkSession(BaseModel):

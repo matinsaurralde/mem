@@ -118,24 +118,56 @@ async def _generalize_commands(tool: str, unique_commands: list[str]) -> dict[st
 
 
 async def extract_patterns_for_tool(
-    tool: str, commands: list[str]
+    tool: str,
+    commands: list[str],
+    already_processed: set[str] | None = None,
 ) -> PatternExtractionResult:
     """Extract abstract patterns from a list of concrete commands.
 
     Strategy:
     1. Deduplicate commands and count frequencies (code)
     2. Generalize each unique command via LLM (if available)
+       — skips commands in already_processed (cache hit)
     3. Aggregate frequencies by generalized pattern (code)
 
     Falls back to simple frequency grouping if SDK is unavailable.
     """
+    if already_processed is None:
+        already_processed = set()
+
     # Step 1: Count raw frequencies (code — fast and exact)
     raw_freq = Counter(commands)
     unique_cmds = list(raw_freq.keys())
 
     if _apple_fm_available():
-        # Step 2: Generalize unique commands (LLM — semantic understanding)
-        cmd_to_pattern = await _generalize_commands(tool, unique_cmds)
+        # Step 2: Generalize only NEW unique commands (LLM)
+        new_cmds = [c for c in unique_cmds if c not in already_processed]
+
+        # Load existing patterns to reuse cached generalizations
+        existing_pf = storage.read_patterns(tool)
+        cached_map: dict[str, str] = {}
+        if existing_pf:
+            # Rebuild command->pattern map from existing data
+            for p in existing_pf.patterns:
+                cached_map[p.example] = p.pattern
+
+        if new_cmds:
+            new_map = await _generalize_commands(tool, new_cmds)
+        else:
+            new_map = {}
+
+        # Merge: cached + new
+        cmd_to_pattern: dict[str, str] = {}
+        for cmd in unique_cmds:
+            if cmd in new_map:
+                cmd_to_pattern[cmd] = new_map[cmd]
+            elif cmd in cached_map:
+                cmd_to_pattern[cmd] = cached_map[cmd]
+            else:
+                # Command was processed before but not in cache
+                # (e.g., its example was a different command for same pattern)
+                # Fall back to raw command
+                cmd_to_pattern[cmd] = cmd
 
         # Step 3: Aggregate by pattern (code — exact counting)
         pattern_freq: Counter[str] = Counter()
@@ -197,33 +229,58 @@ def run_pattern_extraction(tool: str) -> None:
 
     Reads all commands starting with the tool name from storage,
     runs extraction, and writes the result to patterns/<tool>.json.
+
+    Uses caching: only sends new (unprocessed) commands to the LLM.
+    Already-processed commands are tracked in the PatternFile.
     """
     import asyncio
 
-    commands = [
+    all_commands = [
         cmd.command
         for cmd in storage.read_all_commands()
         if cmd.command.split()[0] == tool
     ]
 
-    if len(commands) < 5:
+    if len(all_commands) < 5:
         return  # Not enough data for meaningful patterns
 
-    result = asyncio.run(extract_patterns_for_tool(tool, commands))
+    # Load existing pattern file for cache
+    existing = storage.read_patterns(tool)
+    already_processed: set[str] = set()
+    if existing and existing.processed_commands:
+        already_processed = set(existing.processed_commands)
+
+    # Only send new commands to the LLM
+    new_commands = [c for c in all_commands if c not in already_processed]
+
+    if not new_commands and existing:
+        return  # Nothing new to process
+
+    # Extract patterns from ALL commands (new + old) but only generalize new ones
+    result = asyncio.run(
+        extract_patterns_for_tool(tool, all_commands, already_processed)
+    )
+
+    # Track all unique commands as processed
+    all_unique = list(set(all_commands))
 
     pf = PatternFile(
         tool=tool,
         patterns=result.patterns,
         last_updated=int(time.time()),
+        processed_commands=all_unique,
     )
     storage.write_patterns(pf)
 
 
-def sync_all_patterns() -> tuple[int, int]:
+def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
     """Extract patterns for ALL tools with sufficient command history.
 
     Detects unique tools (first token of each command), runs extraction
     for each tool with >5 commands. Skips tools with insufficient data.
+
+    Args:
+        silent: If True, suppress all output (for background auto-sync).
 
     Returns (new_patterns, updated_patterns) counts.
     """
@@ -249,7 +306,7 @@ def sync_all_patterns() -> tuple[int, int]:
         else:
             updated_count += 1
 
-    if not _apple_fm_available():
+    if not silent and not _apple_fm_available():
         print(
             "Tip: install AI support for smarter pattern extraction: "
             "pip install cli-mem[ai]",
