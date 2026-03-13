@@ -2053,6 +2053,91 @@ class TestImportFromMarkdownStr:
             groups.import_from_markdown_str("# Just text\nNo table here.")
 
 
+class TestImportAutoDetectVars:
+    """Tests for automatic variable detection during import."""
+
+    def test_json_detects_single_var(self):
+        content = json.dumps({"recon": {"commands": [{"cmd": "dig $DOMAIN A +short"}]}})
+        _, cmds = groups.import_from_json_str(content)
+        assert cmds[0].vars is not None
+        assert len(cmds[0].vars) == 1
+        assert cmds[0].vars[0].name == "DOMAIN"
+
+    def test_json_detects_multiple_vars(self):
+        content = json.dumps(
+            {"commands": [{"cmd": "curl -u $USER_NAME:$API_TOKEN https://$HOST/api"}]}
+        )
+        _, cmds = groups.import_from_json_str(content)
+        var_names = [v.name for v in cmds[0].vars]
+        assert "USER_NAME" in var_names
+        assert "API_TOKEN" in var_names
+        assert "HOST" in var_names
+
+    def test_json_no_vars_leaves_none(self):
+        content = json.dumps({"commands": [{"cmd": "ls -la"}]})
+        _, cmds = groups.import_from_json_str(content)
+        assert cmds[0].vars is None
+
+    def test_json_excludes_shell_vars(self):
+        """$HOME and $PATH are common shell vars and should not be detected."""
+        content = json.dumps({"commands": [{"cmd": "ls $HOME/.config && echo $PATH"}]})
+        _, cmds = groups.import_from_json_str(content)
+        assert cmds[0].vars is None
+
+    def test_json_preserves_existing_vars(self):
+        """Commands that already declare vars (from a full export) should not be overwritten."""
+        content = json.dumps(
+            {
+                "commands": [
+                    {
+                        "cmd": "curl https://$HOST/api",
+                        "vars": [{"name": "HOST", "default": "localhost"}],
+                    }
+                ]
+            }
+        )
+        _, cmds = groups.import_from_json_str(content)
+        assert len(cmds[0].vars) == 1
+        assert cmds[0].vars[0].name == "HOST"
+        assert cmds[0].vars[0].default == "localhost"
+
+    def test_markdown_detects_vars(self):
+        md = (
+            "## ops\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `kubectl get pods -n $NAMESPACE` | list pods |\n"
+        )
+        _, cmds = groups.import_from_markdown_str(md)
+        assert cmds[0].vars is not None
+        assert cmds[0].vars[0].name == "NAMESPACE"
+
+    def test_markdown_no_vars(self):
+        md = (
+            "## test\n\n"
+            "| Command | Description |\n"
+            "|---|---|\n"
+            "| `echo hello` | greeting |\n"
+        )
+        _, cmds = groups.import_from_markdown_str(md)
+        assert cmds[0].vars is None
+
+    def test_mixed_commands_some_with_vars(self):
+        content = json.dumps(
+            {
+                "commands": [
+                    {"cmd": "echo starting"},
+                    {"cmd": "curl https://$HOST:$PORT/health"},
+                    {"cmd": "echo done"},
+                ]
+            }
+        )
+        _, cmds = groups.import_from_json_str(content)
+        assert cmds[0].vars is None
+        assert len(cmds[1].vars) == 2
+        assert cmds[2].vars is None
+
+
 class TestImportFromJsonDelegation:
     """Ensure the file-based function still works via delegation."""
 

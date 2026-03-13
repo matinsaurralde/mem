@@ -24,7 +24,11 @@ import click
 from mem import storage
 from mem.capture import get_git_repo
 from mem.models import Group, GroupCommand, GroupFile, SavedCommand, VarDeclaration
-from mem.variables import merge_var_declarations, parse_variables, process_escapes
+from mem.variables import (
+    merge_var_declarations,
+    parse_variables,
+    process_escapes,
+)
 
 GROUP_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
 
@@ -239,6 +243,21 @@ def export_json(group_name: str, group: Group) -> str:
     )
 
 
+def _auto_detect_vars(commands: list[GroupCommand]) -> None:
+    """Populate the vars field on imported commands by scanning for $VAR_NAME tokens.
+
+    Commands that already have vars declared (e.g., from a full mem export)
+    are left untouched. This ensures imported runbooks work with mem run
+    variable substitution out of the box.
+    """
+    for cmd in commands:
+        if cmd.vars is not None:
+            continue
+        detected = parse_variables(cmd.cmd)
+        if detected:
+            cmd.vars = [VarDeclaration(name=n) for n in detected]
+
+
 def import_from_json_str(content: str) -> tuple[str | None, list[GroupCommand]]:
     """Parse a JSON string and extract commands.
 
@@ -276,10 +295,18 @@ def import_from_json_str(content: str) -> tuple[str | None, list[GroupCommand]]:
         raise click.ClickException("Expected 'commands' to be a list.")
 
     try:
-        commands = [GroupCommand(cmd=c["cmd"], comment=c.get("comment")) for c in cmds]
+        commands = [
+            GroupCommand(
+                cmd=c["cmd"],
+                comment=c.get("comment"),
+                vars=c.get("vars"),
+            )
+            for c in cmds
+        ]
     except (KeyError, TypeError) as e:
         raise click.ClickException(f"Malformed command entry: {e}")
 
+    _auto_detect_vars(commands)
     return group_name, commands
 
 
@@ -338,6 +365,7 @@ def import_from_markdown_str(content: str) -> tuple[str | None, list[GroupComman
     if not commands:
         raise click.ClickException("No commands found in markdown table.")
 
+    _auto_detect_vars(commands)
     return group_name, commands
 
 
