@@ -583,9 +583,7 @@ class TestPatternCaching:
             patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
         ):
             commands2 = commands + ["git push"]
-            await patterns.extract_patterns_for_tool(
-                "git", commands2, already_done
-            )
+            await patterns.extract_patterns_for_tool("git", commands2, already_done)
 
         assert call_count == 1  # Only "git push" is new
 

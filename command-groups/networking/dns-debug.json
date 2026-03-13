@@ -1,0 +1,35 @@
+{
+  "dns-debug": {
+    "description": "DNS troubleshooting -- when resolution is the problem",
+    "commands": [
+      {
+        "cmd": "dig $DOMAIN A +noall +answer && dig $DOMAIN AAAA +noall +answer",
+        "comment": "A and AAAA records -- what IPs does this resolve to?"
+      },
+      {
+        "cmd": "dig $DOMAIN NS +short",
+        "comment": "authoritative nameservers -- wrong NS = wrong answers"
+      },
+      {
+        "cmd": "dig @8.8.8.8 $DOMAIN A +short && dig @1.1.1.1 $DOMAIN A +short",
+        "comment": "compare Google vs Cloudflare DNS -- catches propagation issues"
+      },
+      {
+        "cmd": "dig $DOMAIN SOA +short",
+        "comment": "SOA record -- serial number reveals if zone was updated"
+      },
+      {
+        "cmd": "dig $DOMAIN ANY +noall +answer 2>/dev/null || echo 'ANY queries blocked (RFC 8482)'",
+        "comment": "all records at once -- some resolvers block this"
+      },
+      {
+        "cmd": "dig +trace +nodnssec $DOMAIN",
+        "comment": "walk the full delegation chain from root -- finds broken links"
+      },
+      {
+        "cmd": "dig $DOMAIN CAA +short",
+        "comment": "CAA records -- which CAs can issue certs for this domain"
+      }
+    ]
+  }
+}

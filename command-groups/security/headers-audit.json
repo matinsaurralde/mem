@@ -1,0 +1,31 @@
+{
+  "headers-audit": {
+    "description": "HTTP security headers audit -- check what's missing before it's a finding",
+    "commands": [
+      {
+        "cmd": "curl -sI https://$DOMAIN | grep -iE 'strict-transport|content-security|x-frame|x-content-type|referrer-policy|permissions-policy'",
+        "comment": "check which security headers are present"
+      },
+      {
+        "cmd": "curl -sI https://$DOMAIN | grep -i 'set-cookie' | grep -ivE 'secure|httponly|samesite'",
+        "comment": "cookies missing Secure, HttpOnly, or SameSite flags"
+      },
+      {
+        "cmd": "curl -sI https://$DOMAIN | grep -iE 'server:|x-powered-by:|x-aspnet|x-generator'",
+        "comment": "technology disclosure headers that should be stripped"
+      },
+      {
+        "cmd": "curl -sI https://$DOMAIN | grep -i 'access-control-allow'",
+        "comment": "CORS policy -- overly permissive origins are a classic vuln"
+      },
+      {
+        "cmd": "curl -s -o /dev/null -w '%{http_code}' -X OPTIONS https://$DOMAIN",
+        "comment": "OPTIONS method response -- should be restricted"
+      },
+      {
+        "cmd": "curl -s -o /dev/null -w '%{http_code}' -X TRACE https://$DOMAIN",
+        "comment": "TRACE method -- must return 405, otherwise XST risk"
+      }
+    ]
+  }
+}

@@ -239,28 +239,36 @@ def export_json(group_name: str, group: Group) -> str:
     )
 
 
-def import_from_json(file_path: Path) -> list[GroupCommand]:
-    """Parse a JSON file and extract commands.
+def import_from_json_str(content: str) -> tuple[str | None, list[GroupCommand]]:
+    """Parse a JSON string and extract commands.
 
     Accepts two formats: the export format ({"name": {"commands": [...]}})
     or a flat commands list ({"commands": [...]}).
+
+    Returns (detected_group_name, commands). The group name is extracted
+    from the top-level key in export format, or None for flat format.
     """
     try:
-        data = json.loads(file_path.read_text(encoding="utf-8"))
+        data = json.loads(content)
     except json.JSONDecodeError as e:
-        raise click.ClickException(f"Invalid JSON in {file_path}: {e}")
+        raise click.ClickException(f"Invalid JSON: {e}")
 
     if not isinstance(data, dict):
         raise click.ClickException("Expected a JSON object.")
+
+    group_name: str | None = None
 
     # Handle {"commands": [...]} format
     if "commands" in data:
         cmds = data["commands"]
     else:
         # Handle {"group_name": {"commands": [...]}} export format
+        first_key = next(iter(data.keys()), None)
         first_value = next(iter(data.values()), {})
         if isinstance(first_value, dict):
             cmds = first_value.get("commands", [])
+            if first_key and cmds and GROUP_NAME_PATTERN.match(first_key):
+                group_name = first_key
         else:
             raise click.ClickException("Cannot parse group structure from JSON.")
 
@@ -268,41 +276,55 @@ def import_from_json(file_path: Path) -> list[GroupCommand]:
         raise click.ClickException("Expected 'commands' to be a list.")
 
     try:
-        return [GroupCommand(cmd=c["cmd"], comment=c.get("comment")) for c in cmds]
+        commands = [GroupCommand(cmd=c["cmd"], comment=c.get("comment")) for c in cmds]
     except (KeyError, TypeError) as e:
-        raise click.ClickException(f"Malformed command entry in {file_path}: {e}")
+        raise click.ClickException(f"Malformed command entry: {e}")
+
+    return group_name, commands
 
 
-def import_from_markdown(file_path: Path) -> list[GroupCommand]:
-    """Parse a markdown file and extract commands from a table.
+def import_from_markdown_str(content: str) -> tuple[str | None, list[GroupCommand]]:
+    """Parse a markdown string and extract commands from a table.
 
     Expects a table with | Command | Description | columns
     where commands are wrapped in backticks.
+
+    Returns (detected_group_name, commands). The group name is extracted
+    from the first ## heading, or None if not found.
     """
-    text = file_path.read_text(encoding="utf-8")
     commands: list[GroupCommand] = []
     in_table = False
+    group_name: str | None = None
 
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("|"):
-            if line:
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        # Detect group name from ## heading
+        if group_name is None and stripped.startswith("## "):
+            group_name = stripped[3:].strip().lower().replace(" ", "-")
+            # Validate it looks like a group name
+            if not GROUP_NAME_PATTERN.match(group_name):
+                group_name = None
+            continue
+
+        if not stripped.startswith("|"):
+            if stripped:
                 in_table = False
             continue
 
         # Skip header separator (|---|---|)
-        if re.match(r"^\|[-\s|]+\|$", line):
+        if re.match(r"^\|[-\s|]+\|$", stripped):
             in_table = True
             continue
 
         # Skip header row (| Command | Description |)
         if not in_table:
-            if "Command" in line and "Description" in line:
+            if "Command" in stripped and "Description" in stripped:
                 continue
             continue
 
         # Parse table row
-        cells = [c.strip() for c in line.split("|")[1:-1]]
+        cells = [c.strip() for c in stripped.split("|")[1:-1]]
         if len(cells) >= 2:
             cmd_cell = cells[0]
             comment_cell = cells[1] if len(cells) > 1 else ""
@@ -316,6 +338,24 @@ def import_from_markdown(file_path: Path) -> list[GroupCommand]:
     if not commands:
         raise click.ClickException("No commands found in markdown table.")
 
+    return group_name, commands
+
+
+def import_from_json(file_path: Path) -> list[GroupCommand]:
+    """Parse a JSON file and extract commands.
+
+    Delegates to import_from_json_str for the actual parsing.
+    """
+    _, commands = import_from_json_str(file_path.read_text(encoding="utf-8"))
+    return commands
+
+
+def import_from_markdown(file_path: Path) -> list[GroupCommand]:
+    """Parse a markdown file and extract commands from a table.
+
+    Delegates to import_from_markdown_str for the actual parsing.
+    """
+    _, commands = import_from_markdown_str(file_path.read_text(encoding="utf-8"))
     return commands
 
 

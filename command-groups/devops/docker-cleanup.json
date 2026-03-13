@@ -1,0 +1,31 @@
+{
+  "docker-cleanup": {
+    "description": "Docker system maintenance -- recover disk space without nuking active workloads",
+    "commands": [
+      {
+        "cmd": "docker system df",
+        "comment": "disk usage breakdown by images, containers, volumes"
+      },
+      {
+        "cmd": "docker ps -a --filter status=exited --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Size}}'",
+        "comment": "stopped containers still eating disk"
+      },
+      {
+        "cmd": "docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' | sort -k3 -h -r | head -20",
+        "comment": "largest images -- candidates for cleanup"
+      },
+      {
+        "cmd": "docker images -f dangling=true -q | xargs -r docker rmi",
+        "comment": "remove dangling images (untagged layers from rebuilds)"
+      },
+      {
+        "cmd": "docker volume ls -f dangling=true -q | xargs -r docker volume rm",
+        "comment": "remove orphaned volumes -- check before running"
+      },
+      {
+        "cmd": "docker builder prune --filter until=72h -f",
+        "comment": "clear build cache older than 3 days"
+      }
+    ]
+  }
+}

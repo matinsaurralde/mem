@@ -1,0 +1,35 @@
+{
+  "git-forensics": {
+    "description": "Git archaeology -- find secrets, trace bugs, understand history",
+    "commands": [
+      {
+        "cmd": "git log --all --oneline -S '$SEARCH_STRING' -- '*.py' '*.js' '*.go' '*.yaml' '*.yml' '*.json' '*.env'",
+        "comment": "find every commit that added or removed a string (pickaxe search)"
+      },
+      {
+        "cmd": "git log --all --diff-filter=D --name-only --pretty=format:'%h %s' | head -40",
+        "comment": "deleted files -- credentials often get 'removed' but live in history"
+      },
+      {
+        "cmd": "git log --all --oneline --grep='$SEARCH_STRING' -i",
+        "comment": "search commit messages -- find when a fix or feature was introduced"
+      },
+      {
+        "cmd": "git log --format='%H' --all | xargs git grep -l '$SEARCH_STRING' 2>/dev/null | sort -u",
+        "comment": "brute-force search across all history -- finds buried secrets"
+      },
+      {
+        "cmd": "git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | awk '/^blob/ {print $3,$4}' | sort -rn | head -20",
+        "comment": "largest blobs ever committed -- binaries, data dumps, vendor dirs"
+      },
+      {
+        "cmd": "git shortlog -sn --all --no-merges | head -10",
+        "comment": "top contributors by commit count -- who knows this code best"
+      },
+      {
+        "cmd": "git log --oneline --all --after='$AFTER_DATE' --before='$BEFORE_DATE' --format='%h %ai %an: %s'",
+        "comment": "timeline of changes in a date range -- incident correlation"
+      }
+    ]
+  }
+}

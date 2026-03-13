@@ -1,0 +1,31 @@
+{
+  "postgres-debug": {
+    "description": "PostgreSQL troubleshooting -- connections, locks, slow queries",
+    "commands": [
+      {
+        "cmd": "psql -h $PGHOST -U $PGUSER -d $PGDATABASE -c \"SELECT count(*), state FROM pg_stat_activity GROUP BY state ORDER BY count DESC;\"",
+        "comment": "connection count by state -- idle in transaction is a red flag"
+      },
+      {
+        "cmd": "psql -h $PGHOST -U $PGUSER -d $PGDATABASE -c \"SELECT pid, now() - pg_stat_activity.query_start AS duration, query FROM pg_stat_activity WHERE state = 'active' AND query NOT LIKE '%pg_stat_activity%' ORDER BY duration DESC LIMIT 10;\"",
+        "comment": "currently running queries sorted by duration"
+      },
+      {
+        "cmd": "psql -h $PGHOST -U $PGUSER -d $PGDATABASE -c \"SELECT blocked.pid AS blocked_pid, blocked.query AS blocked_query, blocking.pid AS blocking_pid, blocking.query AS blocking_query FROM pg_stat_activity blocked JOIN pg_locks bl ON bl.pid = blocked.pid JOIN pg_locks bk ON bk.locktype = bl.locktype AND bk.relation = bl.relation AND bk.pid != bl.pid JOIN pg_stat_activity blocking ON bk.pid = blocking.pid WHERE NOT bl.granted;\"",
+        "comment": "blocking lock chains -- who's waiting on whom"
+      },
+      {
+        "cmd": "psql -h $PGHOST -U $PGUSER -d $PGDATABASE -c \"SELECT schemaname, relname, n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup, last_autovacuum FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10;\"",
+        "comment": "tables with most dead tuples -- needs vacuum"
+      },
+      {
+        "cmd": "psql -h $PGHOST -U $PGUSER -d $PGDATABASE -c \"SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS total, pg_size_pretty(pg_indexes_size(relid)) AS indexes FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 10;\"",
+        "comment": "largest tables with index size -- where's the disk going"
+      },
+      {
+        "cmd": "psql -h $PGHOST -U $PGUSER -d $PGDATABASE -c \"SELECT indexrelname, idx_scan, pg_size_pretty(pg_relation_size(indexrelid)) AS size FROM pg_stat_user_indexes WHERE idx_scan = 0 ORDER BY pg_relation_size(indexrelid) DESC LIMIT 10;\"",
+        "comment": "unused indexes -- wasting disk and slowing writes"
+      }
+    ]
+  }
+}

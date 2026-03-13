@@ -1,0 +1,35 @@
+{
+  "k8s-debug": {
+    "description": "Kubernetes troubleshooting -- from symptom to root cause",
+    "commands": [
+      {
+        "cmd": "kubectl get pods -n $NAMESPACE --field-selector status.phase!=Running",
+        "comment": "pods not in Running state -- the starting point"
+      },
+      {
+        "cmd": "kubectl describe pod $POD -n $NAMESPACE | tail -30",
+        "comment": "events section -- scheduling failures, image pulls, OOMs"
+      },
+      {
+        "cmd": "kubectl logs $POD -n $NAMESPACE --tail=100 --previous",
+        "comment": "logs from the previous crashed container"
+      },
+      {
+        "cmd": "kubectl top pods -n $NAMESPACE --sort-by=memory | head -10",
+        "comment": "memory hogs -- approaching limits means OOMKill incoming"
+      },
+      {
+        "cmd": "kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp' | tail -20",
+        "comment": "recent cluster events -- often reveals the actual problem"
+      },
+      {
+        "cmd": "kubectl get hpa -n $NAMESPACE",
+        "comment": "autoscaler status -- is it maxed out or thrashing?"
+      },
+      {
+        "cmd": "kubectl exec -it $POD -n $NAMESPACE -- sh -c 'wget -qO- http://localhost:$PORT/health || curl -sf http://localhost:$PORT/health'",
+        "comment": "health check from inside the pod -- bypasses ingress/service"
+      }
+    ]
+  }
+}

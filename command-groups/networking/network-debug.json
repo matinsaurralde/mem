@@ -1,0 +1,31 @@
+{
+  "network-debug": {
+    "description": "Network connectivity troubleshooting -- layer by layer",
+    "commands": [
+      {
+        "cmd": "curl -sS -o /dev/null -w 'dns: %{time_namelookup}s\\nconnect: %{time_connect}s\\ntls: %{time_appconnect}s\\nttfb: %{time_starttransfer}s\\ntotal: %{time_total}s\\ncode: %{http_code}\\n' https://$HOST",
+        "comment": "request timing breakdown -- pinpoints where latency lives"
+      },
+      {
+        "cmd": "dig +trace $HOST",
+        "comment": "full DNS resolution path -- find where delegation breaks"
+      },
+      {
+        "cmd": "traceroute -n -w 2 -q 1 $HOST",
+        "comment": "network path -- identify the hop where packets die"
+      },
+      {
+        "cmd": "nc -zv $HOST $PORT -w 5 2>&1",
+        "comment": "TCP port reachability -- is the port open or firewalled?"
+      },
+      {
+        "cmd": "curl -sS --resolve $HOST:443:$IP https://$HOST -o /dev/null -w '%{http_code}\\n'",
+        "comment": "bypass DNS and hit a specific IP -- test individual backends"
+      },
+      {
+        "cmd": "mtr -n -c 10 --report $HOST",
+        "comment": "combined ping/traceroute -- shows packet loss per hop"
+      }
+    ]
+  }
+}

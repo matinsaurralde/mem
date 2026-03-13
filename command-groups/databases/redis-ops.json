@@ -1,0 +1,31 @@
+{
+  "redis-ops": {
+    "description": "Redis operational checks -- memory, slow queries, key analysis",
+    "commands": [
+      {
+        "cmd": "redis-cli -h $REDIS_HOST -a $REDIS_PASSWORD INFO memory | grep -E 'used_memory_human|maxmemory_human|mem_fragmentation_ratio'",
+        "comment": "memory usage and fragmentation -- ratio > 1.5 means wasted RAM"
+      },
+      {
+        "cmd": "redis-cli -h $REDIS_HOST -a $REDIS_PASSWORD INFO clients | grep -E 'connected_clients|blocked_clients'",
+        "comment": "client connections -- blocked_clients > 0 means something is stuck"
+      },
+      {
+        "cmd": "redis-cli -h $REDIS_HOST -a $REDIS_PASSWORD SLOWLOG GET 10",
+        "comment": "recent slow commands -- KEYS * in production is the usual suspect"
+      },
+      {
+        "cmd": "redis-cli -h $REDIS_HOST -a $REDIS_PASSWORD INFO keyspace",
+        "comment": "key count and expiry stats per database"
+      },
+      {
+        "cmd": "redis-cli -h $REDIS_HOST -a $REDIS_PASSWORD --bigkeys --no-auth-warning 2>/dev/null",
+        "comment": "find the largest keys -- memory hogs that might need restructuring"
+      },
+      {
+        "cmd": "redis-cli -h $REDIS_HOST -a $REDIS_PASSWORD INFO replication | grep -E 'role|connected_slaves|master_link_status'",
+        "comment": "replication health -- master_link_status should be 'up'"
+      }
+    ]
+  }
+}

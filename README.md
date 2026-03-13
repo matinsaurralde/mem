@@ -45,11 +45,20 @@ pip install cli-mem
 pip install "cli-mem[ai]"
 ```
 
-Then activate the shell hook:
+Then activate the shell hook for your shell:
 
 ```bash
+# zsh
 echo 'eval "$(mem init zsh)"' >> ~/.zshrc
 source ~/.zshrc
+
+# bash
+echo 'eval "$(mem init bash)"' >> ~/.bashrc
+source ~/.bashrc
+
+# fish
+echo 'mem init fish | source' >> ~/.config/fish/config.fish
+source ~/.config/fish/config.fish
 ```
 
 That's it. Every command you type is now silently captured with full context (directory, git repo, exit code, duration).
@@ -142,6 +151,8 @@ mem export k8s                       # copy JSON to clipboard
 mem export k8s --format markdown     # copy as markdown
 mem export k8s --stdout              # print instead of clipboard
 
+mem import                           # import from clipboard (auto-detect format + group name)
+mem import -g renamed                # import from clipboard with custom group name
 mem import runbook.json -g ops       # import from file (auto-detects format)
 mem import runbook.md -g ops         # markdown works too
 ```
@@ -248,7 +259,7 @@ mem stats                        # top commands, repos, totals
 mem stats --json                 # machine-readable stats
 mem forget "API_KEY=sk-..."      # permanently delete matching commands
 mem forget "password" --yes      # skip confirmation
-mem init zsh                     # print shell hook code
+mem init zsh                     # print shell hook code (also: bash, fish)
 ```
 
 ---
@@ -350,7 +361,7 @@ brew uninstall mem          # or: pip uninstall cli-mem
 rm -rf ~/.mem               # remove all captured data
 ```
 
-Remove the `eval "$(mem init zsh)"` line from `~/.zshrc`.
+Remove the shell hook line from your shell config (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish`).
 
 ---
 

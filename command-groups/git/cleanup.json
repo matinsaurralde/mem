@@ -1,0 +1,31 @@
+{
+  "git-cleanup": {
+    "description": "Branch and repo cleanup -- keep the repo lean",
+    "commands": [
+      {
+        "cmd": "git branch --merged main | grep -v 'main\\|master\\|\\*' | xargs -r git branch -d",
+        "comment": "delete local branches already merged to main"
+      },
+      {
+        "cmd": "git remote prune origin --dry-run",
+        "comment": "preview stale remote-tracking branches (remove --dry-run to prune)"
+      },
+      {
+        "cmd": "git branch -vv | grep ': gone]' | awk '{print $1}'",
+        "comment": "local branches whose remote was deleted -- safe to remove"
+      },
+      {
+        "cmd": "git reflog expire --expire=30.days --all && git gc --prune=now --aggressive",
+        "comment": "aggressive gc -- reclaims space from rewritten history"
+      },
+      {
+        "cmd": "git stash list",
+        "comment": "forgotten stashes -- review before they become mysteries"
+      },
+      {
+        "cmd": "git log --oneline --all --graph --decorate | head -30",
+        "comment": "visual branch topology -- understand what needs merging"
+      }
+    ]
+  }
+}
