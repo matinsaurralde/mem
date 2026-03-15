@@ -19,8 +19,8 @@
         "comment": "TLS cert expiry and subject"
       },
       {
-        "cmd": "for p in .env .git/config robots.txt; do code=$(curl -s -o /dev/null -w '%{http_code}' https://$DOMAIN/$p); echo \"$code $p\"; done",
-        "comment": "probe sensitive paths"
+        "cmd": "curl -s https://$DOMAIN/robots.txt",
+        "comment": "robots.txt"
       }
     ]
   }
