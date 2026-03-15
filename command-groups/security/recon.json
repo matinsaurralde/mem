@@ -1,42 +1,26 @@
 {
   "recon": {
-    "description": "Domain recon workflow -- passive + light active, no API keys needed",
+    "description": "Quick domain recon -- no API keys, clean output",
     "commands": [
       {
         "cmd": "curl -s 'https://crt.sh/?q=%25.$DOMAIN&output=json' | jq -r '.[].name_value' | sort -u",
-        "comment": "subdomain discovery via certificate transparency"
+        "comment": "subdomains via certificate transparency"
       },
       {
-        "cmd": "dig $DOMAIN A +short && dig $DOMAIN MX +short && dig $DOMAIN TXT +short",
-        "comment": "DNS records -- reveals stack, email provider, SPF/DMARC"
+        "cmd": "dig $DOMAIN A +short && dig $DOMAIN MX +short",
+        "comment": "DNS A + MX records"
       },
       {
-        "cmd": "curl -sIL https://$DOMAIN",
-        "comment": "HTTP headers + redirect chain -- technology fingerprinting"
+        "cmd": "curl -sI https://$DOMAIN | grep -iE 'server:|x-powered|strict-transport|content-security-policy'",
+        "comment": "key HTTP headers"
       },
       {
-        "cmd": "curl -s https://$DOMAIN/robots.txt && echo '---' && curl -s https://$DOMAIN/sitemap.xml | head -40",
-        "comment": "robots.txt + sitemap -- map out what exists"
+        "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | openssl x509 -noout -dates -subject",
+        "comment": "TLS cert expiry and subject"
       },
       {
-        "cmd": "curl -s 'https://web.archive.org/cdx/search/cdx?url=*.$DOMAIN&output=text&fl=original&collapse=urlkey' | sort -u | head -50",
-        "comment": "historical URLs from Wayback Machine -- deleted endpoints"
-      },
-      {
-        "cmd": "for path in .env .git/config .DS_Store server-status debug info wp-login.php; do code=$(curl -s -o /dev/null -w '%{http_code}' https://$DOMAIN/$path); [ \"$code\" != \"404\" ] && echo \"$code $path\"; done",
-        "comment": "probe common sensitive paths -- anything not 404 is interesting"
-      },
-      {
-        "cmd": "curl -s https://$DOMAIN/.well-known/security.txt",
-        "comment": "security.txt -- scope, contacts, bug bounty program"
-      },
-      {
-        "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | openssl x509 -noout -dates -subject -ext subjectAltName",
-        "comment": "TLS cert -- expiry, SAN entries reveal related domains"
-      },
-      {
-        "cmd": "nmap -sV -sC -T4 --top-ports 100 $DOMAIN",
-        "comment": "service detection on top 100 ports -- what's exposed"
+        "cmd": "for p in .env .git/config robots.txt; do code=$(curl -s -o /dev/null -w '%{http_code}' https://$DOMAIN/$p); echo \"$code $p\"; done",
+        "comment": "probe sensitive paths"
       }
     ]
   }
