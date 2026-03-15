@@ -17,10 +17,6 @@
       {
         "cmd": "echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | openssl x509 -noout -dates -subject",
         "comment": "TLS cert expiry and subject"
-      },
-      {
-        "cmd": "dig -x $(dig $DOMAIN A +short | head -1) +short",
-        "comment": "reverse DNS -- who hosts this IP"
       }
     ]
   }
