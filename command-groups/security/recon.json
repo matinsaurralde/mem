@@ -19,8 +19,8 @@
         "comment": "TLS cert expiry and subject"
       },
       {
-        "cmd": "curl -s https://$DOMAIN/robots.txt",
-        "comment": "robots.txt"
+        "cmd": "dig -x $(dig $DOMAIN A +short | head -1) +short",
+        "comment": "reverse DNS -- who hosts this IP"
       }
     ]
   }
