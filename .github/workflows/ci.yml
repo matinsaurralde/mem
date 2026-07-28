@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [master]
+  # Deliberately unfiltered by base branch. With a `branches: [master]` filter,
+  # a pull request targeting anything else gets no CI at all — which silently
+  # excluded every stacked PR in this series, the exact review model in use.
   pull_request:
-    branches: [master]
 
 concurrency:
   group: ci-${{ github.ref }}
