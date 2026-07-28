@@ -40,13 +40,18 @@ ai = ["apple-fm-sdk>=0.1.1,<0.2"]
 # happened here — 0.16.0 enabled BLE001/S110/PLW1510 and flagged 44 pre-existing
 # sites. Upgrading ruff is now a deliberate PR, not a surprise.
 #
-# TODO(0.16): adopt ruff 0.16 in the test-harness branch. Its new BLE001 and
-# S110 rules point straight at the `except Exception: pass` in cli.py:262 that
-# hid the dead background sync for four months, so they are worth adopting —
-# but only with per-site judgement: the broad catch in storage.py:97 (skip a
-# corrupted JSONL line) is correct and should get a justified noqa, while the
-# ones swallowing real failures should be narrowed.
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.23", "ruff>=0.15.5,<0.16"]
+# TODO(0.16): adopt ruff 0.16. Its new BLE001 and S110 rules point straight at
+# the `except Exception: pass` in cli.py:262 that hid the dead background sync
+# for four months, so they are worth adopting — but only with per-site
+# judgement: the broad catch in storage.py:97 (skip a corrupted JSONL line) is
+# correct and should get a justified noqa, while the ones swallowing real
+# failures should be narrowed.
+dev = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    "ruff>=0.15.5,<0.16",
+]
 
 [project.scripts]
 mem = "mem.cli:cli"
@@ -62,3 +67,27 @@ packages = ["src/mem"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `-m "not ai"`: tests marked `ai` drive the REAL Apple Foundation Models
+# runtime. They cost seconds per call and their output is non-deterministic,
+# so the default suite excludes them. Run them deliberately with `pytest -m ai`.
+#
+# Branch coverage is on because mem is mostly branching I/O: line coverage
+# reports a `try/except` or an `if not path.exists()` as covered after the
+# happy path alone, which is exactly the half that never gets tested.
+addopts = "-m 'not ai' --cov=mem --cov-branch --cov-report=term-missing"
+markers = [
+    "ai: requires the real on-device Apple Foundation Models runtime (deselected by default)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["mem"]
+
+[tool.coverage.report]
+# TODO: enable once the follow-up branches land the missing tests.
+#       Target: fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
