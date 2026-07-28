@@ -327,7 +327,10 @@ class TestListAll:
 
         result = groups.list_all(repo_path, global_path)
         assert result["repo_data"] is not None
-        assert "shared" in result["shadows"]
+        assert set(result["repo_data"].groups) == {"shared", "repo-only"}
+        assert set(result["global_data"].groups) == {"shared", "global-only"}
+        # Only names present in BOTH scopes are shadowed
+        assert result["shadows"] == {"shared"}
         assert result["repo_name"] == "myrepo"
 
 
@@ -799,11 +802,23 @@ class TestRunCLI:
         assert "echo 2" in result.output
 
     def test_run_decline(self, tmp_mem_dir: Path):
+        """Answering "n" exits cleanly and executes NOTHING.
+
+        Exit code 0 alone cannot distinguish "declined" from "ran everything
+        successfully", which is the whole point of the confirmation prompt.
+        """
         self._setup_group(tmp_mem_dir)
         runner = CliRunner()
-        with patch("mem.cli._is_interactive", return_value=True):
+        with (
+            patch("mem.cli._is_interactive", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
             result = runner.invoke(cli, ["run", "test", "--global"], input="n\n")
         assert result.exit_code == 0
+        # `mem run` executes group commands via `subprocess.run(cmd, shell=True)`.
+        # Repo detection also shells out to git, so filter on shell=True.
+        executed = [c for c in mock_run.call_args_list if c.kwargs.get("shell")]
+        assert executed == []
 
     def test_run_all_skips_per_command_confirm(self, tmp_mem_dir: Path):
         self._setup_group(tmp_mem_dir)
@@ -866,10 +881,17 @@ class TestExportCLI:
         assert "deploy" in data
 
     def test_export_not_found(self, tmp_mem_dir: Path):
+        """Exporting an unknown group fails and names the group.
+
+        An exit-code-only assertion would also pass if the command crashed
+        with a traceback, so the message is asserted too.
+        """
         runner = CliRunner()
         with _mock_repo(), patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             result = runner.invoke(cli, ["export", "nonexistent"])
         assert result.exit_code != 0
+        assert "not found" in result.output
+        assert "nonexistent" in result.output
 
 
 class TestImportCLI:
@@ -1042,10 +1064,16 @@ class TestGroupRemoveCLI:
         assert "keep" in data.groups
 
     def test_remove_not_found(self, tmp_mem_dir: Path):
+        """Removing an unknown group errors and leaves existing groups untouched."""
+        storage.write_group_file(
+            storage.GROUPS_GLOBAL_FILE, GroupFile(groups={"keep": Group()})
+        )
         runner = CliRunner()
         with _mock_repo(), patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             result = runner.invoke(cli, ["group", "remove", "nope", "--global"])
         assert result.exit_code != 0
+        assert "not found" in result.output
+        assert "keep" in storage.read_group_file(storage.GROUPS_GLOBAL_FILE).groups
 
 
 class TestGroupRenameCLI:
@@ -1075,6 +1103,7 @@ class TestGroupRenameCLI:
         assert data.groups["new-name"].description == "test"
 
     def test_rename_source_not_found(self, tmp_mem_dir: Path):
+        """Renaming an unknown group errors without inventing the target."""
         runner = CliRunner()
         with _mock_repo(), patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             result = runner.invoke(
@@ -1082,6 +1111,8 @@ class TestGroupRenameCLI:
                 ["group", "rename", "nope", "new", "--global"],
             )
         assert result.exit_code != 0
+        assert "not found" in result.output
+        assert "new" not in storage.read_group_file(storage.GROUPS_GLOBAL_FILE).groups
 
     def test_rename_target_exists(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1105,6 +1136,7 @@ class TestGroupRenameCLI:
         )
 
     def test_rename_invalid_new_name(self, tmp_mem_dir: Path):
+        """An invalid target name is rejected before anything is written."""
         storage.write_group_file(
             storage.GROUPS_GLOBAL_FILE,
             GroupFile(groups={"valid": Group()}),
@@ -1115,6 +1147,11 @@ class TestGroupRenameCLI:
             ["group", "rename", "valid", "BAD NAME", "--global"],
         )
         assert result.exit_code != 0
+        assert "Invalid group name" in result.output
+        # The source group must survive a rejected rename
+        assert set(storage.read_group_file(storage.GROUPS_GLOBAL_FILE).groups) == {
+            "valid"
+        }
 
 
 class TestGroupCopyCLI:
@@ -1163,10 +1200,12 @@ class TestGroupCopyCLI:
         assert "ssh" in repo_data.groups
 
     def test_copy_no_scope_flag_errors(self, tmp_mem_dir: Path):
+        """`group copy` refuses to guess the destination scope."""
         runner = CliRunner()
         with _mock_repo(), patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             result = runner.invoke(cli, ["group", "copy", "test"])
         assert result.exit_code != 0
+        assert "--global" in result.output and "--repo" in result.output
 
     def test_copy_target_exists_errors(self, tmp_mem_dir: Path):
         repo_name = storage.sanitize_repo_name(FAKE_REPO)
@@ -1387,7 +1426,13 @@ class TestEditorParsing:
 
 
 class TestGlobalShortFlag:
-    """Verify -g works as short flag for --global on applicable commands."""
+    """Verify -g works as short flag for --global on applicable commands.
+
+    Every test here asserts an observable effect on the GLOBAL scope, not just
+    ``exit_code == 0``. A ``-g`` that parsed fine but silently resolved to the
+    repo scope would exit 0 too, so the exit code alone proves nothing about
+    the flag actually doing its job.
+    """
 
     def test_list_short_g(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1408,6 +1453,8 @@ class TestGlobalShortFlag:
         with patch("mem.cli._is_interactive", return_value=True):
             result = runner.invoke(cli, ["run", "grp", "-g"], input="n\n")
         assert result.exit_code == 0
+        # The global group was resolved and its commands presented
+        assert "echo hi" in result.output
 
     def test_export_short_g(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1417,6 +1464,8 @@ class TestGlobalShortFlag:
         runner = CliRunner()
         result = runner.invoke(cli, ["export", "grp", "-g", "--stdout"])
         assert result.exit_code == 0
+        exported = json.loads(result.output)
+        assert [c["cmd"] for c in exported["grp"]["commands"]] == ["echo hi"]
 
     def test_group_edit_short_g(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1424,9 +1473,11 @@ class TestGlobalShortFlag:
             GroupFile(groups={"grp": Group(commands=[GroupCommand(cmd="echo x")])}),
         )
         runner = CliRunner()
-        with patch("subprocess.run"):
+        with patch("subprocess.run") as mock_run:
             result = runner.invoke(cli, ["group", "edit", "grp", "-g"])
         assert result.exit_code == 0
+        # The editor must be pointed at the GLOBAL data file
+        assert mock_run.call_args[0][0][-1] == str(storage.GROUPS_GLOBAL_FILE)
 
     def test_group_remove_short_g(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1436,6 +1487,7 @@ class TestGlobalShortFlag:
         runner = CliRunner()
         result = runner.invoke(cli, ["group", "remove", "grp", "-g", "-y"])
         assert result.exit_code == 0
+        assert storage.read_group_file(storage.GROUPS_GLOBAL_FILE).groups == {}
 
     def test_group_rename_short_g(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1445,6 +1497,9 @@ class TestGlobalShortFlag:
         runner = CliRunner()
         result = runner.invoke(cli, ["group", "rename", "old", "new", "-g"])
         assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert set(data.groups) == {"new"}
+        assert [c.cmd for c in data.groups["new"].commands] == ["echo x"]
 
     def test_saved_edit_short_g(self, tmp_mem_dir: Path):
         storage.write_group_file(
@@ -1452,9 +1507,10 @@ class TestGlobalShortFlag:
             GroupFile(saved=[SavedCommand(cmd="echo x")]),
         )
         runner = CliRunner()
-        with patch("subprocess.run"):
+        with patch("subprocess.run") as mock_run:
             result = runner.invoke(cli, ["saved", "edit", "-g"])
         assert result.exit_code == 0
+        assert mock_run.call_args[0][0][-1] == str(storage.GROUPS_GLOBAL_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -1611,6 +1667,8 @@ class TestImportAutoDetect:
             ["import", str(f), "-g", "md-grp", "--global"],
         )
         assert result.exit_code == 0
+        data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
+        assert [c.cmd for c in data.groups["md-grp"].commands] == ["echo md"]
 
     def test_auto_detect_unknown_extension_errors(
         self, tmp_mem_dir: Path, tmp_path: Path
@@ -2355,6 +2413,16 @@ class TestInitShellHooks:
         assert "_mem_preexec" in result.output
 
     def test_init_unsupported_shell(self):
+        """An unknown shell errors, names it, and lists the supported ones.
+
+        It must also emit nothing that a shell would try to `eval`: users wire
+        this up as `eval "$(mem init <shell>)"`, so a partial hook on stdout
+        after an error would be executed.
+        """
         runner = CliRunner()
         result = runner.invoke(cli, ["init", "powershell"])
         assert result.exit_code != 0
+        assert "powershell" in result.output
+        for shell in ("zsh", "bash", "fish"):
+            assert shell in result.output
+        assert "_mem_preexec" not in result.output
