@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
-import pathlib
 import stat
 import time
 from datetime import datetime, timezone
@@ -139,10 +138,40 @@ def run_in_process(target: Callable[..., None], *args: object) -> None:
     inherits none of the parent's monkeypatching, which is what makes these
     genuine multi-process races rather than same-process simulations.
     """
+    join_process(start_in_process(target, *args))
+
+
+def start_in_process(target: Callable[..., None], *args: object) -> mp.Process:
+    """Start a worker without waiting for it.
+
+    Needed by the race tests: they inject the competing writer while the
+    operation under test still holds the storage lock. Waiting for the child
+    there would block on a process that is itself blocked on the lock the
+    parent holds, so the start and the join have to be separable.
+    """
     proc = mp.get_context("spawn").Process(target=target, args=args)
     proc.start()
+    return proc
+
+
+def join_process(proc: mp.Process) -> None:
+    """Wait for a worker and assert it exited cleanly."""
     proc.join(timeout=60)
     assert proc.exitcode == 0, f"worker process failed (exitcode={proc.exitcode})"
+
+
+def _wait_for(path: Path, timeout: float = 30.0) -> bool:
+    """Poll for a file to appear. True if it did, False on timeout.
+
+    Used instead of a fixed sleep so the cross-process handshakes are neither
+    flaky on a loaded machine nor artificially slow on an idle one.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.001)
+    return False
 
 
 # --- worker entry points (must be importable module-level callables) -------
@@ -190,6 +219,56 @@ def _worker_increment_counter(mem_dir: str) -> None:
     child_storage.MEM_DIR = Path(mem_dir)
     child_storage.SYNC_COUNTER_FILE = Path(mem_dir) / ".sync_counter"
     child_storage.increment_sync_counter()
+
+
+def _worker_hold_lock(mem_dir: str, tag: str, hold_seconds: float) -> None:
+    """Take the storage lock, record the interval held, release.
+
+    Writes one ``tag enter <t>`` / ``tag exit <t>`` pair to intervals.log so
+    the parent can assert the two children never overlapped.
+    """
+    import time as child_time
+    from pathlib import Path as ChildPath
+
+    from mem import storage as child_storage
+
+    child_storage.MEM_DIR = ChildPath(mem_dir)
+    log = ChildPath(mem_dir) / "intervals.log"
+    with child_storage.exclusive_lock():
+        enter = child_time.monotonic()
+        child_time.sleep(hold_seconds)
+        exit_at = child_time.monotonic()
+        with log.open("a", encoding="utf-8") as f:
+            f.write(f"{tag} {enter:.6f} {exit_at:.6f}\n")
+
+
+def _worker_append_on_go(mem_dir: str, tag: str, ts: int) -> None:
+    """Wait for a go-file, then append one command as fast as possible.
+
+    Spawned and warmed up *before* the race window opens. A child spawned
+    inside the window is useless as a race participant: interpreter startup
+    costs ~100ms, by which time the operation under test has long finished.
+    """
+    import time as child_time
+    from pathlib import Path as ChildPath
+
+    from mem import storage as child_storage
+    from mem.models import CapturedCommand as ChildCommand
+
+    root = ChildPath(mem_dir)
+    child_storage.MEM_DIR = root
+    go = root / "go"
+    ready = root / "ready"
+    ready.write_text("1", encoding="utf-8")
+    deadline = child_time.monotonic() + 60
+    while not go.exists() and child_time.monotonic() < deadline:
+        child_time.sleep(0.001)
+    child_storage.append_command(
+        ChildCommand(
+            command=tag, ts=ts, dir="/w", repo="/w/app", exit_code=0, duration_ms=1
+        )
+    )
+    (root / "appended").write_text("1", encoding="utf-8")
 
 
 # --- fixtures --------------------------------------------------------------
@@ -466,11 +545,6 @@ class TestRotateDegenerateFiles:
         assert path.exists()
         assert read_commands_raw(path) == ["NOT JSON", "ALSO NOT JSON"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-ROTATE-TS: rotate() trata `ts` ausente como ts=0 y borra la "
-        "entrada, aunque las lineas ilegibles si se conservan",
-    )
     def test_entry_without_ts_is_preserved(self, tmp_mem_dir, frozen_now):
         """A valid JSON line without `ts` has unknown age: it must not be deleted.
 
@@ -490,11 +564,6 @@ class TestRotateDegenerateFiles:
         assert removed == 0
         assert commands_in(path) == ["no-ts", "new"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-ROTATE-TS: un archivo con solo entradas sin `ts` queda vacio "
-        "tras rotate() y se borra del disco",
-    )
     def test_file_of_entries_without_ts_is_not_deleted(self, tmp_mem_dir, frozen_now):
         """Every line missing `ts` must not translate into deleting the file."""
         path = write_repo_file(
@@ -573,11 +642,6 @@ class TestForgetScrubsEveryDestination:
 
         assert files_containing(tmp_mem_dir, SECRET) == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-4: forget_commands() no toca patterns/*.json; el comando "
-        "sobrevive en `example` y en `processed_commands`",
-    )
     def test_forget_scrubs_pattern_files(self, tmp_mem_dir):
         """Extracted patterns embed raw command text and must be scrubbed too."""
         storage.write_patterns(
@@ -599,11 +663,6 @@ class TestForgetScrubsEveryDestination:
 
         assert files_containing(tmp_mem_dir, SECRET) == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-4: forget_commands() no toca groups/**/*.json; los comandos "
-        "guardados y los runbooks conservan el texto olvidado",
-    )
     def test_forget_scrubs_group_files(self, tmp_mem_dir):
         """Saved commands and named groups must lose the forgotten command."""
         storage.write_group_file(
@@ -631,11 +690,6 @@ class TestForgetScrubsEveryDestination:
 
         assert files_containing(tmp_mem_dir, SECRET) == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-4: forget_commands() no toca vars.json; el valor de la "
-        "variable persistente sobrevive al olvido",
-    )
     def test_forget_scrubs_vars_file(self, tmp_mem_dir):
         """A stored variable holding the forgotten value must be scrubbed."""
         storage.write_vars_file(VarsFile(vars={"TOKEN": StoredVariable(value=SECRET)}))
@@ -658,11 +712,6 @@ class TestForgetScrubsEveryDestination:
         state_path = tmp_mem_dir / ".session_state.json"
         assert SECRET in state_path.read_text(encoding="utf-8")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-4: forget_commands() no toca .session_state.json; el comando "
-        "de la sesion en curso sobrevive al olvido",
-    )
     def test_forget_scrubs_session_state(self, tmp_mem_dir, monkeypatch):
         """The in-flight session buffer must lose the forgotten command too."""
         monkeypatch.setattr(capture, "get_git_repo", lambda directory: "/w/app")
@@ -673,11 +722,6 @@ class TestForgetScrubsEveryDestination:
 
         assert files_containing(tmp_mem_dir, SECRET) == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-4: el secreto sobrevive en .session_state.json y RESUCITA en "
-        "sessions/ cuando la sesion se cierra despues del forget",
-    )
     def test_forgotten_secret_does_not_resurrect_when_session_closes(
         self, tmp_mem_dir, monkeypatch
     ):
@@ -736,11 +780,6 @@ class TestForgetWithoutMatches:
 
         assert read_commands_raw(path) == before
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-FORGET-NOOP: forget_commands() reescribe (tmp+rename) todos "
-        "los JSONL aunque la query no matchee nada",
-    )
     def test_no_match_does_not_rewrite_files(self, tmp_mem_dir):
         """No match means no rewrite: the files on disk must not be replaced.
 
@@ -777,11 +816,6 @@ class TestForgetWithoutMatches:
         assert repo_path.stat().st_ino == repo_inode
         assert session_path.stat().st_ino == session_inode
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-FORGET-NOOP: forget_commands() borra del disco cualquier "
-        "JSONL que quede sin lineas, incluso si la query no matcheo nada",
-    )
     def test_no_match_does_not_delete_empty_files(self, tmp_mem_dir):
         """An empty history file is not a match: forget must not unlink it."""
         empty_repo = write_repo_file(tmp_mem_dir, "w-app", [])
@@ -831,40 +865,79 @@ class TestConcurrentWriters:
             f"p{i}-{j}" for i in range(3) for j in range(10)
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-10: rotate() reescribe con tmp+rename sin lock; un append "
-        "concurrente entre la lectura y el rename se pierde para siempre",
-    )
-    def test_append_during_rotate_is_not_lost(self, tmp_mem_dir, monkeypatch):
-        """A command captured while rotate() runs must still be in history.
+    def test_exclusive_lock_serializes_processes(self, tmp_mem_dir):
+        """Two processes holding the lock must never overlap in time.
 
-        The race window is made deterministic instead of timing-dependent: a
-        real child process appends exactly once between rotate()'s in-memory
-        snapshot and its rename over the live file.
+        Tests the primitive directly rather than inferring it from an outcome.
+        Each child records the interval it held the lock; if the intervals
+        intersect, the lock is not excluding anything.
+        """
+        storage.ensure_dirs()
+        hold = 0.25
+        procs = [
+            start_in_process(_worker_hold_lock, str(tmp_mem_dir), tag, hold)
+            for tag in ("a", "b")
+        ]
+        for proc in procs:
+            join_process(proc)
+
+        log = tmp_mem_dir / "intervals.log"
+        entries = [
+            line.split() for line in log.read_text().splitlines() if line.strip()
+        ]
+        assert len(entries) == 2, f"expected two intervals, got {entries}"
+        (_, a_in, a_out), (_, b_in, b_out) = (
+            (t, float(i), float(o)) for t, i, o in entries
+        )
+        assert a_out <= b_in or b_out <= a_in, (
+            f"lock holds overlapped: a=[{a_in:.3f},{a_out:.3f}] "
+            f"b=[{b_in:.3f},{b_out:.3f}]"
+        )
+
+    def test_rotate_holds_the_lock_across_its_whole_rewrite(self, tmp_mem_dir):
+        """No append may land between rotate()'s snapshot and its replace.
+
+        The competing writer is spawned and warmed up *before* the window
+        opens, then released from inside it. Spawning the child inside the
+        window (the obvious approach) cannot test anything: interpreter
+        startup costs ~100ms, so the child always arrives after the operation
+        under test has finished, and the test passes with or without a lock.
         """
         now = int(time.time())
-        write_repo_file(
+        path = write_repo_file(
             tmp_mem_dir,
             "w-app",
             [command_line("old", now - 200 * DAY), command_line("kept", now)],
         )
-        real_rename = pathlib.Path.rename
-        fired = {"done": False}
+        proc = start_in_process(
+            _worker_append_on_go, str(tmp_mem_dir), "concurrent", now
+        )
+        assert _wait_for(tmp_mem_dir / "ready"), "the competing writer never started"
 
-        def racing_rename(self: Path, target: Any) -> Any:
-            if self.name.endswith(".jsonl.tmp") and not fired["done"]:
-                fired["done"] = True
-                run_in_process(_worker_append, str(tmp_mem_dir), "concurrent", 1, now)
-            return real_rename(self, target)
+        real_replace = os.replace
+        observed: dict[str, Any] = {"appended_inside_window": None}
+
+        def racing_replace(src: Any, dst: Any) -> Any:
+            if str(src).endswith(".tmp") and observed["appended_inside_window"] is None:
+                (tmp_mem_dir / "go").write_text("1", encoding="utf-8")
+                # Generous window: the child is already warm and polling at 1ms.
+                landed = _wait_for(tmp_mem_dir / "appended", timeout=1.0)
+                observed["appended_inside_window"] = landed
+            return real_replace(src, dst)
 
         with pytest.MonkeyPatch.context() as hook:
-            hook.setattr(pathlib.Path, "rename", racing_rename)
+            hook.setattr(os, "replace", racing_replace)
             storage.rotate()
 
-        assert fired["done"], "rotate() never reached the rename: test setup is stale"
-        path = tmp_mem_dir / "repos" / "w-app.jsonl"
-        assert commands_in(path) == ["kept", "concurrent-0"]
+        assert observed["appended_inside_window"] is not None, (
+            "rotate() never replaced a file: test setup is stale"
+        )
+        assert observed["appended_inside_window"] is False, (
+            "an append landed while rotate() held a stale snapshot — the "
+            "replace that follows silently overwrites it"
+        )
+        join_process(proc)
+        assert commands_in(path) == ["kept", "concurrent"]
 
     def test_concurrent_appends_leave_no_torn_lines(self, tmp_mem_dir):
         """Every line in the history file is a complete, parseable JSON object."""
@@ -892,34 +965,28 @@ class TestConcurrentWriters:
         for line in lines:
             json.loads(line)  # raises on a torn write
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-10: write_group_file() usa un path .tmp fijo y compartido; "
-        "dos escritores concurrentes chocan y el rename revienta con "
-        "FileNotFoundError",
-    )
     def test_concurrent_group_writers_do_not_collide(self, tmp_mem_dir):
         """Two processes writing the same group file must not corrupt or crash.
 
-        Both writers derive the same temporary path (<file>.json.tmp), so the
-        second one renames the first one's temp file out from under it. The
-        contract: last writer wins, the file stays valid, nobody raises.
+        Both writers used to derive the same temporary path (<file>.json.tmp),
+        so the second renamed the first one's temp file out from under it and
+        the loser raised FileNotFoundError. The contract: last writer wins, the
+        file stays valid, nobody raises.
         """
         path = storage.group_file_path(None)
         storage.write_group_file(path, GroupFile())
-        real_rename = pathlib.Path.rename
-        fired = {"done": False}
+        real_replace = os.replace
+        racer: dict[str, Any] = {"proc": None}
 
-        def racing_rename(self: Path, target: Any) -> Any:
-            if self.name.endswith(".json.tmp") and not fired["done"]:
-                fired["done"] = True
-                run_in_process(
+        def racing_replace(src: Any, dst: Any) -> Any:
+            if str(dst).endswith(".json") and racer["proc"] is None:
+                racer["proc"] = start_in_process(
                     _worker_write_group, str(tmp_mem_dir), str(path), "from-b"
                 )
-            return real_rename(self, target)
+            return real_replace(src, dst)
 
         with pytest.MonkeyPatch.context() as hook:
-            hook.setattr(pathlib.Path, "rename", racing_rename)
+            hook.setattr(os, "replace", racing_replace)
             storage.write_group_file(
                 path,
                 GroupFile(
@@ -927,38 +994,40 @@ class TestConcurrentWriters:
                 ),
             )
 
-        assert fired["done"], "write_group_file() never renamed: test setup is stale"
+        assert racer["proc"] is not None, (
+            "write_group_file() never replaced: test setup is stale"
+        )
+        join_process(racer["proc"])
         written = storage.read_group_file(path)
         assert [c.cmd for c in written.groups["deploy"].commands] in (
             ["from-a"],
             ["from-b"],
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-10: increment_sync_counter() hace read-then-write sin lock; "
-        "dos incrementos concurrentes cuentan como uno",
-    )
     def test_increment_sync_counter_does_not_lose_updates(self, tmp_mem_dir):
         """Two concurrent increments must leave the counter at 2, not 1.
 
         A lost increment silently delays the auto-sync that extracts patterns,
         so the feature degrades invisibly on busy machines.
         """
-        real_write_text = pathlib.Path.write_text
-        fired = {"done": False}
+        real_replace = os.replace
+        racer: dict[str, Any] = {"proc": None}
 
-        def racing_write_text(self: Path, data: str, **kwargs: Any) -> Any:
-            if self.name == ".sync_counter" and not fired["done"]:
-                fired["done"] = True
-                run_in_process(_worker_increment_counter, str(tmp_mem_dir))
-            return real_write_text(self, data, **kwargs)
+        def racing_replace(src: Any, dst: Any) -> Any:
+            if str(dst).endswith(".sync_counter") and racer["proc"] is None:
+                racer["proc"] = start_in_process(
+                    _worker_increment_counter, str(tmp_mem_dir)
+                )
+            return real_replace(src, dst)
 
         with pytest.MonkeyPatch.context() as hook:
-            hook.setattr(pathlib.Path, "write_text", racing_write_text)
+            hook.setattr(os, "replace", racing_replace)
             storage.increment_sync_counter()
 
-        assert fired["done"], "the counter was never written: test setup is stale"
+        assert racer["proc"] is not None, (
+            "the counter was never written: test setup is stale"
+        )
+        join_process(racer["proc"])
         assert storage.read_sync_counter() == 2
 
 
@@ -968,11 +1037,6 @@ class TestConcurrentWriters:
 class TestStoragePermissions:
     """Shell history is sensitive: nothing under ~/.mem may be world-readable."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-5: ensure_dirs() usa mkdir con el umask por defecto y deja "
-        "~/.mem en 0755 (world-readable) en vez de 0700",
-    )
     def test_mem_dir_is_owner_only(self, tmp_path, monkeypatch, strict_umask):
         """~/.mem and its subdirectories must be created 0700."""
         mem_home = tmp_path / "mem_home"
@@ -983,11 +1047,6 @@ class TestStoragePermissions:
         assert stat.S_IMODE(mem_home.stat().st_mode) == 0o700
         assert stat.S_IMODE((mem_home / "repos").stat().st_mode) == 0o700
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-5: append_command() crea repos/*.jsonl con el umask por "
-        "defecto y quedan en 0644 (world-readable) en vez de 0600",
-    )
     def test_history_files_are_owner_only(self, tmp_mem_dir, strict_umask):
         """Command history files must be 0600 — they contain whatever was typed."""
         storage.append_command(make_command(command="export TOKEN=abc", repo="/w/app"))
@@ -995,11 +1054,6 @@ class TestStoragePermissions:
         path = tmp_mem_dir / "repos" / "w-app.jsonl"
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-5: append_session() crea sessions/*.jsonl con el umask por "
-        "defecto y quedan en 0644 (world-readable) en vez de 0600",
-    )
     def test_session_files_are_owner_only(self, tmp_mem_dir, strict_umask):
         """Session files embed the same command text and must be 0600 too."""
         now = int(time.time())

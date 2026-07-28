@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import time
 from datetime import datetime, timedelta, timezone
@@ -27,9 +28,15 @@ _REAL_HOME = Path.home()
 _REAL_MEM_DIR = Path(storage.MEM_DIR)
 
 
-def _boom_rename(self: Path, target: object) -> None:
-    """Stand-in for ``Path.rename`` that simulates a crash at commit time."""
-    raise OSError("simulated crash during rename")
+def _boom_replace(src: object, dst: object) -> None:
+    """Stand-in for ``os.replace`` that simulates a crash at commit time.
+
+    Patched on ``os.replace`` rather than ``Path.rename`` because that is the
+    call storage.atomic_write() commits with. The contract under test is
+    unchanged: whatever the seam, a failure at commit time must leave the
+    previous version of the file readable.
+    """
+    raise OSError("simulated crash during replace")
 
 
 class TestIsolationHarness:
@@ -262,7 +269,7 @@ class TestPatterns:
             ],
             last_updated=2,
         )
-        monkeypatch.setattr(Path, "rename", _boom_rename)
+        monkeypatch.setattr(os, "replace", _boom_replace)
         with pytest.raises(OSError):
             storage.write_patterns(v2)
 
@@ -598,7 +605,7 @@ class TestVarsFile:
         """A crash at commit time must not destroy the existing variables."""
         storage.write_vars_file(VarsFile(vars={"A": StoredVariable(value="original")}))
 
-        monkeypatch.setattr(Path, "rename", _boom_rename)
+        monkeypatch.setattr(os, "replace", _boom_replace)
         with pytest.raises(OSError):
             storage.write_vars_file(VarsFile(vars={"A": StoredVariable(value="new")}))
 
