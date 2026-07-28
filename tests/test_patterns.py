@@ -12,18 +12,16 @@ import pytest
 
 from conftest import make_command
 from mem import patterns, storage
+from mem.models import PatternFile
 
+# `apple_fm_sdk` is made importable by conftest (only stubbed when genuinely
+# missing), so `patch("apple_fm_sdk.LanguageModelSession", ...)` always
+# resolves. The stub used to live here and keyed off `sys.modules`, which made
+# the whole suite's behaviour depend on collection order — see conftest.
 
-# ---------------------------------------------------------------------------
-# Ensure apple_fm_sdk is importable even when the real package is absent.
-# We insert a stub module into sys.modules so that patch() can resolve
-# "apple_fm_sdk.LanguageModelSession" without triggering ImportError.
-# ---------------------------------------------------------------------------
-
-if "apple_fm_sdk" not in sys.modules:
-    _stub = ModuleType("apple_fm_sdk")
-    _stub.LanguageModelSession = MagicMock  # type: ignore[attr-defined]
-    sys.modules["apple_fm_sdk"] = _stub
+# Captured before conftest's `_no_real_inference` fixture replaces the module
+# attribute, so the availability probe itself can still be tested.
+_REAL_APPLE_FM_AVAILABLE = patterns._apple_fm_available
 
 
 # ---------------------------------------------------------------------------
@@ -102,16 +100,22 @@ class TestHeuristicFallback:
         result = storage.read_patterns("kubectl")
         assert result is not None
         assert result.tool == "kubectl"
-        assert len(result.patterns) > 0
 
-        # Heuristic returns exact commands as patterns
-        pattern_strs = [p.pattern for p in result.patterns]
-        assert "kubectl get pods" in pattern_strs
-
-        # "kubectl get pods" appears twice, so it should be the top pattern
-        top = result.patterns[0]
-        assert top.pattern == "kubectl get pods"
-        assert top.frequency == 2
+        # Without the model there is no generalization: every distinct command
+        # is its own "pattern", counted exactly.
+        assert {p.pattern: p.frequency for p in result.patterns} == {
+            "kubectl get pods": 2,
+            "kubectl get services": 1,
+            "kubectl get deployments": 1,
+            "kubectl get nodes": 1,
+            "kubectl describe pod api-7f9b": 1,
+        }
+        # Most frequent first
+        assert result.patterns[0].pattern == "kubectl get pods"
+        # Every pattern is its own example in the heuristic path
+        assert all(p.pattern == p.example for p in result.patterns)
+        # The cache of processed commands is populated for the next run
+        assert set(result.processed_commands) == set(cmds)
 
     def test_git_heuristic(self, tmp_mem_dir):
         """Git commands are grouped by exact match."""
@@ -135,6 +139,13 @@ class TestHeuristicFallback:
         result = storage.read_patterns("git")
         assert result is not None
         assert result.tool == "git"
+        assert {p.pattern: p.frequency for p in result.patterns} == {
+            "git checkout main": 1,
+            "git checkout feature-branch": 1,
+            "git checkout develop": 1,
+            "git status": 2,
+            "git push origin main": 1,
+        }
         # "git status" appears twice, rest once
         top = result.patterns[0]
         assert top.pattern == "git status"
@@ -146,17 +157,40 @@ class TestHeuristicFallback:
         result = storage.read_patterns("nonexistent")
         assert result is None
 
-    def test_too_few_commands_skipped(self, tmp_mem_dir):
-        """Tools with fewer than 5 commands are skipped."""
+    @pytest.mark.parametrize("count", [0, 1, 4])
+    def test_below_five_commands_is_skipped(self, tmp_mem_dir, count: int):
+        """Fewer than 5 samples is not enough signal to call anything a pattern."""
         now = int(time.time())
-        for cmd in ["npm install", "npm test"]:
+        for i in range(count):
             storage.append_command(
-                make_command(command=cmd, ts=now, repo="/Users/test/projects/myapp")
+                make_command(
+                    command=f"npm run task-{i}",
+                    ts=now,
+                    repo="/Users/test/projects/myapp",
+                )
             )
 
         patterns.run_pattern_extraction("npm")
+        assert storage.read_patterns("npm") is None
+
+    def test_exactly_five_commands_is_enough(self, tmp_mem_dir):
+        """Boundary: 5 is the documented minimum, and it must be inclusive."""
+        now = int(time.time())
+        for i in range(5):
+            storage.append_command(
+                make_command(
+                    command=f"npm run task-{i}",
+                    ts=now,
+                    repo="/Users/test/projects/myapp",
+                )
+            )
+
+        with patch.object(patterns, "_apple_fm_available", return_value=False):
+            patterns.run_pattern_extraction("npm")
+
         result = storage.read_patterns("npm")
-        assert result is None
+        assert result is not None
+        assert sum(p.frequency for p in result.patterns) == 5
 
     def test_heuristic_limits_to_10_patterns(self, tmp_mem_dir):
         """Heuristic returns at most 10 patterns."""
@@ -175,7 +209,30 @@ class TestHeuristicFallback:
 
         result = storage.read_patterns("tool")
         assert result is not None
-        assert len(result.patterns) <= 10
+        assert len(result.patterns) == 10
+
+    def test_heuristic_keeps_the_most_frequent_ten(self, tmp_mem_dir):
+        """The 10-pattern cap keeps the top of the distribution, not an arbitrary slice."""
+        now = int(time.time())
+        for i in range(15):
+            # subcommand-i runs (i + 1) times, so 5..14 are the top ten
+            for _ in range(i + 1):
+                storage.append_command(
+                    make_command(
+                        command=f"tool subcommand-{i}",
+                        ts=now,
+                        repo="/Users/test/projects/myapp",
+                    )
+                )
+
+        with patch.object(patterns, "_apple_fm_available", return_value=False):
+            patterns.run_pattern_extraction("tool")
+
+        result = storage.read_patterns("tool")
+        assert result is not None
+        assert [p.pattern for p in result.patterns] == [
+            f"tool subcommand-{i}" for i in range(14, 4, -1)
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +534,7 @@ class TestSyncAllPatterns:
         with patch.object(patterns, "_apple_fm_available", return_value=False):
             new, updated = patterns.sync_all_patterns()
 
-        assert new == 1
+        assert (new, updated) == (1, 0)
         captured = capsys.readouterr()
         assert "pip install cli-mem[ai]" in captured.err
 
@@ -496,9 +553,26 @@ class TestSyncAllPatterns:
         with patch.object(patterns, "_apple_fm_available", return_value=False):
             new, updated = patterns.sync_all_patterns(silent=True)
 
-        assert new == 1
+        assert (new, updated) == (1, 0)
         captured = capsys.readouterr()
         assert captured.err == ""
+        assert captured.out == ""
+
+    def test_second_sync_reports_updated_not_new(self, tmp_mem_dir):
+        """A tool that already has a pattern file counts as updated, not new."""
+        now = int(time.time())
+        for i in range(6):
+            storage.append_command(
+                make_command(
+                    command=f"make target-{i}",
+                    ts=now,
+                    repo="/Users/test/projects/myapp",
+                )
+            )
+
+        with patch.object(patterns, "_apple_fm_available", return_value=False):
+            assert patterns.sync_all_patterns(silent=True) == (1, 0)
+            assert patterns.sync_all_patterns(silent=True) == (0, 1)
 
     def test_sync_skips_tools_below_threshold(self, tmp_mem_dir):
         """Tools with <5 commands are skipped entirely."""
@@ -586,6 +660,207 @@ class TestPatternCaching:
             await patterns.extract_patterns_for_tool("git", commands2, already_done)
 
         assert call_count == 1  # Only "git push" is new
+
+
+class TestPatternCacheSurvivesResync:
+    """The cache must not corrupt patterns that were already generalized.
+
+    ``run_pattern_extraction`` persists one ``example`` per pattern, and
+    ``extract_patterns_for_tool`` rebuilds its command->pattern cache as
+    ``{p.example: p.pattern}``. Every other command that collapsed into the
+    same pattern is therefore absent from the cache on the next run, yet it is
+    also absent from ``new_cmds`` (it *was* processed), so it falls through to
+    the ``cmd_to_pattern[cmd] = cmd`` fallback and re-enters the pattern file
+    as a raw, ungeneralized "pattern".
+    """
+
+    TOOL = "kubectl"
+    INITIAL = [
+        "kubectl get pods",
+        "kubectl get services",
+        "kubectl get deployments",
+        "kubectl get ingresses",
+        "kubectl get nodes",
+    ]
+    GENERALIZED = "kubectl get <resource>"
+
+    def _run(self, extra: str | None = None) -> PatternFile | None:
+        """Append an optional new command, then run one extraction pass."""
+        now = int(time.time())
+        if extra is not None:
+            storage.append_command(
+                make_command(command=extra, ts=now, repo="/Users/test/projects/infra")
+            )
+
+        mapping = {cmd: self.GENERALIZED for cmd in self.INITIAL}
+        if extra is not None:
+            mapping[extra] = self.GENERALIZED
+        mock_session = MockSession(respond_fn=_build_generalize_map(mapping))
+
+        with (
+            patch.object(patterns, "_apple_fm_available", return_value=True),
+            patch("mem.patterns._get_generable_types", return_value=MagicMock()),
+            patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
+        ):
+            patterns.run_pattern_extraction(self.TOOL)
+
+        return storage.read_patterns(self.TOOL)
+
+    def _seed(self) -> None:
+        now = int(time.time())
+        for cmd in self.INITIAL:
+            storage.append_command(
+                make_command(command=cmd, ts=now, repo="/Users/test/projects/infra")
+            )
+
+    def test_first_extraction_collapses_every_variant(self, tmp_mem_dir):
+        """Baseline (passes today): one pass produces exactly one pattern."""
+        self._seed()
+
+        result = self._run()
+
+        assert result is not None
+        assert {p.pattern: p.frequency for p in result.patterns} == {
+            self.GENERALIZED: 5
+        }
+
+    def test_resync_with_no_new_commands_is_a_no_op(self, tmp_mem_dir):
+        """Passes today only because the "nothing new" early return skips the merge."""
+        self._seed()
+        self._run()
+
+        result = self._run()
+
+        assert result is not None
+        assert {p.pattern: p.frequency for p in result.patterns} == {
+            self.GENERALIZED: 5
+        }
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "P1-4: the pattern cache is keyed by {example -> pattern} and only one "
+            "example is persisted per pattern, so every other already-generalized "
+            "command hits the raw-command fallback and the pattern file degrades "
+            "into raw commands on each sync"
+        ),
+    )
+    def test_second_extraction_preserves_existing_patterns(self, tmp_mem_dir):
+        """One new command must not un-generalize the commands already learned.
+
+        After a second pass that adds a single new sibling command, the tool
+        must still have exactly one pattern, now covering all six commands.
+        """
+        self._seed()
+        self._run()
+
+        result = self._run(extra="kubectl get secrets")
+
+        assert result is not None
+        assert {p.pattern: p.frequency for p in result.patterns} == {
+            self.GENERALIZED: 6
+        }
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="P1-4: already-generalized commands reappear as raw patterns",
+    )
+    def test_resync_never_reintroduces_raw_commands_as_patterns(self, tmp_mem_dir):
+        """No pattern may be a verbatim copy of an input command after a resync.
+
+        Stated as an invariant rather than an exact count, so it keeps its
+        meaning if the extraction strategy changes.
+        """
+        self._seed()
+        self._run()
+
+        result = self._run(extra="kubectl get secrets")
+
+        assert result is not None
+        raw_inputs = set(self.INITIAL) | {"kubectl get secrets"}
+        leaked = {p.pattern for p in result.patterns} & raw_inputs
+        assert leaked == set(), f"raw commands leaked back as patterns: {leaked}"
+
+
+class TestGeneralizationFailures:
+    """Behaviour when the on-device model refuses or errors on a command."""
+
+    @pytest.mark.asyncio
+    async def test_failed_generalization_falls_back_to_the_raw_command(self):
+        """A model error degrades one command, it does not lose it."""
+
+        async def _respond(prompt: str, generating=None):
+            if "git bisect" in prompt:
+                raise RuntimeError("context window exceeded")
+            return _make_mock_generalized("git status")
+
+        mock_session = MockSession(respond_fn=_respond)
+
+        with (
+            patch.object(patterns, "_apple_fm_available", return_value=True),
+            patch("mem.patterns._get_generable_types", return_value=MagicMock()),
+            patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
+        ):
+            result = await patterns.extract_patterns_for_tool(
+                "git", ["git status", "git bisect start"]
+            )
+
+        by_pattern = {p.pattern: p.frequency for p in result.patterns}
+        assert by_pattern == {"git status": 1, "git bisect start": 1}
+
+    @pytest.mark.asyncio
+    async def test_total_frequency_is_conserved_even_with_failures(self):
+        """Every input command is accounted for in exactly one pattern."""
+
+        async def _respond(prompt: str, generating=None):
+            raise RuntimeError("model unavailable")
+
+        mock_session = MockSession(respond_fn=_respond)
+
+        with (
+            patch.object(patterns, "_apple_fm_available", return_value=True),
+            patch("mem.patterns._get_generable_types", return_value=MagicMock()),
+            patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
+        ):
+            commands = ["a x", "a y", "a x", "a z"]
+            result = await patterns.extract_patterns_for_tool("a", commands)
+
+        assert sum(p.frequency for p in result.patterns) == len(commands)
+
+
+class TestAppleFmProbe:
+    """The availability probe decides between the AI and heuristic paths."""
+
+    def test_reports_unavailable_when_the_sdk_cannot_be_imported(self, monkeypatch):
+        """A missing (or broken) SDK must degrade, never raise."""
+        monkeypatch.setitem(sys.modules, "apple_fm_sdk", None)
+        assert _REAL_APPLE_FM_AVAILABLE() is False
+
+    def test_reports_available_when_the_sdk_imports(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "apple_fm_sdk", ModuleType("apple_fm_sdk"))
+        assert _REAL_APPLE_FM_AVAILABLE() is True
+
+    def test_generable_type_declares_the_pattern_field(self, monkeypatch):
+        """Guided generation must ask the model for a single `pattern` string."""
+        captured: dict[str, object] = {}
+        fake = ModuleType("apple_fm_sdk")
+
+        def _generable(description: str):
+            captured["description"] = description
+            return lambda cls: cls
+
+        fake.generable = _generable  # type: ignore[attr-defined]
+        fake.guide = lambda text: text  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "apple_fm_sdk", fake)
+
+        cls = patterns._get_generable_types()
+
+        assert cls.__name__ == "GeneralizedCommand"
+        assert set(cls.__annotations__) == {"pattern"}
+        # patterns.py uses `from __future__ import annotations`, so the
+        # annotation is kept as a string.
+        assert cls.__annotations__["pattern"] == "str"
+        assert isinstance(captured["description"], str)
 
 
 class TestAutoSync:
@@ -679,3 +954,76 @@ class TestSessionSummary:
             result = await patterns.generate_session_summary(["git status"])
 
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_summary_sends_every_command_to_the_model(self):
+        """The prompt must contain the full command list, one per line."""
+        mock_session = MagicMock()
+        mock_session.respond = AsyncMock(return_value="a summary")
+        commands = ["git checkout fix-auth", "pytest -q", "git commit -m 'x'"]
+
+        with (
+            patch.object(patterns, "_apple_fm_available", return_value=True),
+            patch("apple_fm_sdk.LanguageModelSession", return_value=mock_session),
+        ):
+            await patterns.generate_session_summary(commands)
+
+        prompt = mock_session.respond.await_args.args[0]
+        assert "\n".join(commands) in prompt
+
+
+class TestNoRealInferenceByDefault:
+    """Guard on the guard: the unit suite must never hit the on-device model.
+
+    A single real ``generate_session_summary`` call costs ~1-3s and returns
+    non-deterministic prose. Before this branch, whether the suite did real
+    inference depended on module collection order (see conftest). If the
+    autouse fixture is ever removed, this test fails immediately instead of
+    the suite quietly getting slower and flakier.
+    """
+
+    def test_sdk_looks_unavailable_without_the_ai_marker(self):
+        assert patterns._apple_fm_available() is False
+
+    def test_session_summary_short_circuits(self):
+        import asyncio
+
+        assert asyncio.run(patterns.generate_session_summary(["git status"])) is None
+
+
+@pytest.mark.ai
+class TestRealAppleFoundationModels:
+    """Opt-in tests that run the REAL on-device model.
+
+    Deselected by default (``addopts = -m "not ai"``) because they are slow
+    and non-deterministic. Run them with ``pytest -m ai`` on a machine with
+    Apple Intelligence enabled.
+    """
+
+    def test_real_model_generalizes_a_command(self):
+        import asyncio
+
+        if not _REAL_APPLE_FM_AVAILABLE():
+            pytest.skip("apple-fm-sdk is not installed")
+
+        mapping = asyncio.run(
+            patterns._generalize_commands("git", ["git checkout main"])
+        )
+
+        pattern = mapping["git checkout main"]
+        assert isinstance(pattern, str) and pattern.strip()
+
+    def test_real_model_summarizes_a_session(self):
+        import asyncio
+
+        if not _REAL_APPLE_FM_AVAILABLE():
+            pytest.skip("apple-fm-sdk is not installed")
+
+        summary = asyncio.run(
+            patterns.generate_session_summary(
+                ["git checkout fix-auth", "pytest tests/test_auth.py", "git commit"]
+            )
+        )
+
+        assert isinstance(summary, str)
+        assert summary.strip()
