@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# A tag pushed twice (or force-moved) must not race two publishes against PyPI.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: macos-latest
@@ -31,22 +36,51 @@ jobs:
             exit 1
           fi
 
-      - name: Build and publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+      - name: Build
         run: |
           pip install build twine
           python -m build
-          twine upload dist/*
+          twine check --strict dist/*
+
+      # Everything that can fail must fail BEFORE the upload step: a release
+      # published to PyPI cannot be replaced, only yanked.
+      - name: Smoke-test the built wheel
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          OUT="$(/tmp/smoke/bin/mem --version)"
+          echo "$OUT"
+          EXPECTED="mem, version ${GITHUB_REF_NAME#v}"
+          if [ "$OUT" != "$EXPECTED" ]; then
+            echo "::error::wheel reports '$OUT', expected '$EXPECTED'"
+            exit 1
+          fi
+          /tmp/smoke/bin/mem init zsh > /dev/null
+          echo "wheel smoke test passed"
+
+      # TODO: migrate to PyPI Trusted Publishing (pypa/gh-action-pypi-publish
+      # with `id-token: write`) to retire the long-lived PYPI_TOKEN secret.
+      # Requires configuring the publisher on PyPI first, so it is a deliberate
+      # follow-up rather than a silent swap.
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload --skip-existing dist/*
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading artifacts only."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes dist/*
+          fi
 
       - name: Update Homebrew tap
         env:
@@ -57,8 +91,13 @@ jobs:
           TAG="${{ github.ref_name }}"
           TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
 
-          # Download tarball and compute SHA256
-          SHA=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+          # -f so an HTTP error is an error: without it curl pipes the error page
+          # into shasum and the tap gets a checksum of "404: Not Found".
+          SHA=$(curl -fsSL --retry 5 --retry-delay 2 "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+          if [ ${#SHA} -ne 64 ]; then
+            echo "::error::refusing to publish a malformed sha256: '$SHA'"
+            exit 1
+          fi
           echo "Tag: $TAG"
           echo "SHA256: $SHA"
 
@@ -82,6 +121,11 @@ jobs:
             { print }
           ' Formula/mem.rb > Formula/mem.rb.tmp
           mv Formula/mem.rb.tmp Formula/mem.rb
+
+          if ! grep -q "$SHA" Formula/mem.rb; then
+            echo "::error::awk did not write the new sha256 into Formula/mem.rb"
+            exit 1
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
