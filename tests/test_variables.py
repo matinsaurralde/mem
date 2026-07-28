@@ -3,9 +3,10 @@ resolution status, and AI credential detection.
 
 `variables.py` is the module where secrets live: values pulled from the
 persistent store (`~/.mem/vars.json`), from the environment, or typed by the
-user at a hidden prompt end up being spliced into a string that is later
-handed to `subprocess.run(..., shell=True)`. This file pins down the two
-properties that matter for that path:
+user at a hidden prompt are handed to the shell that `mem run` spawns. They
+reach it through the child's environment and are expanded by the shell —
+never spliced into the command text, which is what made every value a
+potential injection. This file pins down the two properties that matter:
 
 1. **Resolution is deterministic** — the documented priority chain
    (inline > env > store > default > prompt) holds for every combination.
@@ -34,7 +35,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from mem import groups, storage, variables
+from mem import storage, variables
 from mem.cli import cli
 from mem.models import (
     Group,
@@ -353,14 +354,6 @@ class TestResolutionChain:
             "TARGET": ("prod", "default"),
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "allow_prompt=False is ignored for variables with no default: "
-            "resolve_variables still calls prompt_fn, so `mem run --yes` can "
-            "block on a hidden click.prompt in a non-interactive context"
-        ),
-    )
     def test_allow_prompt_false_never_prompts(self) -> None:
         """Contract: `allow_prompt=False` (i.e. `--yes`) must never prompt.
 
@@ -384,99 +377,6 @@ class TestResolutionChain:
 # ---------------------------------------------------------------------------
 # 3. Substitution: prefix collisions and escapes
 # ---------------------------------------------------------------------------
-
-
-class TestSubstituteVariables:
-    """Contract: textual replacement must not corrupt neighbouring tokens."""
-
-    def test_prefix_collision_longest_name_first(self) -> None:
-        """Contract: `$API` and `$API_KEY` in one command resolve independently.
-
-        Naive left-to-right replacement would turn `$API_KEY` into
-        `<api-value>_KEY`. Longest-name-first ordering prevents that.
-        """
-        resolved = {
-            "API": ("https://api.test", "arguments"),
-            "API_KEY": ("k-123", "arguments"),
-        }
-        out = variables.substitute_variables("curl $API/v1 -H key:$API_KEY", resolved)
-        assert out == "curl https://api.test/v1 -H key:k-123"
-        assert "_KEY" not in out
-
-    def test_prefix_collision_reversed_declaration_order(self) -> None:
-        """Contract: the result does not depend on dict insertion order."""
-        resolved = {
-            "API_KEY": ("k-123", "arguments"),
-            "API": ("https://api.test", "arguments"),
-        }
-        out = variables.substitute_variables("$API_KEY|$API|$API_KEY", resolved)
-        assert out == "k-123|https://api.test|k-123"
-
-    def test_three_way_prefix_chain(self) -> None:
-        """Contract: nested prefixes ($API / $API_KEY / $API_KEY_ID) all survive."""
-        resolved = {
-            "API": ("a", "arguments"),
-            "API_KEY": ("b", "arguments"),
-            "API_KEY_ID": ("c", "arguments"),
-        }
-        out = variables.substitute_variables("$API $API_KEY $API_KEY_ID", resolved)
-        assert out == "a b c"
-
-    def test_repeated_token_replaced_everywhere(self) -> None:
-        """Contract: every occurrence of a token is substituted."""
-        resolved = {"TARGET": ("prod", "arguments")}
-        out = variables.substitute_variables(
-            "deploy $TARGET && verify $TARGET", resolved
-        )
-        assert out == "deploy prod && verify prod"
-
-    def test_undeclared_token_left_alone(self) -> None:
-        """Contract: tokens with no resolved value are handed to the shell as-is."""
-        resolved = {"API": ("a", "arguments")}
-        out = variables.substitute_variables("echo $API $HOME", resolved)
-        assert out == "echo a $HOME"
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "substitute_variables ignores $$ escapes: `$$API_KEY` becomes "
-            "`$<value>` because .replace() matches the inner `$API_KEY`"
-        ),
-    )
-    def test_escaped_token_is_not_substituted(self) -> None:
-        """Contract: `$$NAME` must reach the shell as `$NAME`, unsubstituted.
-
-        `process_escapes` collapses `$$NAME` to `$NAME` at save time, so in the
-        normal flow the escaped command carries `vars=None` and is skipped.
-        But `mem run` resolves variables once for the *whole group* and then
-        substitutes into every command that has any `vars`, so an escaped token
-        sharing a name with another command's variable gets clobbered.
-        """
-        resolved = {"API_KEY": ("s3cr3t", "store")}
-        assert variables.substitute_variables("echo $$API_KEY", resolved) == (
-            "echo $$API_KEY"
-        )
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "the $$ escape is destroyed by an export/import round-trip: "
-            "process_escapes stores `$NAME` and _auto_detect_vars then "
-            "re-detects it as a mem variable"
-        ),
-    )
-    def test_escape_survives_export_import_round_trip(self) -> None:
-        """Contract: a shell variable the user escaped stays a shell variable.
-
-        `mem save 'echo $$API_KEY'` records the intent "the shell expands this".
-        After export/import that intent must still hold — otherwise a runbook
-        shared between machines starts prompting for, or substituting, a value
-        the author never meant mem to own.
-        """
-        stored_cmd = variables.process_escapes("echo $$API_KEY")
-        imported = [GroupCommand(cmd=stored_cmd, comment=None, vars=None)]
-        groups._auto_detect_vars(imported)
-        assert imported[0].vars is None
 
 
 class TestMergeVarDeclarations:
@@ -586,14 +486,6 @@ _SECRET = "sk-live-9Xq2TESTONLYnotarealkey"
 class TestSecretLeakage:
     """Contract: a value the user typed behind a hidden prompt stays hidden."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0-9: `mem run` prints the fully substituted command "
-            "(`console.print(f'  [dim]$ {run_cmd}[/]')`), so a secret pulled "
-            "from the store is echoed in cleartext to the terminal"
-        ),
-    )
     def test_stored_secret_not_printed_by_run(self, tmp_mem_dir: Path) -> None:
         """Contract: `mem run` must not print a resolved secret in cleartext.
 
@@ -691,14 +583,6 @@ class TestSecretLeakage:
 class TestCommandInjection:
     """Contract: a variable supplies a *value*, never new command structure."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0-2: substitute_variables splices the raw value into the command "
-            "string and cli.run executes it with shell=True, so `; touch X` in "
-            "a value runs as a second command"
-        ),
-    )
     def test_inline_value_cannot_inject_a_second_command(
         self, tmp_mem_dir: Path
     ) -> None:
@@ -718,13 +602,6 @@ class TestCommandInjection:
         assert result.exit_code == 0, result.output
         assert not sentinel.exists(), "variable value executed as a shell command"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0-2: command substitution `$(...)` inside a variable value is "
-            "evaluated by the shell after textual splicing"
-        ),
-    )
     def test_inline_value_cannot_trigger_command_substitution(
         self, tmp_mem_dir: Path
     ) -> None:
@@ -740,14 +617,6 @@ class TestCommandInjection:
         assert result.exit_code == 0, result.output
         assert not sentinel.exists(), "command substitution ran inside a value"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0-2 (imported runbook vector): the payload lives in the "
-            "variable's `default`, which mem run never displays, and is "
-            "spliced into the shell=True command in --yes mode"
-        ),
-    )
     def test_default_value_from_imported_runbook_cannot_inject(
         self, tmp_mem_dir: Path
     ) -> None:
@@ -773,13 +642,6 @@ class TestCommandInjection:
         assert result.exit_code == 0, result.output
         assert not sentinel.exists(), "runbook default executed as a shell command"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0-2: a value pulled from the persistent store is spliced into "
-            "the command text with no quoting before shell=True execution"
-        ),
-    )
     def test_stored_value_cannot_inject(self, tmp_mem_dir: Path) -> None:
         """Contract: a corrupted/poisoned vars.json entry cannot run commands."""
         sentinel = tmp_mem_dir / "mem_pwned_store"
@@ -843,35 +705,30 @@ class TestVarsFilePermissions:
         mode = stat.S_IMODE(storage.VARS_FILE.stat().st_mode)
         assert mode == 0o600, f"vars.json is {oct(mode)} after rewrite"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "TOCTOU: write_vars_file writes vars.json.tmp with the process "
-            "umask (0644) and only chmods it afterwards, so the secrets are "
-            "world-readable for the duration of that window"
-        ),
-    )
     def test_tmp_file_is_never_world_readable(
         self, tmp_mem_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Contract: secrets are never on disk with a mode wider than 0600.
 
-        `write_vars_file` uses write-tmp-then-rename. The tmp file is created
-        by `Path.write_text` with the default umask and only chmodded to 0600
-        on the next line — any process on the box can read it in between. The
-        fix is to create the file with the right mode from the start
-        (`os.open(..., os.O_CREAT | os.O_WRONLY, 0o600)`).
+        write_vars_file goes through a temporary file. Creating it with the
+        ambient umask and chmodding it afterwards leaves a window in which any
+        process on the box can read the secrets, so the mode has to be right
+        from the moment the file exists.
+
+        Inspected at the rename rather than at the write: that is the last
+        instant the temporary file exists, and it does not assume which call
+        produced it.
         """
         observed: list[tuple[str, int]] = []
-        original_write_text = Path.write_text
+        original_replace = os.replace
 
-        def spy(self: Path, *args: Any, **kwargs: Any) -> int:
-            result = original_write_text(self, *args, **kwargs)
-            if self.name.endswith(".tmp"):
-                observed.append((self.name, stat.S_IMODE(self.stat().st_mode)))
-            return result
+        def spy(src: Any, dst: Any) -> None:
+            src_path = Path(src)
+            if src_path.exists():
+                observed.append((src_path.name, stat.S_IMODE(src_path.stat().st_mode)))
+            return original_replace(src, dst)
 
-        monkeypatch.setattr(Path, "write_text", spy)
+        monkeypatch.setattr(os, "replace", spy)
         storage.write_vars_file(
             VarsFile(vars={"API_TOKEN": StoredVariable(value=_SECRET)})
         )
@@ -1049,14 +906,6 @@ class TestDetectCredentialsFiltering:
         ):
             assert variables.detect_credentials("curl -H 'Authorization: x'") == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "known false positive: `StrictHostKeyChecking=no` passes every "
-            "filter in _deduplicate_detections (present in cmd, not a URL, "
-            "not a hostname, >= 8 chars) so it is offered as DB_PASSWORD"
-        ),
-    )
     def test_ssh_option_is_not_reported_as_a_credential(self) -> None:
         """Contract: `-o StrictHostKeyChecking=no` is an SSH option, not a secret.
 

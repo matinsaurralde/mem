@@ -2,7 +2,7 @@
 
 This module handles all variable logic:
 - Detecting $VAR_NAME tokens in commands (excluding common shell variables)
-- Processing $$VAR_NAME escape sequences
+- Processing $$VAR_NAME escape sequences (resolved at execution time)
 - Merging detected variables with explicit --var declarations
 - Resolving variables at runtime from multiple sources
 - Checking variable resolution status for display
@@ -182,7 +182,16 @@ def resolve_variables(
         # Priority 5: needs interactive prompt
         needs_prompt.append(var)
 
-    # Prompt for all unresolved variables upfront
+    # Prompt for all unresolved variables upfront.
+    #
+    # allow_prompt=False previously only short-circuited the *default* branch,
+    # so a variable with no source and no default still reached prompt_fn —
+    # which under `--yes` is click.prompt on a stdin nobody is watching. In CI
+    # that is a hang, not an error. Callers that disable prompting are
+    # responsible for reporting what is missing; here it simply stays unresolved.
+    if not allow_prompt:
+        return resolved
+
     for var in needs_prompt:
         value = prompt_fn(f"  ${var.name}", default=var.default or "")
         # If user accepted default, use default
@@ -194,26 +203,6 @@ def resolve_variables(
         resolved[var.name] = (value, source)
 
     return resolved
-
-
-def substitute_variables(
-    cmd: str,
-    resolved: dict[str, tuple[str, str]],
-) -> str:
-    """Replace $VAR_NAME tokens with resolved values.
-
-    Performs literal string replacement — no shell expansion,
-    no nested variable references.
-    """
-    result = cmd
-    # Replace longer names first to avoid prefix collisions:
-    # without sorting, replacing $API before $API_KEY would corrupt
-    # "$API_KEY" into "resolved_value_KEY".
-    for name, (value, _source) in sorted(
-        resolved.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        result = result.replace(f"${name}", value)
-    return result
 
 
 def check_resolution_status(
@@ -332,6 +321,18 @@ def _extract_value_from_syntax(original_value: str, cmd: str) -> str:
     if env_match:
         value = env_match.group(1)
         if value in cmd:
+            return value
+
+    # Pattern: AnyIdentifier=value — mixed-case option assignments such as
+    # `ssh -o StrictHostKeyChecking=no`. Without this the whole expression was
+    # treated as the secret, and at 24 characters it cleared the minimum-length
+    # filter and got offered as DB_PASSWORD. Reducing it to the right-hand side
+    # lets the existing length check reject `no` on its own merits, which fixes
+    # the class rather than blacklisting one option name.
+    generic_match = re.match(r"^[A-Za-z][\w.-]*=(.*)$", original_value)
+    if generic_match:
+        value = generic_match.group(1)
+        if value and value in cmd:
             return value
 
     return original_value
