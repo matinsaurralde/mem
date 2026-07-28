@@ -104,6 +104,30 @@ def exclusive_lock() -> Iterator[None]:
         os.close(fd)
 
 
+def try_sync_lock() -> bool:
+    """Take a non-blocking lock for the background sync.
+
+    Returns False if another sync already holds it, in which case the caller
+    should simply exit — this is a periodic task, so skipping a run costs
+    nothing and the next capture triggers another.
+
+    Deliberately separate from :func:`exclusive_lock`: that one serializes
+    short writes and must block, while a sync can hold this for minutes and
+    must never make a second one wait for it. The file descriptor is leaked on
+    purpose — the lock is meant to live until the process exits.
+    """
+    path = MEM_DIR / ".sync.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _harden_dir(path.parent)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    return True
+
+
 def _harden_dir(path: Path) -> None:
     """Force a directory to DIR_MODE, ignoring the ambient umask."""
     try:

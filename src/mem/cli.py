@@ -8,6 +8,7 @@ Click handles argument parsing; Rich handles output formatting.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import sys
@@ -253,14 +254,26 @@ def sync_cmd() -> None:
     Triggered automatically every 20 captured commands. Runs silently —
     no output, no errors. Never called by the user directly.
     """
+    from mem import storage
+
+    # One sync at a time. Extraction takes seconds to minutes, while the
+    # threshold that triggers it can be crossed by several terminals at once —
+    # without this, N shells each start their own full pass over the same
+    # history and compete for the neural engine.
+    if not storage.try_sync_lock():
+        return
+
     try:
         from mem.patterns import sync_all_patterns
-        from mem import storage
 
         sync_all_patterns(silent=True)
+        # Rotation lives here rather than in the capture path because it
+        # rewrites every history file, which is far too much work to do on a
+        # prompt. It also means retention only ever runs if this command does —
+        # which for four months it did not.
         storage.rotate()
     except Exception:
-        pass  # Background task — never surface errors
+        logging.getLogger("mem.sync").debug("background sync failed", exc_info=True)
 
 
 @cli.command()
@@ -1415,3 +1428,12 @@ def vars_clear(yes: bool) -> None:
 
     storage.write_vars_file(VarsFile())
     err_console.print(f"Cleared {count} variable(s).")
+
+
+# The background sync is spawned as a subprocess, and `python -m mem.cli` only
+# imports this module — without this block it defined every command and exited
+# 0 having run none of them. That is how pattern extraction and data retention
+# were both dead from the day auto-sync replaced the manual `mem sync` command:
+# silently, with a zero exit code, inside a `try/except: pass`.
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess in e2e
+    cli()

@@ -85,12 +85,22 @@ def _spawn_background_sync() -> None:
 
     The subprocess inherits nothing from the parent — no stdout, no stderr,
     no wait. It runs and exits silently.
+
+    Prefers the installed console script over `python -m mem.cli`. Both work
+    now, but the module form is the one that was silently broken for months
+    (cli.py had no `__main__` block), and the console script is the entry point
+    users and tests actually exercise, so it is the one less likely to rot
+    unnoticed.
     """
+    import shutil
     import sys as _sys
 
-    mem_exe = _sys.executable
+    mem_exe = shutil.which("mem")
+    argv = (
+        [mem_exe, "_sync"] if mem_exe else [_sys.executable, "-m", "mem.cli", "_sync"]
+    )
     subprocess.Popen(
-        [mem_exe, "-m", "mem.cli", "_sync"],
+        argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
