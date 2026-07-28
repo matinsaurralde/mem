@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# mem installer — curl -fsSL https://raw.githubusercontent.com/matinsaurralde/mem/main/install.sh | bash
+# mem installer — curl -fsSL https://raw.githubusercontent.com/matinsaurralde/mem/master/install.sh | bash
 #
 # Installs mem via pipx (preferred) or pip as fallback.
 # Requires: Python 3.10+, macOS 26.0+
+#
+# The PyPI distribution is named `cli-mem`, NOT `mem-cli` — the latter is an
+# unrelated package owned by someone else. Getting this wrong installs a
+# stranger's code onto the user's machine, so the name is asserted below
+# rather than assumed.
 
 set -euo pipefail
 
@@ -43,13 +48,15 @@ printf "  Python %s ${GREEN}OK${RESET}\n" "$PYTHON_VERSION"
 
 # --- Install ---
 
+PKG="cli-mem"
+
 if command -v pipx &>/dev/null; then
   info "Installing mem via pipx..."
-  pipx install mem-cli
+  pipx install "$PKG"
 else
   warn "pipx not found — falling back to pip install"
   info "Installing mem via pip..."
-  python3 -m pip install --user mem-cli
+  python3 -m pip install --user "$PKG"
 fi
 
 # --- Verify ---
@@ -65,7 +72,17 @@ if ! command -v mem &>/dev/null; then
   exit 0
 fi
 
-info "Installed $(mem --version)"
+# Confirm the binary on PATH is actually ours. A `mem` from an unrelated
+# package would satisfy `command -v` and silently pass as a successful install.
+VERSION_OUTPUT="$(mem --version 2>&1 || true)"
+if [[ "$VERSION_OUTPUT" != mem,\ version\ * ]]; then
+  error "A different program named 'mem' is on your PATH: ${VERSION_OUTPUT}
+  Expected output of the form 'mem, version X.Y.Z'.
+  Remove the conflicting binary, or install into an isolated environment with:
+    pipx install $PKG"
+fi
+
+info "Installed $VERSION_OUTPUT"
 
 # --- Shell hook setup ---
 

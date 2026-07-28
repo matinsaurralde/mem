@@ -21,15 +21,32 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: System :: Shells",
 ]
+# Upper bounds are deliberate. Unpinned ranges already bit us once: Click 9
+# removes `Context.protected_args`, which the implicit-search router depends on,
+# so an unconstrained `click` would break the entire CLI on a routine upgrade.
 dependencies = [
-    "click",
-    "rich",
-    "pydantic",
+    "click>=8.1,<9",
+    "rich>=13.7,<15",
+    "pydantic>=2.5,<3",
 ]
 
 [project.optional-dependencies]
-ai = ["apple-fm-sdk"]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+# Capped at <0.2 on purpose: 0.2.x reworked the SDK around multimodal
+# attachments and has not been validated against mem's guided-generation path.
+ai = ["apple-fm-sdk>=0.1.1,<0.2"]
+# ruff is pinned to an exact minor. A linter without an upper bound makes CI
+# non-deterministic over time: every new release can add default rules that
+# turn a green branch red without a single line changing. That is exactly what
+# happened here — 0.16.0 enabled BLE001/S110/PLW1510 and flagged 44 pre-existing
+# sites. Upgrading ruff is now a deliberate PR, not a surprise.
+#
+# TODO(0.16): adopt ruff 0.16 in the test-harness branch. Its new BLE001 and
+# S110 rules point straight at the `except Exception: pass` in cli.py:262 that
+# hid the dead background sync for four months, so they are worth adopting —
+# but only with per-site judgement: the broad catch in storage.py:97 (skip a
+# corrupted JSONL line) is correct and should get a justified noqa, while the
+# ones swallowing real failures should be narrowed.
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.23", "ruff>=0.15.5,<0.16"]
 
 [project.scripts]
 mem = "mem.cli:cli"
