@@ -21,15 +21,20 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: System :: Shells",
 ]
+# Upper bounds are deliberate. Unpinned ranges already bit us once: Click 9
+# removes `Context.protected_args`, which the implicit-search router depends on,
+# so an unconstrained `click` would break the entire CLI on a routine upgrade.
 dependencies = [
-    "click",
-    "rich",
-    "pydantic",
+    "click>=8.1,<9",
+    "rich>=13.7,<15",
+    "pydantic>=2.5,<3",
 ]
 
 [project.optional-dependencies]
-ai = ["apple-fm-sdk"]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+# Capped at <0.2 on purpose: 0.2.x reworked the SDK around multimodal
+# attachments and has not been validated against mem's guided-generation path.
+ai = ["apple-fm-sdk>=0.1.1,<0.2"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [project.scripts]
 mem = "mem.cli:cli"
