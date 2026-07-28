@@ -70,6 +70,24 @@ def score_command(
     return (frequency * 0.4) + (recency * 0.4) + (context * 0.2)
 
 
+def _terms(query: str) -> list[str]:
+    """Split a query into the terms a command must all contain.
+
+    Multi-word queries used to keep only the first word, so `mem docker
+    compose` silently answered for `docker` alone — and ranked an unrelated
+    `docker ps` above the one line that actually matched both words. Matching
+    every term independently also makes word order irrelevant, which is how
+    people remember commands.
+    """
+    return [t for t in query.lower().split() if t]
+
+
+def _matches(command: str, terms: list[str]) -> bool:
+    """True if every term appears somewhere in the command."""
+    lowered = command.lower()
+    return all(term in lowered for term in terms)
+
+
 def search(
     query: str,
     current_repo: str | None = None,
@@ -87,7 +105,8 @@ def search(
     5. Score each unique command (keep highest score per command)
     6. Return top N by score
     """
-    if not query:
+    terms = _terms(query)
+    if not terms:
         return []
 
     # Collect all matching commands
@@ -97,12 +116,12 @@ def search(
     if current_repo:
         repo_name = storage.sanitize_repo_name(current_repo)
         for cmd in storage.read_commands(repo_name):
-            if query.lower() in cmd.command.lower():
+            if _matches(cmd.command, terms):
                 all_commands.append(cmd)
 
     # Read global fallback
     for cmd in storage.read_commands("_global"):
-        if query.lower() in cmd.command.lower():
+        if _matches(cmd.command, terms):
             all_commands.append(cmd)
 
     # Also read other repo files if current_repo didn't cover everything
@@ -116,7 +135,7 @@ def search(
             if repo_name == current_sanitized or repo_name == "_global":
                 continue  # already read
             for cmd in storage.read_commands(repo_name):
-                if query.lower() in cmd.command.lower():
+                if _matches(cmd.command, terms):
                     all_commands.append(cmd)
 
     if not all_commands:
