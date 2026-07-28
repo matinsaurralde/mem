@@ -23,7 +23,7 @@ mem silently captures every command you type, then lets you search, save, and re
 
 ```bash
 mem deploy             # search your history
-mem save "cmd" -g ops  # save a command to a group
+mem save "cmd" -t ops  # save a command to a group
 mem run ops            # run the group interactively
 mem vars set API_KEY   # store a secret for saved commands
 ```
@@ -109,13 +109,13 @@ Groups are named collections of commands — like runbooks you can execute.
 
 ```bash
 mem save "kubectl get pods -n production" --group k8s --comment "list pods"
-mem save "docker compose up -d" -g deploy -c "start services"
+mem save "docker compose up -d" -t deploy -c "start services"
 ```
 
 Save the last command you ran:
 
 ```bash
-mem save "!" -g troubleshooting
+mem save "!" -t troubleshooting
 ```
 
 ### List groups
@@ -152,9 +152,9 @@ mem export k8s --format markdown     # copy as markdown
 mem export k8s --stdout              # print instead of clipboard
 
 mem import                           # import from clipboard (auto-detect format + group name)
-mem import -g renamed                # import from clipboard with custom group name
-mem import runbook.json -g ops       # import from file (auto-detects format)
-mem import runbook.md -g ops         # markdown works too
+mem import -t renamed                # import from clipboard with custom group name
+mem import runbook.json -t ops       # import from file (auto-detects format)
+mem import runbook.md -t ops         # markdown works too
 ```
 
 ---
@@ -167,13 +167,13 @@ Saved commands can contain `$VAR_NAME` placeholders that get resolved at runtime
 
 ```bash
 # Variables are detected automatically from $VAR_NAME tokens
-mem save "ssh -i ~/.ssh/\$KEY_NAME ubuntu@\$BASTION_HOST" -g ssh
+mem save "ssh -i ~/.ssh/\$KEY_NAME ubuntu@\$BASTION_HOST" -t ssh
 
 # Set a default value with --var
-mem save "kubectl get pods -n \$NAMESPACE" -g k8s --var NAMESPACE=production
+mem save "kubectl get pods -n \$NAMESPACE" -t k8s --var NAMESPACE=production
 
 # AI detects hardcoded credentials and suggests variables
-mem save "curl -H 'Authorization: Bearer eyJhbGci...' https://api.example.com/users" -g api
+mem save "curl -H 'Authorization: Bearer eyJhbGci...' https://api.example.com/users" -t api
 #  Detected possible credential: Bearer token
 #  Suggested: curl -H 'Authorization: Bearer $API_TOKEN' ...
 #  Variable name [API_TOKEN]: █

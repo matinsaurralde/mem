@@ -14,15 +14,12 @@ import sys
 from pathlib import Path
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 from mem import __version__
 from mem.capture import get_git_repo
-
-console = Console()
-err_console = Console(stderr=True)
+from mem.render import console, err_console, fit, plain, safe
 
 
 class MemGroup(click.Group):
@@ -86,7 +83,9 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
 
     ctx.ensure_object(dict)
     query_args = ctx.obj.get("query_args", [])
-    query = query_args[0] if query_args else None
+    # Join instead of taking [0]: every word the user typed is part of the
+    # query. Keeping only the first silently answered a different question.
+    query = " ".join(query_args) if query_args else None
     if query is None:
         click.echo(ctx.get_help())
         return
@@ -134,11 +133,12 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
 
     for i, (cmd, score) in enumerate(results, 1):
         rank = f" {i:>2}"
-        command_text = cmd.command
-        repo_text = cmd.repo or "global"
+        command_text = fit(cmd.command, 40)
+        repo_text = fit(cmd.repo or "global", 12)
         time_text = _relative_time(cmd.ts)
         console.print(
-            f"{rank}  {command_text:<40}  [dim cyan]{repo_text:<12}[/]  [dim]{time_text}[/]"
+            f"{rank}  {safe(command_text)}  [dim cyan]{safe(repo_text)}[/]"
+            f"  [dim]{time_text}[/]"
         )
 
 
@@ -295,13 +295,16 @@ def session(query: str, as_json: bool) -> None:
 
     for i, s in enumerate(results, 1):
         dt = datetime.fromtimestamp(s.started_at, tz=timezone.utc)
-        header = f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {s.repo or 'global'}"
+        header = safe(
+            f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {s.repo or 'global'}"
+        )
 
         lines = []
         for j, cmd in enumerate(s.commands, 1):
             lines.append(f"  {j:>2}  {cmd}")
 
-        panel_content = "\n".join(lines)
+        # Text, not a markup string: Panel parses its renderable for tags.
+        panel_content = plain("\n".join(lines))
         console.print(Panel(panel_content, title=header, border_style="dim"))
         console.print()
 
@@ -317,7 +320,7 @@ def session(query: str, as_json: bool) -> None:
                 for cmd in results[idx].commands:
                     if not click.confirm(f"  Run: {cmd}?", default=True, err=True):
                         continue
-                    console.print(f"  [dim]$ {cmd}[/]")
+                    console.print(f"  [dim]$ {safe(cmd)}[/]")
                     try:
                         sp.run(cmd, shell=True)
                     except KeyboardInterrupt:
@@ -360,14 +363,13 @@ def stats(as_json: bool) -> None:
     if cmd_freq:
         console.print("Top commands:")
         for i, (cmd, count) in enumerate(cmd_freq, 1):
-            display = cmd[:35] + "..." if len(cmd) > 35 else cmd
-            console.print(f"  {i:>2}  {display:<40} {count}")
+            console.print(f"  {i:>2}  {safe(fit(cmd, 40))} {count}")
         console.print()
 
     if repo_freq:
         console.print("Top repos:")
         for i, (repo, count) in enumerate(repo_freq, 1):
-            console.print(f"  {i:>2}  {repo:<20} {count}")
+            console.print(f"  {i:>2}  {safe(fit(repo, 20))} {count}")
 
 
 @cli.command()
@@ -393,7 +395,8 @@ def forget(query: str, yes: bool) -> None:
             repo_text = cmd.repo or "global"
             time_text = _relative_time(cmd.ts)
             console.print(
-                f"  {i:>2}  {cmd.command:<40}  [dim cyan]{repo_text}[/]  [dim]{time_text}[/]"
+                f"  {i:>2}  {safe(fit(cmd.command, 40))}  [dim cyan]{safe(repo_text)}[/]"
+                f"  [dim]{time_text}[/]"
             )
         if len(matches) > 20:
             console.print(f"  ... and {len(matches) - 20} more")
@@ -411,8 +414,20 @@ def forget(query: str, yes: bool) -> None:
 
 @cli.command()
 @click.argument("command")
-@click.option("--group", "-g", "group_name", default=None, help="Target group name")
-@click.option("--global", "global_flag", is_flag=True, help="Save to global scope")
+# `-g` means --global across the whole CLI. It used to mean --group here and
+# in `import` while meaning --global in nine other commands, so the same
+# keystroke did opposite things in adjacent commands.
+@click.option(
+    "--group",
+    "--to",
+    "-t",
+    "group_name",
+    default=None,
+    help="Target group name",
+)
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Save to global scope"
+)
 @click.option("--comment", "-c", default=None, help="Inline annotation")
 @click.option(
     "--var",
@@ -499,7 +514,7 @@ def save(
 
     if saved:
         target = f"group '{group_name}'" if group_name else "saved commands"
-        err_console.print(f"Saved to {target}: {command}")
+        err_console.print(f"Saved to {safe(target)}: {safe(command)}")
         if var_list:
             var_strs = []
             for v in var_list:
@@ -509,7 +524,7 @@ def save(
                 var_strs.append(s)
             err_console.print(f"  Variables: {', '.join(var_strs)}")
     else:
-        err_console.print(f"Already saved: {command}")
+        err_console.print(f"Already saved: {safe(command)}")
 
 
 @cli.command(name="list")
@@ -571,9 +586,9 @@ def list_cmd(
             click.echo(groups.export_json(group_name, grp))
             return
 
-        console.print(f"\n● {scope_label} / {group_name}")
+        console.print(f"\n● {safe(scope_label)} / {safe(group_name)}")
         if grp.description:
-            console.print(f'  "{grp.description}"')
+            console.print(f'  "{safe(grp.description)}"')
         if group_name in shadows and scope_label != "global":
             console.print(
                 "  [dim](global group with same name exists — use --global to see it)[/]"
@@ -587,7 +602,7 @@ def list_cmd(
 
         for i, cmd in enumerate(grp.commands, 1):
             comment_str = f"   # {cmd.comment}" if cmd.comment else ""
-            console.print(f"  {i}. {cmd.cmd}{comment_str}")
+            console.print(f"  {i}. {safe(cmd.cmd)}{safe(comment_str)}")
             # Show variable resolution status if command has variables
             if cmd.vars:
                 statuses = check_resolution_status(
@@ -597,9 +612,11 @@ def list_cmd(
                 )
                 for name, status, hint in statuses:
                     if status == "resolved":
-                        console.print(f"     [green]✓[/] ${name}  {hint}")
+                        console.print(f"     [green]✓[/] ${safe(name)}  {safe(hint)}")
                     else:
-                        console.print(f"     [yellow]⚠[/] ${name}  unset — {hint}")
+                        console.print(
+                            f"     [yellow]⚠[/] ${safe(name)}  unset — {safe(hint)}"
+                        )
         console.print()
         return
 
@@ -635,15 +652,15 @@ def list_cmd(
     # Repo saved commands
     if result["repo_data"] and result["repo_data"].saved:
         has_data = True
-        console.print(f"\n● Saved commands in {repo_display}")
+        console.print(f"\n● Saved commands in {safe(repo_display)}")
         for s in result["repo_data"].saved:
             comment_str = f"   # {s.comment}" if s.comment else ""
-            console.print(f"  {s.cmd}{comment_str}")
+            console.print(f"  {safe(s.cmd)}{safe(comment_str)}")
 
     # Repo groups
     if result["repo_data"] and result["repo_data"].groups:
         has_data = True
-        console.print(f"\n● Groups in {repo_display}")
+        console.print(f"\n● Groups in {safe(repo_display)}")
         for name, grp in result["repo_data"].groups.items():
             count = len(grp.commands)
             desc = f'  "{grp.description}"' if grp.description else ""
@@ -657,7 +674,7 @@ def list_cmd(
         console.print("\n● Saved commands (global)")
         for s in result["global_data"].saved:
             comment_str = f"   # {s.comment}" if s.comment else ""
-            console.print(f"  {s.cmd}{comment_str}")
+            console.print(f"  {safe(s.cmd)}{safe(comment_str)}")
 
     # Global groups
     if not repo_flag and result["global_data"].groups:
@@ -731,9 +748,9 @@ def run(
     )
 
     # Display header
-    console.print(f"\n● {scope_label} / {group_name}")
+    console.print(f"\n● {safe(scope_label)} / {safe(group_name)}")
     if grp.description:
-        console.print(f'  "{grp.description}"')
+        console.print(f'  "{safe(grp.description)}"')
     if group_name in shadows and scope_label != "global":
         console.print(
             "  [dim](global group with same name exists — use --global to see it)[/]"
@@ -743,7 +760,7 @@ def run(
     # Display commands
     for i, cmd in enumerate(grp.commands, 1):
         comment_str = f"   # {cmd.comment}" if cmd.comment else ""
-        console.print(f"  {i}. {cmd.cmd}{comment_str}")
+        console.print(f"  {i}. {safe(cmd.cmd)}{safe(comment_str)}")
     console.print("  " + "─" * 50)
 
     if not grp.commands:
@@ -822,7 +839,7 @@ def run(
         # Display resolution summary
         console.print()
         for name, (value, source) in resolved.items():
-            console.print(f"  [green]✓[/] ${name} resolved from {source}")
+            console.print(f"  [green]✓[/] ${safe(name)} resolved from {safe(source)}")
 
         # Update last_used for store-resolved variables
         updated_store = False
@@ -845,7 +862,7 @@ def run(
             if not click.confirm(f"  Run [{i}] {run_cmd}?", default=True, err=True):
                 continue
 
-        console.print(f"  [dim]$ {run_cmd}[/]")
+        console.print(f"  [dim]$ {safe(run_cmd)}[/]")
         try:
             result = sp.run(run_cmd, shell=True)
         except KeyboardInterrupt:
@@ -980,7 +997,8 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
 @click.argument("file", type=click.Path(exists=True), required=False, default=None)
 @click.option(
     "--group",
-    "-g",
+    "--to",
+    "-t",
     "group_name",
     required=False,
     default=None,
@@ -994,7 +1012,9 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
     default=None,
     help="Input format (auto-detected from extension if omitted)",
 )
-@click.option("--global", "global_flag", is_flag=True, help="Import to global scope")
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Import to global scope"
+)
 def import_cmd(
     file: str | None, group_name: str | None, fmt: str | None, global_flag: bool
 ) -> None:
@@ -1164,12 +1184,12 @@ def group_remove(name: str, global_flag: bool, yes: bool) -> None:
     grp = data.groups[name]
 
     # Show contents before deleting
-    console.print(f"\nGroup: {name}")
+    console.print(f"\nGroup: {safe(name)}")
     if grp.description:
-        console.print(f'  "{grp.description}"')
+        console.print(f'  "{safe(grp.description)}"')
     for i, cmd in enumerate(grp.commands, 1):
         comment_str = f"   # {cmd.comment}" if cmd.comment else ""
-        console.print(f"  {i}. {cmd.cmd}{comment_str}")
+        console.print(f"  {i}. {safe(cmd.cmd)}{safe(comment_str)}")
     console.print()
 
     if not yes:
@@ -1341,7 +1361,7 @@ def vars_list(as_json: bool) -> None:
             time_str = "never used"
         else:
             time_str = f"last used {_relative_time(sv.last_used)}"
-        console.print(f"  {name:<20} {time_str}")
+        console.print(f"  {safe(fit(name, 20))} {time_str}")
     console.print()
 
 

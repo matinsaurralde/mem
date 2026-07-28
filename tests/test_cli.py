@@ -131,9 +131,6 @@ class TestMarkupIsShownVerbatim:
     Rich markup inside a command is data, never formatting instructions.
     """
 
-    @pytest.mark.xfail(
-        strict=True, reason="P0-3: Rich interpreta el markup del comando"
-    )
     @pytest.mark.parametrize(
         ("args", "stdin"),
         [(args, stdin) for _id, args, stdin in RENDERING_SURFACES],
@@ -155,9 +152,6 @@ class TestMarkupIsShownVerbatim:
         assert result.exit_code == 0
         assert MARKUP_CMD in result.stdout
 
-    @pytest.mark.xfail(
-        strict=True, reason="P0-3: '[/]' sin apertura hace crashear el render de Rich"
-    )
     @pytest.mark.parametrize(
         ("args", "stdin"),
         [(args, stdin) for _id, args, stdin in RENDERING_SURFACES],
@@ -184,9 +178,6 @@ class TestMarkupIsShownVerbatim:
         assert result.exit_code == 0
         assert CLOSE_TAG_CMD in result.stdout
 
-    @pytest.mark.xfail(
-        strict=True, reason="P0-3: '[conceal]' vuelve invisible el payload real"
-    )
     def test_conceal_tag_cannot_hide_the_payload(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
@@ -202,9 +193,6 @@ class TestMarkupIsShownVerbatim:
         assert result.exit_code == 0
         assert CONCEAL_CMD in result.stdout
 
-    @pytest.mark.xfail(
-        strict=True, reason="P0-3: la clase de caracteres [a-z] se pierde en el render"
-    )
     def test_regex_character_class_is_not_eaten(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
@@ -241,9 +229,6 @@ class TestMarkupIsShownVerbatim:
 class TestMultiWordQuery:
     """``mem docker compose`` must use both words, not just the first."""
 
-    @pytest.mark.xfail(
-        strict=True, reason="P1-2: solo se usa query_args[0], el resto se descarta"
-    )
     def test_all_terms_filter_the_results(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
@@ -258,10 +243,6 @@ class TestMultiWordQuery:
         commands = [entry["command"] for entry in json.loads(result.stdout)]
         assert commands == ["docker compose up -d"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-2: el término descartado deja pasar ruido mejor rankeado",
-    )
     def test_extra_terms_are_not_silently_dropped(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
@@ -311,10 +292,6 @@ def _short_flag_targets() -> dict[str, dict[str, list[str]]]:
 class TestShortFlagConsistency:
     """A short flag must mean one thing across the whole CLI."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-11: -g es --group en save/import y --global en el resto",
-    )
     def test_no_short_flag_binds_to_two_different_options(self) -> None:
         """``-g`` cannot be ``--group`` here and ``--global`` there.
 
@@ -658,10 +635,6 @@ class TestForget:
         assert "Deleted 4 commands." in result.stdout
         assert self._remaining_commands() == ["git status"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-3: el preview muestra el comando con el markup ya interpretado",
-    )
     def test_preview_shows_the_command_that_will_be_deleted(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
