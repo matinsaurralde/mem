@@ -39,12 +39,26 @@ class CommandPattern(BaseModel):
 
 
 class PatternFile(BaseModel):
-    """On-disk representation of extracted patterns for a single tool."""
+    """On-disk representation of extracted patterns for a single tool.
+
+    ``command_patterns`` is the real cache: the full {command -> pattern}
+    mapping the model produced. It replaces reconstructing that mapping from
+    ``patterns``, which only ever stored one ``example`` per pattern — so on
+    the next sync every other already-generalized command missed the cache,
+    fell back to itself, and reappeared as its own raw "pattern". Patterns
+    degraded into raw commands on every sync, and since sync runs every 20
+    captures, that was the steady state for any real history.
+
+    ``processed_commands`` is kept for backward compatibility with files
+    written by earlier versions, where it was the only record of what had
+    been seen.
+    """
 
     tool: str = Field(min_length=1)
     patterns: list[CommandPattern]
     last_updated: int
     processed_commands: list[str] = []
+    command_patterns: dict[str, str] = {}
 
 
 class WorkSession(BaseModel):
@@ -69,10 +83,16 @@ class WorkSession(BaseModel):
 
 
 class PatternExtractionResult(BaseModel):
-    """Guided generation output schema for Apple FM SDK."""
+    """Result of one extraction pass over a tool's commands.
+
+    ``command_patterns`` carries the {command -> pattern} cache forward so the
+    caller can persist it, letting the next run skip commands the model has
+    already generalized.
+    """
 
     tool: str = Field(min_length=1)
     patterns: list[CommandPattern]
+    command_patterns: dict[str, str] = {}
 
 
 class SessionState(BaseModel):
