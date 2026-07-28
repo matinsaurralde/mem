@@ -6,12 +6,19 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # Must cover every version pyproject declares support for. Claiming
+        # >=3.10 while only testing 3.11/3.12 is an untested promise.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,5 +32,36 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Format check
+        run: ruff format --check .
+
       - name: Test
         run: pytest -v
+
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Catches packaging breakage at PR time instead of at tag time, when the
+      # release workflow is the only thing standing between a bad build and PyPI.
+      - name: Build distributions
+        run: |
+          pip install build twine
+          python -m build
+          twine check --strict dist/*
+
+      - name: Verify the installed console script is ours
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install --quiet dist/*.whl
+          OUT="$(/tmp/verify/bin/mem --version)"
+          echo "$OUT"
+          case "$OUT" in
+            "mem, version "*) ;;
+            *) echo "::error::unexpected --version output: $OUT"; exit 1 ;;
+          esac
