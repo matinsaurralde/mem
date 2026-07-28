@@ -613,7 +613,7 @@ class TestSaveCLI:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["save", "echo deploy", "--global", "-g", "deploy", "-c", "run deploy"],
+            ["save", "echo deploy", "--global", "-t", "deploy", "-c", "run deploy"],
             input="\n",  # empty description prompt
         )
         assert result.exit_code == 0
@@ -910,7 +910,7 @@ class TestImportCLI:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(import_file), "-g", "imported", "--global"],
+            ["import", str(import_file), "-t", "imported", "--global"],
         )
         assert result.exit_code == 0
         assert "Imported 2 commands" in result.output
@@ -944,7 +944,7 @@ class TestImportCLI:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(import_file), "-g", "existing", "--global"],
+            ["import", str(import_file), "-t", "existing", "--global"],
             input="m\n",  # merge
         )
         assert result.exit_code == 0
@@ -980,7 +980,7 @@ class TestImportCLI:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(import_file), "-g", "existing", "--global"],
+            ["import", str(import_file), "-t", "existing", "--global"],
             input="r\n",  # replace
         )
         assert result.exit_code == 0
@@ -1004,7 +1004,7 @@ class TestImportCLI:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(f), "-g", "from-md", "--global", "-f", "markdown"],
+            ["import", str(f), "-t", "from-md", "--global", "-f", "markdown"],
         )
         assert result.exit_code == 0
         data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
@@ -1363,7 +1363,7 @@ class TestSaveNonInteractive:
         with patch("mem.cli._is_interactive", return_value=False):
             result = runner.invoke(
                 cli,
-                ["save", "echo hi", "--global", "-g", "ci-group"],
+                ["save", "echo hi", "--global", "-t", "ci-group"],
             )
         assert result.exit_code == 0
         data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
@@ -1375,7 +1375,7 @@ class TestSaveNonInteractive:
         with patch("mem.cli._is_interactive", return_value=True):
             result = runner.invoke(
                 cli,
-                ["save", "echo hi", "--global", "-g", "my-group"],
+                ["save", "echo hi", "--global", "-t", "my-group"],
                 input="My description\n",
             )
         assert result.exit_code == 0
@@ -1649,7 +1649,7 @@ class TestImportAutoDetect:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(f), "-g", "auto-grp", "--global"],
+            ["import", str(f), "-t", "auto-grp", "--global"],
         )
         assert result.exit_code == 0
         assert "Imported 1 commands" in result.output
@@ -1664,7 +1664,7 @@ class TestImportAutoDetect:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(f), "-g", "md-grp", "--global"],
+            ["import", str(f), "-t", "md-grp", "--global"],
         )
         assert result.exit_code == 0
         data = storage.read_group_file(storage.GROUPS_GLOBAL_FILE)
@@ -1679,7 +1679,7 @@ class TestImportAutoDetect:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(f), "-g", "grp", "--global"],
+            ["import", str(f), "-t", "grp", "--global"],
         )
         assert result.exit_code != 0
         assert "Cannot detect format" in result.output
@@ -1692,7 +1692,7 @@ class TestImportAutoDetect:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["import", str(f), "-g", "grp", "--global", "-f", "json"],
+            ["import", str(f), "-t", "grp", "--global", "-f", "json"],
         )
         assert result.exit_code == 0
         assert "Imported 1 commands" in result.output
@@ -2298,7 +2298,7 @@ class TestClipboardImportCLI:
         ):
             result = runner.invoke(
                 cli,
-                ["import", "-g", "renamed", "--global"],
+                ["import", "-t", "renamed", "--global"],
                 input="y\n",
             )
         assert result.exit_code == 0
