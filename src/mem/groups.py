@@ -27,7 +27,6 @@ from mem.models import Group, GroupCommand, GroupFile, SavedCommand, VarDeclarat
 from mem.variables import (
     merge_var_declarations,
     parse_variables,
-    process_escapes,
 )
 
 GROUP_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -88,13 +87,17 @@ def save_command(
     """
     data = _load_group_file(scope_path)
 
-    # Detect $VAR_NAME tokens BEFORE escape processing — the regex
-    # negative lookbehind (?<!\$) correctly skips $$VAR in the original text.
-    # If we escaped first, $$VAR would become $VAR and be falsely detected.
+    # The regex negative lookbehind (?<!\$) skips $$VAR, so an escaped token is
+    # never taken for a mem variable.
     detected_names = parse_variables(cmd)
 
-    # Process escape sequences ($$VAR -> $VAR in stored text)
-    stored_cmd = process_escapes(cmd)
+    # Store the command exactly as typed, escapes included. Collapsing $$VAR to
+    # $VAR here was lossy: the stored text became indistinguishable from a real
+    # mem variable, so exporting a runbook and importing it elsewhere made
+    # `_auto_detect_vars` claim ownership of a variable the author had
+    # explicitly marked as the shell's. The escape is resolved at execution
+    # time instead, where it is needed and where nothing depends on it.
+    stored_cmd = cmd
 
     # Merge detected vars with explicit --var declarations
     var_list = merge_var_declarations(detected_names, explicit_vars or [])

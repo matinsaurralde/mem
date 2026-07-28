@@ -715,7 +715,7 @@ def run(
 
     from mem import groups, storage
     from mem.models import VarDeclaration
-    from mem.variables import resolve_variables, substitute_variables
+    from mem.variables import process_escapes, resolve_variables
 
     if not _is_interactive() and not yes:
         raise click.ClickException(
@@ -850,13 +850,25 @@ def run(
         if updated_store:
             storage.write_vars_file(vars_data)
 
+    # Values are handed to the shell through the environment and the command is
+    # run verbatim, so the shell expands $NAME itself. Splicing the value into
+    # the command text instead made every value a potential injection: with
+    # shell=True, `TARGET="safe; touch /tmp/x"` ran `touch` as a second command,
+    # and `$(...)` in a value was evaluated. Parameter expansion does not
+    # re-scan its result for operators, so the same value is inert.
+    #
+    # It also means a resolved secret is never rendered: the listing shows
+    # `$API_TOKEN`, not the token. A value fetched from the store — entered with
+    # hidden input precisely so it would stay unseen — used to be echoed in
+    # plaintext to the terminal and left in the scrollback.
+    child_env = {**os.environ, **{name: value for name, (value, _) in resolved.items()}}
+
     # Execute
     console.print()
     for i, cmd in commands_to_run:
-        # Substitute variables in command
-        run_cmd = cmd.cmd
-        if cmd.vars and resolved:
-            run_cmd = substitute_variables(run_cmd, resolved)
+        # $$NAME is stored verbatim so the escape survives export/import; it
+        # collapses to $NAME only here, on the way to the shell.
+        run_cmd = process_escapes(cmd.cmd)
 
         if not run_all and len(commands_to_run) > 1:
             if not click.confirm(f"  Run [{i}] {run_cmd}?", default=True, err=True):
@@ -864,7 +876,7 @@ def run(
 
         console.print(f"  [dim]$ {safe(run_cmd)}[/]")
         try:
-            result = sp.run(run_cmd, shell=True)
+            result = sp.run(run_cmd, shell=True, env=child_env)
         except KeyboardInterrupt:
             console.print("\n  Interrupted.")
             if yes:
