@@ -187,14 +187,6 @@ class TestBackgroundSyncEntryPoint:
         assert result.returncode == 0
         assert history_commands(home) == ["zzfresh"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0-1: capture.py spawns `python -m mem.cli _sync`, but cli.py has "
-            "no `if __name__ == '__main__'` block, so the module is imported "
-            "and exits 0 without running anything"
-        ),
-    )
     def test_python_dash_m_sync_runs_the_sync_command(
         self, home: Path, workdir: Path
     ) -> None:
@@ -233,13 +225,6 @@ class TestBackgroundSyncEntryPoint:
         counter = (home / ".mem" / ".sync_counter").read_text(encoding="utf-8").strip()
         assert counter == "0"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0-1: the background sync spawned after SYNC_THRESHOLD captures "
-            "is a no-op, so rotation never happens in the real capture cycle"
-        ),
-    )
     def test_capture_cycle_triggers_a_real_background_sync(
         self, home: Path, workdir: Path
     ) -> None:

@@ -647,9 +647,16 @@ class TestPatternCaching:
 
         assert call_count == 3  # 3 unique commands
 
-        # Second call with cache: only 1 new command
+        # Second call with cache: only 1 new command. The cache is the
+        # {command -> pattern} mapping the previous run produced — a bare set of
+        # "already seen" commands cannot say what they generalized to, which is
+        # what made patterns decay into raw commands on every resync.
         call_count = 0
-        already_done = {"git status", "git log", "git diff"}
+        already_done = {
+            "git status": "git status <generalized>",
+            "git log": "git log <generalized>",
+            "git diff": "git diff <generalized>",
+        }
 
         with (
             patch.object(patterns, "_apple_fm_available", return_value=True),
@@ -736,15 +743,6 @@ class TestPatternCacheSurvivesResync:
             self.GENERALIZED: 5
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P1-4: the pattern cache is keyed by {example -> pattern} and only one "
-            "example is persisted per pattern, so every other already-generalized "
-            "command hits the raw-command fallback and the pattern file degrades "
-            "into raw commands on each sync"
-        ),
-    )
     def test_second_extraction_preserves_existing_patterns(self, tmp_mem_dir):
         """One new command must not un-generalize the commands already learned.
 
@@ -761,10 +759,6 @@ class TestPatternCacheSurvivesResync:
             self.GENERALIZED: 6
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-4: already-generalized commands reappear as raw patterns",
-    )
     def test_resync_never_reintroduces_raw_commands_as_patterns(self, tmp_mem_dir):
         """No pattern may be a verbatim copy of an input command after a resync.
 

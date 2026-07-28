@@ -507,7 +507,13 @@ class TestAutoSyncTrigger:
 
         assert mock_popen.call_count == 1
         argv, kwargs = mock_popen.call_args.args[0], mock_popen.call_args.kwargs
-        assert argv[1:] == ["-m", "mem.cli", "_sync"]
+        # Either the installed console script or the module fallback, but it
+        # must always end up invoking the `_sync` command. Asserting the exact
+        # argv would pin an implementation detail; asserting the command runs is
+        # the contract — and the module form is precisely the one that silently
+        # ran nothing for months.
+        assert argv[-1] == "_sync"
+        assert argv[1:] in (["_sync"], ["-m", "mem.cli", "_sync"])
         assert kwargs["stdout"] is subprocess.DEVNULL
         assert kwargs["stderr"] is subprocess.DEVNULL
         assert kwargs["start_new_session"] is True
