@@ -22,13 +22,14 @@
 mem silently captures every command you type, then lets you search, save, and replay them — scoped to the git repo you're in.
 
 ```bash
-mem deploy             # search your history
+Ctrl+R                 # interactive finder, ranked
+mem deploy             # or search from the command line
 mem save "cmd" -t ops  # save a command to a group
 mem run ops            # run the group interactively
 mem vars set API_KEY   # store a secret for saved commands
 ```
 
-Unlike `Ctrl+R`, mem ranks results by frequency, recency, and the repo you're currently in. Unlike cloud-based tools, everything stays on your machine as plain text files in `~/.mem/`.
+mem replaces `Ctrl+R` rather than competing with it. Your shell's version does a literal reverse scan; mem ranks by how often you run a command, how recently, whether it's how the line *starts*, and which repo you're standing in. Unlike cloud-based tools, everything stays on your machine as plain text files in `~/.mem/` — readable with `cat`, greppable, and yours to delete.
 
 ---
 
@@ -366,7 +367,17 @@ mem forget "password" --yes      # skip confirmation
 mem init zsh                     # print shell hook code (also: bash, fish)
 mem tui                          # the Ctrl+R finder, on demand
 mem tui -- kubectl               # ...opened on a query
+
+mem import --from-shell-history --dry-run   # see what your old history holds
+mem import --from-shell-history             # bring it in
+
+mem agent status                 # is AI-agent access on?
+mem agent enable / disable       # turn it on or revoke it
+mem agent log                    # what an agent asked for, and when
+mem mcp                          # run the MCP server (agents call this, not you)
 ```
+
+`mem forget` reaches everywhere mem stores text — history, saved commands and runbooks, variables, extracted patterns, sessions and the agent log — not just the command history.
 
 ---
 
