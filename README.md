@@ -132,6 +132,34 @@ mem deploy --json        # machine-readable output
   3  fly deploy                          api         3d ago
 ```
 
+### Ask in English
+
+You do not always remember the command. You remember what it was *for*. When a query matches nothing literally, mem re-reads it through a concept map — a dictionary from what people say to what they type — and answers with commands that share the meaning instead of the letters.
+
+```bash
+mem "how do I see what's listening on a port"   # -> lsof -i :8080
+mem "the command I used to fix the certificate" # -> openssl x509 -in cert.pem -noout -dates
+mem "check disk space"                          # -> du -sh * | sort -h
+```
+
+This is a fallback, never a filter. A query that matches literally is answered literally, with the same results in the same order as before — type `openssl` and you get `openssl`, not everything tagged "certificate". Only when substring search finds nothing does the map get a turn, and a synonym that appears everywhere in your history is weighted down to nothing, so a broad entry cannot drag unrelated commands up.
+
+The map is a plain JSON file you can read, grep and correct. Copy it and make it yours:
+
+```bash
+mem concepts > ~/.mem/concepts.json   # then edit it
+```
+
+```json
+{
+  "certificate": ["openssl", "x509", "cert", "pem", "tls", "certbot"],
+  "port": ["lsof", "netstat", "listen", "port", "8080"],
+  "deploy": ["deploy", "kubectl apply", "fly deploy", "ansible-playbook"]
+}
+```
+
+A concept you define replaces the shipped one of the same name; new concepts are added; everything else is untouched by upgrades. Keys starting with `_` are metadata — `_comment` for the comments JSON does not have, `_stopwords` for the filler words your language uses to ask a question (yours are added to the built-in English ones, so the map translates). A broken file prints a warning and mem falls back to the shipped map; it never stops searching.
+
 ### Patterns
 
 mem automatically learns structural patterns from your history using on-device AI. No manual step needed — extraction runs in the background every 20 commands.
@@ -562,6 +590,7 @@ beside them, is rebuilt from them, and is safe to delete:
     repos/
       myapp.json             # repo-scoped groups and saved commands
     _global.json             # global groups and saved commands
+  concepts.json              # your concept map, layered over the shipped one
   vars.json                  # persistent variable store (0600 permissions)
   agent.json                 # AI agent access flag (off unless you enabled it)
   agent-audit.jsonl          # append-only record of every agent request

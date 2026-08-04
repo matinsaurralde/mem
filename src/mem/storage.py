@@ -21,7 +21,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, NamedTuple, Sequence
+from typing import Callable, Iterable, Iterator, NamedTuple, Sequence
 
 from mem import _fsutil, keychain
 from mem._fsutil import FILE_MODE, atomic_write
@@ -382,7 +382,9 @@ _JSON_STABLE_RUN = re.compile(r"[A-Za-z0-9_.\-]+")
 _MIN_NEEDLE_LEN = 3
 
 
-def prefilter_needles(terms: Iterable[str]) -> list[str]:
+def prefilter_needles(
+    terms: Iterable[str], min_length: int = _MIN_NEEDLE_LEN
+) -> list[str]:
     """Reduce search terms to substrings safe to look for in a raw JSON line.
 
     Answering a query currently costs ~140ms per 100k commands, and 82% of
@@ -406,6 +408,15 @@ def prefilter_needles(terms: Iterable[str]) -> list[str]:
     them raw: these files are meant to be edited by hand, and an editor that
     writes ``ensure_ascii`` JSON would turn ``café`` into ``caf\\u00e9``. The
     ASCII run around them still counts, so ``café`` narrows to ``caf``.
+
+    ``min_length`` exists for the one caller that cannot afford to drop a
+    needle. Three characters is a *selectivity* floor, not a correctness one:
+    below it a needle matches so many lines that the scan costs more than the
+    parse it saves. But an "any of these" prefilter is only sound if every
+    alternative is represented — drop the needle for ``df`` and lines
+    containing only ``df`` stop being read at all. Query expansion therefore
+    asks for ``min_length=2`` and accepts the weaker filter; see
+    :func:`mem.search.search`.
     """
     needles: list[str] = []
     for term in terms:
@@ -413,13 +424,15 @@ def prefilter_needles(terms: Iterable[str]) -> list[str]:
         if not runs:
             continue
         longest = max(runs, key=len)
-        if len(longest) >= _MIN_NEEDLE_LEN:
+        if len(longest) >= min_length:
             needles.append(longest.lower())
     return needles
 
 
 def read_commands(
-    repo: str, needles: Sequence[str] | None = None
+    repo: str,
+    needles: Sequence[str] | None = None,
+    line_filter: Callable[[str], object] | None = None,
 ) -> Iterator[CapturedCommand]:
     """Lazily read commands from a repo's JSONL file.
 
@@ -429,6 +442,14 @@ def read_commands(
     ``needles`` is an optional set of lowercase substrings from
     :func:`prefilter_needles`; a line missing any of them is skipped without
     being parsed. Callers that want every command leave it unset.
+
+    ``line_filter`` is the same optimisation for a caller whose test is not
+    "every needle present" — query expansion needs "*any* of these forty",
+    which no list of needles can express here, because ``needles`` are ANDed.
+    It receives the raw line and returns something falsy to skip it. Like
+    ``needles`` it must only ever be a *necessary* condition: whatever it
+    rejects is never parsed, so a filter that is too strict silently loses
+    results rather than reporting an error.
     """
     path = repo_file(repo)
     if not path.exists():
@@ -437,6 +458,8 @@ def read_commands(
         for line_num, line in enumerate(f, 1):
             line = line.strip()
             if not line:
+                continue
+            if line_filter is not None and not line_filter(line):
                 continue
             if needles:
                 lowered = line.lower()

@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from mem import __version__
+from mem import concepts as mem_concepts
 from mem.capture import get_git_repo
 from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
 from mem.history import ImportPlan
@@ -199,6 +200,27 @@ def init(shell: str) -> None:
         sys.exit(1)
 
     click.echo(read_hook(shell))
+
+
+@cli.command()
+def concepts() -> None:
+    """Print the concept map that turns questions into shell vocabulary.
+
+    ``mem concepts > ~/.mem/concepts.json`` is the whole customisation story:
+    the file mem reads is the file it just printed, so editing it needs no
+    schema, no rebuild and no restart. That is the point of a dictionary over
+    an embedding — you can see it, and you can fix it.
+
+    Read through ``importlib.resources`` like the shell hooks, for the same
+    reason: a path walked up from ``__file__`` exists in a checkout and not in
+    a wheel.
+    """
+    click.echo(
+        resources.files("mem")
+        .joinpath(mem_concepts.CONCEPTS_FILENAME)
+        .read_text(encoding="utf-8"),
+        nl=False,
+    )
 
 
 @cli.command(
