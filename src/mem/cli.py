@@ -12,6 +12,7 @@ import logging
 import os
 import shlex
 import sys
+from importlib import resources
 from pathlib import Path
 
 import click
@@ -159,92 +160,39 @@ def capture_cmd(command: str, dir: str, exit_code: int, duration_ms: int) -> Non
         pass
 
 
+SUPPORTED_SHELLS = ("zsh", "bash", "fish")
+
+
+def read_hook(shell: str) -> str:
+    """Return the hook source for *shell*, as shipped inside the package.
+
+    The hooks live at ``mem/hooks/mem.<shell>`` and are read through
+    ``importlib.resources``, which resolves them the same way for an editable
+    checkout, a wheel, and a zipimport. The previous implementation walked
+    ``__file__.parent.parent.parent / "hooks"`` — a path that only exists in a
+    source checkout — and fell back to a second, hand-maintained copy of every
+    hook inlined in this module. So the code every pip and Homebrew user
+    actually ran was the copy nobody edited, and nothing detected the drift.
+    One file per shell, one reader, no fallback.
+    """
+    return (
+        resources.files("mem")
+        .joinpath("hooks", f"mem.{shell}")
+        .read_text(encoding="utf-8")
+    )
+
+
 @cli.command()
 @click.argument("shell")
 def init(shell: str) -> None:
     """Print shell hook code for automatic command capture."""
-    supported = {"zsh", "bash", "fish"}
-    fallback_hooks = {
-        "zsh": _ZSH_HOOK,
-        "bash": _BASH_HOOK,
-        "fish": _FISH_HOOK,
-    }
-
-    if shell not in supported:
+    if shell not in SUPPORTED_SHELLS:
         click.echo(
             f'Error: unsupported shell "{shell}". Supported: zsh, bash, fish', err=True
         )
         sys.exit(1)
 
-    # Print hook code to stdout
-    hook_path = Path(__file__).parent.parent.parent / "hooks" / f"mem.{shell}"
-    if hook_path.exists():
-        click.echo(hook_path.read_text())
-    else:
-        # Fallback: inline the hook if the file isn't found (e.g., installed via pip)
-        click.echo(fallback_hooks[shell])
-
-
-_BASH_HOOK = """# mem shell hook for bash
-
-_mem_cmd=""
-_mem_start=0
-_mem_capturing=""
-
-_mem_debug_trap() {
-  if [[ -z "$_mem_capturing" && -n "$BASH_COMMAND" ]]; then
-    _mem_capturing=1
-    _mem_cmd="$BASH_COMMAND"
-    _mem_start=$SECONDS
-  fi
-}
-
-_mem_prompt_cmd() {
-  local exit_code=$?
-  _mem_capturing=""
-  if [[ -n "$_mem_cmd" ]]; then
-    local duration=$(( (SECONDS - _mem_start) * 1000 ))
-    mem _capture "$_mem_cmd" "$PWD" "$exit_code" "$duration" 2>/dev/null &
-    disown 2>/dev/null
-    _mem_cmd=""
-  fi
-}
-
-trap '_mem_debug_trap' DEBUG
-PROMPT_COMMAND="_mem_prompt_cmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-"""
-
-_FISH_HOOK = """# mem shell hook for fish
-
-function _mem_postexec --on-event fish_postexec
-    set -l exit_code $status
-    # $CMD_DURATION is set by fish automatically (milliseconds)
-    command mem _capture "$argv" "$PWD" "$exit_code" "$CMD_DURATION" 2>/dev/null &
-    disown 2>/dev/null
-end
-"""
-
-_ZSH_HOOK = """# mem shell hook
-
-_mem_preexec() {
-  _mem_cmd="$1"
-  _mem_start=$SECONDS
-}
-
-_mem_precmd() {
-  local exit_code=$?
-  if [[ -n "$_mem_cmd" ]]; then
-    integer duration
-    (( duration = (SECONDS - _mem_start) * 1000 ))
-    mem _capture "$_mem_cmd" "$PWD" "$exit_code" "$duration" 2>/dev/null &!
-    _mem_cmd=""
-  fi
-}
-
-autoload -Uz add-zsh-hook
-add-zsh-hook preexec _mem_preexec
-add-zsh-hook precmd _mem_precmd
-"""
+    click.echo(read_hook(shell))
 
 
 @cli.command(name="_sync", hidden=True)
