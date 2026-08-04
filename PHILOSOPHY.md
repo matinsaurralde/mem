@@ -13,9 +13,19 @@ Zero telemetry. Zero cloud dependencies.
 
 - Shell history is treated as sensitive data at all times.
 - No command, pattern, or session data ever leaves the machine.
-- mem does not import or depend on any networking library.
-- Any feature that would require network access is rejected
-  at the design stage.
+- mem does not import or depend on any networking library —
+  and does not depend on a library that pulls one in transitively.
+- mem binds no port, opens no socket, and listens for nothing.
+  Not even on `127.0.0.1`. A listener is a network, regardless
+  of the interface it binds to.
+- Reading stdin and writing stdout is not networking. A pipe
+  handed to mem by the process that launched it has no address
+  and no remote peer. This is why the MCP server for AI agents
+  exists over stdio and will never exist over HTTP
+  ([ADR-007](docs/decisions/007-mcp-over-stdio-never-http.md)).
+- Any feature that would require network access is rejected at
+  the design stage — however it is framed: "just localhost",
+  "just for sync", "just opt-in", "just an update check".
 
 **Why**: The shell history is one of the most sensitive artifacts
 a developer has. Privacy is non-negotiable.
@@ -43,8 +53,14 @@ where it earns its keep.
 mem is composable, pipeable, and respectful of existing
 shell conventions.
 
-- All storage files are human-readable plain text (JSONL or JSON).
-- `cat`, `grep`, and `tail -f` work on every file in `~/.mem/`.
+- The data is human-readable plain text (JSONL or JSON), and it
+  is the only source of truth.
+- `cat`, `grep`, and `tail -f` work on every file that holds data.
+- A derived index may exist alongside it purely for speed. It is
+  rebuildable from the plain-text files, discardable at any time,
+  and never a second write path — deleting it loses nothing
+  ([ADR-005](docs/decisions/005-derived-index-jsonl-source-of-truth.md)).
+  Any storage whose loss would lose user data is forbidden.
 - CLI output supports both human-readable (default) and JSON
   (`--json`) formats.
 - mem reads from stdin and writes results to stdout; errors
@@ -111,4 +127,24 @@ a quality bar. Code that must survive public scrutiny is better code.
 - Not a cloud product
 - Not an AI assistant that chats back
 - Not a replacement for `man` pages or docs
-- Not a database-backed tool of any kind
+- Not a database-backed tool: the source of truth is always the
+  plain text you can `cat`. A derived, discardable index is
+  allowed under the conditions in
+  [ADR-005](docs/decisions/005-derived-index-jsonl-source-of-truth.md);
+  a second source of truth never is.
+
+---
+
+## Amendments
+
+Principles are amended in public, with the argument attached —
+never silently.
+
+- **2026-08-04** — Principle III: "no database of any kind" became
+  "no second source of truth". A local, derived, rebuildable index
+  is permitted; storage whose loss would lose user data is not.
+  See [ADR-005](docs/decisions/005-derived-index-jsonl-source-of-truth.md).
+- **2026-08-04** — Principle I: strengthened. Explicitly no sockets,
+  no listeners, no localhost, and no transitive networking
+  dependencies; stdio pipes are explicitly not networking.
+  See [ADR-007](docs/decisions/007-mcp-over-stdio-never-http.md).

@@ -295,7 +295,9 @@ score = (frequency × 0.4) + (recency × 0.4) + (context × 0.2)
 
 ## Storage
 
-All data lives in `~/.mem/` as human-readable plain text:
+All your data lives in `~/.mem/` as human-readable plain text, and these
+files are the only source of truth. Any index mem keeps for speed sits
+beside them, is rebuilt from them, and is safe to delete:
 
 ```
 ~/.mem/
