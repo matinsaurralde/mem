@@ -27,12 +27,16 @@ import shutil
 import subprocess
 import sys
 import time
+from importlib import resources
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HOOKS_DIR = REPO_ROOT / "hooks"
+# The hooks live inside the package so the wheel ships them. Before that they
+# sat at the repo root, were unreachable from an installed wheel, and `mem
+# init` silently served a second hand-maintained copy inlined in cli.py.
+HOOKS_DIR = REPO_ROOT / "src" / "mem" / "hooks"
 
 # The console script lives next to the interpreter running the test suite
 # (that is what `pip install -e .` produces inside a venv). Falling back to
@@ -381,54 +385,62 @@ def strip_comments(text: str) -> list[str]:
 
 
 class TestInlineHookDuplication:
-    """`cli.py` keeps inline copies of the hooks as a pip-install fallback.
+    """There is exactly one definition of each shell hook (P1-14).
 
-    Two files describing the same behaviour is a divergence waiting to
-    happen (P1-14): the copy is what pip users actually install, and
-    nothing keeps it in sync with `hooks/`.
+    `cli.py` used to carry a second, comment-stripped copy of every hook as a
+    pip-install fallback, because it looked for `hooks/` at a path that only
+    exists in a source checkout. So the copy nobody edited was the one every
+    pip and Homebrew user actually ran, and nothing detected the drift. The
+    hooks now live inside the package and are read through
+    `importlib.resources`; these tests keep the duplicate from coming back.
     """
 
     @pytest.mark.parametrize("shell", SHELLS)
-    def test_inline_fallback_is_functionally_identical(self, shell: str) -> None:
-        """The inline copy runs the same code as the hooks file.
-
-        Comments may differ; a single executable line may not, or pip users
-        get different capture behaviour than source installs.
-        """
+    def test_hooks_have_a_single_source_of_truth(self, shell: str) -> None:
+        """`cli.py` must not carry a second copy of any hook."""
         from mem import cli
 
         inline = getattr(cli, f"_{shell.upper()}_HOOK", None)
-        if inline is None:
-            pytest.skip(f"cli.py no longer keeps an inline {shell} hook")
-
-        expected = (HOOKS_DIR / f"mem.{shell}").read_text(encoding="utf-8")
-
-        assert strip_comments(inline) == strip_comments(expected)
+        assert inline is None, (
+            f"cli.py grew an inline {shell} hook again; it will drift from "
+            f"src/mem/hooks/mem.{shell}"
+        )
 
     @pytest.mark.parametrize("shell", SHELLS)
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P1-14: cli.py hardcodes a second, comment-stripped copy of every "
-            "hook instead of shipping hooks/ as package data — the copies "
-            "already differ textually and nothing enforces they stay in sync"
-        ),
-    )
-    def test_hooks_have_a_single_source_of_truth(self, shell: str) -> None:
-        """There must be exactly one definition of each shell hook.
+    def test_hook_source_is_not_embedded_in_any_module(self, shell: str) -> None:
+        """No Python module may contain the hook's executable lines.
 
-        Either `cli.py` stops carrying an inline copy (preferred: ship
-        `hooks/` as package data), or the copy is byte-identical to the file.
+        A private constant is not the only way to duplicate a file — the
+        stricter check is that the hook's own code appears nowhere in the
+        Python sources.
         """
-        from mem import cli
+        # The longest executable line is the distinctive one. The *last* line
+        # would be `end` for fish, which matches half the Python in the repo.
+        marker = max(
+            strip_comments((HOOKS_DIR / f"mem.{shell}").read_text("utf-8")), key=len
+        )
+        offenders = [
+            path.relative_to(REPO_ROOT)
+            for path in (REPO_ROOT / "src").rglob("*.py")
+            if marker in path.read_text(encoding="utf-8")
+        ]
+        assert not offenders, f"{shell} hook code is duplicated in {offenders}"
 
-        inline = getattr(cli, f"_{shell.upper()}_HOOK", None)
-        if inline is None:
-            return  # no duplicate copy at all — contract satisfied
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_hook_is_read_from_the_installed_package(self, shell: str) -> None:
+        """The hook resolves through `importlib.resources`, not a repo path.
 
-        expected = (HOOKS_DIR / f"mem.{shell}").read_text(encoding="utf-8")
+        This is the part that was broken for every non-source install: an
+        installed wheel has no `<site-packages>/../../hooks` directory, so the
+        old lookup always missed and always fell back.
+        """
+        from mem.cli import read_hook
 
-        assert inline.strip() == expected.strip()
+        from_package = resources.files("mem").joinpath("hooks", f"mem.{shell}")
+
+        assert from_package.is_file()
+        assert read_hook(shell) == from_package.read_text(encoding="utf-8")
+        assert read_hook(shell) == (HOOKS_DIR / f"mem.{shell}").read_text("utf-8")
 
 
 def tree(root: Path) -> set[str]:

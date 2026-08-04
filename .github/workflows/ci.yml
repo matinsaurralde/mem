@@ -67,3 +67,20 @@ jobs:
             "mem, version "*) ;;
             *) echo "::error::unexpected --version output: $OUT"; exit 1 ;;
           esac
+
+      # The hooks are the entry point for every piece of data mem stores, and
+      # they only reach users through the wheel. They used to be looked up at a
+      # repo-relative path that no installed wheel has, so `mem init` silently
+      # served a stale second copy inlined in cli.py — and the test suite,
+      # which always ran from a source checkout, never noticed. Only an
+      # install-then-run check can catch that class of bug.
+      - name: Verify the wheel ships the shell hooks
+        run: |
+          for shell in zsh bash fish; do
+            OUT="$(/tmp/verify/bin/mem init "$shell")"
+            if ! diff <(printf '%s\n' "$OUT") "src/mem/hooks/mem.$shell"; then
+              echo "::error::mem init $shell does not match src/mem/hooks/mem.$shell"
+              exit 1
+            fi
+          done
+          echo "all three hooks served from the installed wheel"
