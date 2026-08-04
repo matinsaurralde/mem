@@ -436,3 +436,4 @@ See `docs/decisions/` for detailed ADRs:
 - [009: Ranking Learns From What You Select](docs/decisions/009-ranking-learns-from-selections.md)
 - [010: The Keychain for Variable Values](docs/decisions/010-keychain-for-variable-values.md)
 - [011: A Concept Map, Not Embeddings](docs/decisions/011-concept-map-over-embeddings.md)
+- [012: Promote Mines Sequences, and Ranking Is What Makes It Trustworthy](docs/decisions/012-promote-mines-sequences-not-commands.md)
