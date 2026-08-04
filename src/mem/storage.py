@@ -957,6 +957,100 @@ def _scrub_agent_audit(query: str) -> None:
         path.unlink()
 
 
+def _strings_in(value: object) -> Iterator[str]:
+    """Every string anywhere inside a decoded JSON value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _strings_in(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings_in(item)
+
+
+def _file_holds(path: Path, query: str, jsonl: bool = False) -> bool:
+    """True if *query* appears in any string stored in *path*.
+
+    Decodes the JSON rather than grepping the raw bytes, because the file is
+    *encoded*: a query containing a quote or a backslash is written escaped,
+    so a raw scan would answer "not here" about text that is very much here.
+    Getting that backwards means telling someone a secret is gone when it is
+    not, which is the worst answer this module can give.
+
+    Falls back to a raw scan when the file will not parse — a damaged file is
+    still a file that may be holding the text.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    documents = raw.splitlines() if jsonl else [raw]
+    for document in documents:
+        document = document.strip()
+        if not document:
+            continue
+        try:
+            data = json.loads(document)
+        except json.JSONDecodeError:
+            if query in document:
+                return True
+            continue
+        if any(query in text for text in _strings_in(data)):
+            return True
+    return False
+
+
+def forget_targets(query: str) -> list[str]:
+    """Human-readable names of the places still holding *query*.
+
+    ``forget_commands`` scrubs six destinations, but the CLI only ever
+    previewed the first one — so ``mem forget`` on text that lives *only* in a
+    saved runbook, a stored variable, an extracted pattern or the agent audit
+    log reported "no matching commands found" and returned without scrubbing
+    anything. A command saved but never run was unforgettable, which is
+    precisely the case where someone is most likely to have pasted a
+    credential.
+
+    Deliberately reports a superset: a hit here only means the scrubbers get
+    a chance to run, and a scrubber that matches nothing is a no-op. Missing a
+    place is the failure that matters.
+    """
+    found: list[str] = []
+
+    def note(label: str, condition: bool) -> None:
+        if condition:
+            found.append(label)
+
+    groups = sorted(GROUPS_DIR.rglob("*.json")) if GROUPS_DIR.exists() else []
+    note("saved commands and runbooks", any(_file_holds(p, query) for p in groups))
+
+    note("stored variables", VARS_FILE.exists() and _file_holds(VARS_FILE, query))
+
+    patterns_dir = MEM_DIR / "patterns"
+    patterns = sorted(patterns_dir.glob("*.json")) if patterns_dir.exists() else []
+    note("extracted patterns", any(_file_holds(p, query) for p in patterns))
+
+    sessions_dir = MEM_DIR / "sessions"
+    sessions = sorted(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
+    note(
+        "past work sessions",
+        any(_file_holds(p, query, jsonl=True) for p in sessions),
+    )
+
+    state = MEM_DIR / ".session_state.json"
+    note("the session in progress", state.exists() and _file_holds(state, query))
+
+    audit = agent_audit_file()
+    note(
+        "the agent audit log",
+        audit.exists() and _file_holds(audit, query, jsonl=True),
+    )
+
+    return found
+
+
 # --- Sync counter ---
 
 SYNC_COUNTER_FILE = MEM_DIR / ".sync_counter"

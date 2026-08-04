@@ -563,6 +563,56 @@ class TestForget:
     def _remaining_commands(self) -> list[str]:
         return [cmd.command for cmd in storage.read_all_commands()]
 
+    def test_a_secret_only_in_a_runbook_is_still_forgotten(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """A command saved but never run used to be unforgettable.
+
+        The preview only ever scanned command history, so `forget` printed
+        "No matching commands found" and returned — never reaching the
+        scrubbers for runbooks, variables, patterns or the audit log. That is
+        precisely the case where somebody pasted a credential into a saved
+        command and never executed it.
+        """
+        from mem import groups
+
+        secret = "sk-live-saved-but-never-run"
+        groups.save_command(
+            storage.GROUPS_GLOBAL_FILE, f"curl -u {secret}", group_name="ops"
+        )
+
+        result = runner.invoke(cli, ["forget", secret], input="y\n")
+
+        assert result.exit_code == 0
+        assert "saved commands and runbooks" in result.output
+        assert storage.forget_targets(secret) == []
+
+    def test_declining_the_elsewhere_prompt_deletes_nothing(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """The confirmation is a real gate on that path too, not a formality."""
+        from mem import groups
+
+        secret = "sk-live-keep-me"
+        groups.save_command(
+            storage.GROUPS_GLOBAL_FILE, f"curl -u {secret}", group_name="ops"
+        )
+
+        result = runner.invoke(cli, ["forget", secret], input="n\n")
+
+        assert result.exit_code == 0
+        assert storage.forget_targets(secret) == ["saved commands and runbooks"]
+
+    def test_text_stored_nowhere_at_all_still_says_so(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        _add_history("git status")
+
+        result = runner.invoke(cli, ["forget", "never-typed-this"])
+
+        assert result.exit_code == 0
+        assert "No matching commands found." in result.output
+
     def test_declining_confirmation_deletes_nothing(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
