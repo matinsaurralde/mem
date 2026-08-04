@@ -21,6 +21,8 @@ from rich.text import Text
 
 from mem import __version__
 from mem.capture import get_git_repo
+from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
+from mem.history import ImportPlan
 from mem.render import console, err_console, fit, plain, safe
 
 
@@ -160,6 +162,10 @@ def capture_cmd(command: str, dir: str, exit_code: int, duration_ms: int) -> Non
         pass
 
 
+# Shells mem can emit a capture hook for. Deliberately distinct from
+# `history.SUPPORTED_SHELLS` (imported above as IMPORTABLE_SHELLS), which is
+# the shells whose *history file* mem knows how to parse. The two sets happen
+# to match today and are different questions.
 SUPPORTED_SHELLS = ("zsh", "bash", "fish")
 
 
@@ -984,6 +990,104 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
             err_console.print("(no clipboard tool found — printed to stdout)")
 
 
+def _history_sources(
+    shell: str | None, history_file: str | None
+) -> list[tuple[str, Path]]:
+    """Decide which history files to read, from the flags the user gave.
+
+    ``--file`` names one file explicitly; its shell comes from ``--shell`` or,
+    failing that, from the filename. Without ``--file`` the standard locations
+    are probed and only the ones that exist are returned.
+    """
+    from mem import history
+
+    if history_file is not None:
+        path = Path(history_file)
+        resolved = shell or history.shell_for_path(path)
+        if resolved is None:
+            raise click.ClickException(
+                f"Cannot tell which shell wrote {path.name}. "
+                f"Add --shell {{{','.join(IMPORTABLE_SHELLS)}}}."
+            )
+        return [(resolved, path)]
+
+    return history.detect_history_files(shell)
+
+
+def _print_history_plan(plan: ImportPlan) -> None:
+    """Show, per file, what the import found. Chrome is styled, data is not."""
+    console.print()
+    for f in plan.files:
+        location = plain(str(f.path))
+        location.stylize("dim")
+        if f.error:
+            console.print(f"  [yellow]{f.shell:<5}[/] ", location, sep="")
+            console.print(f"         [yellow]unreadable: {safe(f.error)}[/]")
+            continue
+        console.print(f"  [bold]{f.shell:<5}[/] ", location, sep="")
+        console.print(
+            f"         {len(f.commands):,} new   "
+            f"[dim]{f.duplicates:,} already known   "
+            f"{f.credentials:,} withheld as credentials   "
+            f"{f.failed_lines:,} unparsed[/]"
+        )
+    console.print()
+
+
+def _import_shell_history(
+    shell: str | None, history_file: str | None, dry_run: bool, yes: bool
+) -> None:
+    """Run `mem import --from-shell-history` end to end.
+
+    The plan is always computed and shown before anything is written, because
+    this is the one mem command that adds thousands of lines to the store in a
+    single step — the user should see the number before it happens, not after.
+    """
+    from mem import history
+
+    sources = _history_sources(shell, history_file)
+    if not sources:
+        where = f" for {shell}" if shell else ""
+        raise click.ClickException(
+            f"No shell history file found{where}.\n"
+            "Looked for ~/.zsh_history, ~/.bash_history and "
+            "~/.local/share/fish/fish_history.\n"
+            "Use --file to point at one directly."
+        )
+
+    plan = history.build_plan(sources)
+    _print_history_plan(plan)
+
+    if plan.total == 0:
+        console.print("Nothing new to import.")
+        return
+
+    if dry_run:
+        console.print(
+            f"[bold]{plan.total:,}[/] commands would be imported. "
+            "[dim](dry run — nothing was written)[/]"
+        )
+        return
+
+    if not yes:
+        if not _is_interactive():
+            raise click.ClickException(
+                "Non-interactive mode detected. Use --yes to import without prompts."
+            )
+        if not click.confirm(
+            f"Import {plan.total:,} commands?", default=True, err=True
+        ):
+            return
+
+    written = history.apply_plan(plan)
+    console.print(
+        f"Imported [bold]{written:,}[/] commands. "
+        f"[dim]Skipped {plan.duplicates:,} already known and "
+        f"{plan.credentials:,} that look like credentials; "
+        f"{plan.failed_lines:,} lines could not be parsed.[/]"
+    )
+
+
 @cli.command(name="import")
 @click.argument("file", type=click.Path(exists=True), required=False, default=None)
 @click.option(
@@ -1006,14 +1110,63 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
 @click.option(
     "--global", "-g", "global_flag", is_flag=True, help="Import to global scope"
 )
+@click.option(
+    "--from-shell-history",
+    "from_shell_history",
+    is_flag=True,
+    help="Import your existing ~/.zsh_history, ~/.bash_history or fish history",
+)
+@click.option(
+    "--shell",
+    "shell",
+    type=click.Choice(list(IMPORTABLE_SHELLS)),
+    default=None,
+    help="Limit the shell-history import to one shell",
+)
+@click.option(
+    "--file",
+    "history_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Import this history file instead of the auto-detected ones",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Report what would be imported, write nothing"
+)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def import_cmd(
-    file: str | None, group_name: str | None, fmt: str | None, global_flag: bool
+    file: str | None,
+    group_name: str | None,
+    fmt: str | None,
+    global_flag: bool,
+    from_shell_history: bool,
+    shell: str | None,
+    history_file: str | None,
+    dry_run: bool,
+    yes: bool,
 ) -> None:
-    """Import a group from a file or clipboard.
+    """Import a group from a file or clipboard, or your shell history.
 
     When FILE is omitted, reads from the system clipboard and auto-detects
     the format and group name. Use -g to override the detected group name.
+
+    With --from-shell-history, imports the commands your shell has already
+    been recording, so mem is useful before it has captured anything itself.
     """
+    if from_shell_history:
+        if file is not None:
+            raise click.ClickException(
+                "--from-shell-history reads history files, not group files.\n"
+                "Use --file to point at a specific history file."
+            )
+        _import_shell_history(shell, history_file, dry_run, yes)
+        return
+
+    if shell or history_file or dry_run:
+        raise click.ClickException(
+            "--shell, --file and --dry-run only apply to --from-shell-history."
+        )
+
     from mem import groups, storage
     from mem.models import Group, GroupCommand
 
@@ -1063,7 +1216,7 @@ def import_cmd(
         groups.validate_group_name(group_name)
 
         # Confirm before importing
-        if _is_interactive():
+        if _is_interactive() and not yes:
             err_console.print(
                 f"Found {len(commands)} commands. Import to group '{group_name}'?"
             )
