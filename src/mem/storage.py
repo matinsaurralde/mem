@@ -418,6 +418,86 @@ def prefilter_needles(terms: Iterable[str]) -> list[str]:
     return needles
 
 
+_COMMAND_KEY = '"command"'
+_COMMAND_PREFIX = '{"command":"'
+
+
+def command_span(line: str) -> str:
+    """The command text inside a raw JSONL line, without decoding the line.
+
+    The prefilter used to scan the whole line, which includes the field
+    *names*. Every record contains ``"command"``, ``"dir"``, ``"exit_code"``,
+    ``"duration_ms"``, ``"session"`` and ``"imported"``, so searching for any
+    of `command`, `dir`, `exit`, `code`, `port`, `ms`, `ts` or `session`
+    matched **every line in the store** and the filter admitted all of them.
+    Measured over 20,000 records: `exit` matched 20,000 and `git` matched
+    2,000 — so the queries most likely to be slow were exactly the ones that
+    got no speedup at all.
+
+    It was never a correctness bug — ``_matches`` re-checks the parsed
+    command, and the command field is the only thing it looks at — which is
+    why it went unnoticed. Narrowing the scan to the same field the real
+    filter uses makes the two agree.
+
+    Falls back to the whole line for anything it cannot locate: a
+    hand-written or truncated record must still be considered, and admitting
+    too much is the safe direction.
+    """
+    # Fast path: this is how mem itself writes every record, so it is the
+    # shape of essentially every line, and it skips the search entirely.
+    if line.startswith(_COMMAND_PREFIX):
+        index = len(_COMMAND_PREFIX)
+    else:
+        index = _locate_value(line)
+        if index < 0:
+            return line
+
+    # Everything below is `str.find`, which runs in C. An earlier version
+    # walked the line character by character in Python and cost more than the
+    # `json.loads` it was there to avoid — 165ms per 100k records against
+    # 137ms for simply parsing everything. A filter slower than the work it
+    # skips is worse than no filter.
+    cursor = index
+    while True:
+        end = line.find('"', cursor)
+        if end == -1:
+            return line  # unterminated: scan the whole line rather than none
+        # A quote inside a JSON string is escaped, so the closing one is the
+        # first preceded by an even number of backslashes.
+        backslashes = 0
+        position = end - 1
+        while position >= index and line[position] == "\\":
+            backslashes += 1
+            position -= 1
+        if backslashes % 2 == 0:
+            return line[index:end]
+        cursor = end + 1
+
+
+def _locate_value(line: str) -> int:
+    """Index just past the opening quote of the ``command`` value, or -1.
+
+    Only reached for records mem did not write — a hand-edited file, or one
+    produced by another tool — so it tolerates whitespace the compact
+    encoder never emits.
+    """
+    start = line.find(_COMMAND_KEY)
+    if start == -1:
+        return -1
+    index = start + len(_COMMAND_KEY)
+    length = len(line)
+    while index < length and line[index] in " \t":
+        index += 1
+    if index >= length or line[index] != ":":
+        return -1
+    index += 1
+    while index < length and line[index] in " \t":
+        index += 1
+    if index >= length or line[index] != '"':
+        return -1
+    return index + 1
+
+
 def read_commands(
     repo: str, needles: Sequence[str] | None = None
 ) -> Iterator[CapturedCommand]:
@@ -439,7 +519,7 @@ def read_commands(
             if not line:
                 continue
             if needles:
-                lowered = line.lower()
+                lowered = command_span(line).lower()
                 if not all(needle in lowered for needle in needles):
                     continue
             try:
