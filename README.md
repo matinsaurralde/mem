@@ -63,6 +63,22 @@ source ~/.config/fish/config.fish
 
 That's it. Every command you type is now silently captured with full context (directory, git repo, exit code, duration).
 
+### Import what you already typed
+
+The hook only sees commands typed after it was installed. To start from the years of history your shell has already been keeping:
+
+```bash
+mem import --from-shell-history --dry-run   # see what would be imported
+mem import --from-shell-history             # import it
+
+mem import --from-shell-history --shell zsh          # one shell only
+mem import --from-shell-history --file ~/backup.hist # a specific file
+```
+
+`~/.zsh_history`, `~/.bash_history` and `~/.local/share/fish/fish_history` are detected automatically. Imported commands keep their recorded timestamps where the file has them, and are back-dated (never stamped as "now") where it does not. Because a history file records no directory, exit code or duration, mem stores those as unknown rather than guessing, and imported commands go to the global scope.
+
+Running the import twice is safe: it never double-counts a command. Commands that look like they contain credentials are skipped, and the count is reported.
+
 ---
 
 ## Search

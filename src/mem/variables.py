@@ -287,6 +287,56 @@ def _command_may_contain_credentials(cmd: str) -> bool:
     return any(len(t.strip("'\"")) >= _MIN_CREDENTIAL_TOKEN_LEN for t in tokens)
 
 
+# Deterministic credential shapes, used where per-command AI inference is not
+# an option. Each entry is a shape that is a credential essentially whenever it
+# appears — a keyword assigned a non-trivial value, a bearer token, a vendor
+# key with its documented prefix, or a password embedded in a connection URL.
+_CREDENTIAL_SHAPES: tuple[re.Pattern[str], ...] = (
+    # KEY=value / key: value where the key names a secret.
+    re.compile(
+        r"(?i)\b(?:pass|passwd|password|token|secret|api[_-]?key|apikey"
+        r"|access[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token"
+        r"|client[_-]?secret|credential)\b\s*[=:]\s*[\"']?[^\s\"']{6,}"
+    ),
+    # Long-form flag with the value separated by a space: --password hunter2.
+    re.compile(
+        r"(?i)--(?:pass|password|token|secret|api-?key|access-?key|auth)"
+        r"\s+[\"']?[^\s\"']{6,}"
+    ),
+    # Authorization headers, with or without the header name.
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+    # Vendor tokens, identified by their documented prefixes.
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    # user:password@host in a connection string.
+    re.compile(r"://[^\s/:@]+:[^\s/@]{4,}@"),
+)
+
+
+def looks_like_credential(cmd: str) -> bool:
+    """Report whether a command plausibly carries a secret, without any AI.
+
+    Why this exists next to :func:`detect_credentials`: that function is the
+    accurate one, but it costs one on-device inference call per command. That
+    is the right trade when the user is saving a single command, and the wrong
+    one for bulk work — a shell history import scans tens of thousands of
+    lines, where per-command inference would take hours and would also run on
+    a machine that may not have the SDK installed at all, silently detecting
+    nothing.
+
+    Deliberately biased towards false positives: a skipped command costs the
+    user one line of history they can re-add by hand, while a missed one
+    writes their production token into ~/.mem forever.
+    """
+    return any(shape.search(cmd) for shape in _CREDENTIAL_SHAPES)
+
+
 def _normalize_var_name(name: str) -> str:
     """Normalize a suggested variable name to UPPER_SNAKE_CASE.
 
