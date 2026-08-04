@@ -639,7 +639,10 @@ Data rotation happens automatically in the background:
 - Zero telemetry — no analytics, no crash reports
 - Zero cloud dependencies — fully offline, always
 - On-device AI only — runs on your Mac's neural engine
-- Plain text storage — no proprietary formats, you own your data
+- Plain text storage — no proprietary formats, you own your data. The one
+  deliberate exception is variable *values*, which live in the macOS
+  Keychain: "readable with `cat`" is the wrong property for a password
+  ([ADR-010](docs/decisions/010-keychain-for-variable-values.md))
 - Agent access off by default — opt-in, redacted and audited ([MCP](#ai-agents-mcp))
 
 Read more in [PHILOSOPHY.md](PHILOSOPHY.md).
