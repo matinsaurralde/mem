@@ -1,6 +1,6 @@
 """End-to-end tests for the shell hooks that feed mem.
 
-The hooks under ``hooks/`` are the entry point for *every* piece of data mem
+The hooks under ``src/mem/hooks/`` are the entry point for *every* piece of data mem
 ever stores, yet they are shell code and therefore invisible to a pure Python
 test suite. These tests spawn real interactive shells (``zsh -f -i``,
 ``bash --norc --noprofile -i``, ``fish -i``), install the hook exactly the way
@@ -75,6 +75,32 @@ pytestmark = pytest.mark.skipif(
 requires_zsh = pytest.mark.skipif(ZSH is None, reason="zsh not available")
 requires_bash = pytest.mark.skipif(BASH is None, reason="bash not available")
 requires_fish = pytest.mark.skipif(FISH is None, reason="fish not available")
+
+
+def _bash_has_subsecond_clock() -> bool:
+    """Does the discovered bash expose ``$EPOCHREALTIME``?
+
+    ``$EPOCHREALTIME`` arrived in bash 5.0. macOS still ships 3.2 as
+    ``/bin/bash``, and there is no process-free sub-second clock there, so the
+    hook falls back to ``date`` and second resolution. That is a real
+    limitation of the platform, not of the hook, and the assertion below is
+    skipped rather than quietly weakened.
+    """
+    if BASH is None:
+        return False
+    probe = subprocess.run(
+        [BASH, "-c", 'printf %s "${EPOCHREALTIME:-}"'],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return bool(probe.stdout.strip())
+
+
+requires_subsecond_bash = pytest.mark.skipif(
+    not _bash_has_subsecond_clock(),
+    reason="bash < 5.0 has no sub-second clock without forking (macOS ships 3.2)",
+)
 
 # --- Polling knobs -----------------------------------------------------------
 
@@ -403,10 +429,6 @@ class TestDurationResolution:
     """
 
     @requires_zsh
-    @pytest.mark.xfail(
-        strict=True,
-        reason="DUR-1: the zsh hook derives duration from $SECONDS (1s resolution)",
-    )
     def test_zsh_records_subsecond_duration(
         self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
     ) -> None:
@@ -425,10 +447,7 @@ class TestDurationResolution:
         )
 
     @requires_bash
-    @pytest.mark.xfail(
-        strict=True,
-        reason="DUR-2: the bash hook derives duration from $SECONDS (1s resolution)",
-    )
+    @requires_subsecond_bash
     def test_bash_records_subsecond_duration(
         self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
     ) -> None:
@@ -446,36 +465,88 @@ class TestDurationResolution:
             f"expected sub-second resolution, got duration_ms={duration}"
         )
 
-    @pytest.mark.parametrize(
-        "shell",
-        [
-            pytest.param(
-                "zsh",
-                marks=pytest.mark.xfail(
-                    strict=True, reason="DUR-1: zsh hook still uses $SECONDS"
-                ),
-            ),
-            pytest.param(
-                "bash",
-                marks=pytest.mark.xfail(
-                    strict=True, reason="DUR-2: bash hook still uses $SECONDS"
-                ),
-            ),
-            "fish",
-        ],
-    )
+    @pytest.mark.parametrize("shell", ["zsh", "bash", "fish"])
     def test_hook_source_uses_millisecond_clock(
         self, hook_files: dict[str, Path], shell: str
     ) -> None:
         """No hook may time commands with the integer ``$SECONDS`` counter.
 
-        A static check on the emitted hook code, so it holds for the pip
-        fallback hooks in ``cli.py`` too — not just the files in ``hooks/``.
+        A static check on what ``mem init`` actually emits, so it covers the
+        real installation path and not just the files in the repo.
+
+        Comments are stripped first: each hook explains at length *why* it does
+        not use ``$SECONDS``, and grepping the prose would fail on the very
+        documentation of the fix.
         """
         source = hook_files[shell].read_text(encoding="utf-8")
-        assert "SECONDS" not in source.replace("CMD_DURATION", ""), (
+        code = "\n".join(
+            line
+            for line in source.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        )
+        assert "SECONDS" not in code.replace("CMD_DURATION", ""), (
             f"the {shell} hook measures duration with $SECONDS (integer seconds)"
         )
+
+    @requires_bash
+    def test_bash_epochrealtime_arithmetic_is_exact(
+        self, hook_files: dict[str, Path], shell_cwd: Path
+    ) -> None:
+        """Pin the bash 5 clock path on a machine that cannot reach it.
+
+        macOS ships bash 3.2, so ``test_bash_records_subsecond_duration`` skips
+        here and the ``$EPOCHREALTIME`` branch would only ever be exercised on
+        CI. Stubbing the variable makes the arithmetic — strip the decimal
+        separator, divide by 1000 — deterministic under any bash, including
+        the comma separator some locales produce.
+        """
+        script = f"""
+        EPOCHREALTIME="1712345678.500000"
+        source {hook_files["bash"]}
+        _mem_clock; a=$_mem_ms
+        EPOCHREALTIME="1712345679,250000"
+        _mem_clock; b=$_mem_ms
+        echo "$a $b $(( b - a ))"
+        """
+        proc = subprocess.run(
+            [str(BASH), "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(shell_cwd),
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        start, end, elapsed = proc.stdout.split()
+        assert start == "1712345678500"
+        assert end == "1712345679250"
+        assert elapsed == "750"
+
+    @requires_bash
+    def test_bash_falls_back_to_whole_seconds_without_epochrealtime(
+        self, hook_files: dict[str, Path], shell_cwd: Path
+    ) -> None:
+        """Without ``$EPOCHREALTIME`` the clock still reports milliseconds.
+
+        bash 3.2 has no process-free sub-second clock, so the fallback loses
+        resolution — but it must not change the *unit*, or the same field
+        would mean seconds for some users and milliseconds for others.
+        """
+        script = f"""
+        unset EPOCHREALTIME
+        source {hook_files["bash"]}
+        _mem_clock; echo "$_mem_ms"
+        """
+        proc = subprocess.run(
+            [str(BASH), "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(shell_cwd),
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        now_ms = int(proc.stdout.strip())
+        assert now_ms % 1000 == 0, "the fallback has second resolution by construction"
+        assert abs(now_ms / 1000 - time.time()) < 120, "not a plausible wall clock"
 
 
 # --- 3. The leading-space convention (P0-5) ----------------------------------
@@ -492,10 +563,6 @@ class TestLeadingSpacePrivacy:
     """
 
     @requires_zsh
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-5: the zsh hook captures space-prefixed commands anyway",
-    )
     def test_zsh_ignores_space_prefixed_command(
         self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
     ) -> None:
@@ -515,11 +582,6 @@ class TestLeadingSpacePrivacy:
         )
 
     @requires_bash
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0-5: the bash hook captures space-prefixed commands anyway "
-        "(by the time the DEBUG trap sees $BASH_COMMAND the leading space is gone)",
-    )
     def test_bash_ignores_space_prefixed_command(
         self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
     ) -> None:
@@ -552,10 +614,6 @@ class TestBashCommandLines:
     """
 
     @requires_bash
-    @pytest.mark.xfail(
-        strict=True,
-        reason="PIPE-1: $BASH_COMMAND only yields the first simple command",
-    )
     def test_bash_captures_full_pipeline(
         self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
     ) -> None:
@@ -574,10 +632,6 @@ class TestBashCommandLines:
         )
 
     @requires_bash
-    @pytest.mark.xfail(
-        strict=True,
-        reason="PIPE-2: $BASH_COMMAND only yields the first element of a list",
-    )
     def test_bash_captures_full_or_list(
         self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
     ) -> None:
@@ -611,11 +665,6 @@ class TestBashCommandLines:
         assert "echo alpha | tr a-z A-Z" in _commands(records)
 
     @requires_bash
-    @pytest.mark.xfail(
-        strict=True,
-        reason="SELF-1: sourcing the bash hook records its own last assignment "
-        "(PROMPT_COMMAND=...) as if the user had typed it",
-    )
     def test_bash_hook_does_not_capture_its_own_installation(
         self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
     ) -> None:
@@ -630,6 +679,149 @@ class TestBashCommandLines:
         records = _wait_for_quiescence(shell_home)
         assert not any("_mem_" in c for c in _commands(records)), (
             f"the hook captured its own installation: {_commands(records)}"
+        )
+
+
+class TestBashMirrorsShellHistory:
+    """bash reads the command line out of history, so it inherits its rules.
+
+    The contract this pins down: *mem remembers exactly what your shell
+    remembers, and nothing else.* Reading ``history 1`` is what makes
+    pipelines and ``&&`` lists survive intact, and the price is that every
+    mechanism the user has for keeping a line out of history now keeps it out
+    of mem too. That price is the feature.
+    """
+
+    @requires_bash
+    def test_bash_honours_histignore(
+        self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
+    ) -> None:
+        """A command matched by HISTIGNORE never reaches the store."""
+        _run_shell(
+            "bash",
+            ["echo hidden_zzz", "echo sentinel_done"],
+            shell_home,
+            shell_cwd,
+            hook_files,
+            env_extra={"HISTIGNORE": "echo hidden*"},
+        )
+        _wait_for_command(shell_home, "sentinel_done")
+        records = _wait_for_quiescence(shell_home)
+        assert not any("hidden_zzz" in c for c in _commands(records)), (
+            f"HISTIGNORE was overridden: {_commands(records)}"
+        )
+
+    @requires_bash
+    def test_bash_captures_nothing_when_history_is_disabled(
+        self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
+    ) -> None:
+        """``set +o history`` silences capture instead of storing stale lines.
+
+        This is the failure the old ``$BASH_COMMAND`` implementation was built
+        to avoid: with history off, a naive ``history 1`` returns whatever was
+        recorded last and mem stores a command the user never ran. The
+        history-number check turns that into silence.
+        """
+        result = _run_shell(
+            "bash",
+            ["echo never_recorded", "echo also_never"],
+            shell_home,
+            shell_cwd,
+            hook_files,
+            setup=["set +o history"],
+        )
+        records = _wait_for_quiescence(shell_home)
+        assert _commands(records) == [], (
+            f"captured something with history disabled: {_commands(records)}"
+        )
+        assert "_mem" not in result.stderr, result.stderr
+
+    @requires_bash
+    def test_bash_counts_a_repeated_command_twice(
+        self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
+    ) -> None:
+        """Frequency survives: two identical runs are two records.
+
+        Reading history by number could have collapsed repeats. It does not,
+        because bash's default HISTCONTROL records duplicates — and frequency
+        is the signal mem's whole ranking rests on.
+        """
+        _run_shell(
+            "bash",
+            ["echo repeated_cmd", "echo repeated_cmd", "echo sentinel_done"],
+            shell_home,
+            shell_cwd,
+            hook_files,
+        )
+        _wait_for_command(shell_home, "sentinel_done")
+        records = _wait_for_quiescence(shell_home)
+        repeats = [c for c in _commands(records) if c == "echo repeated_cmd"]
+        assert len(repeats) == 2, f"lost a repeat: {_commands(records)}"
+
+
+class TestBashPromptCommandIsPreserved:
+    """Installing the hook must not destroy the user's own prompt hooks.
+
+    mem prepends itself to PROMPT_COMMAND — it has to run first to read ``$?``
+    before anything else overwrites it — but "first" must not mean "instead
+    of". bash 5.1 turned PROMPT_COMMAND into an array, and assigning a string
+    to an array variable replaces element 0 and silently drops the rest, so
+    anyone using a prompt framework would have lost their prompt.
+    """
+
+    @requires_bash
+    def test_existing_scalar_prompt_command_still_runs(
+        self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
+    ) -> None:
+        """A PROMPT_COMMAND set before the hook keeps firing after it."""
+        result = _run_shell(
+            "bash",
+            ["echo sentinel_done"],
+            shell_home,
+            shell_cwd,
+            hook_files,
+            setup=["PROMPT_COMMAND='echo PREEXISTING_PROMPT'"],
+        )
+        _wait_for_command(shell_home, "sentinel_done")
+        assert "PREEXISTING_PROMPT" in result.stdout, (
+            f"the hook ate the user's PROMPT_COMMAND: {result.stdout!r}"
+        )
+
+    @requires_bash
+    def test_array_prompt_command_keeps_every_element(
+        self, hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path
+    ) -> None:
+        """Every element of an array PROMPT_COMMAND survives (bash >= 5.1).
+
+        Skipped on older bash, where PROMPT_COMMAND is a plain string and the
+        scenario cannot exist.
+        """
+        version = subprocess.run(
+            [
+                str(BASH),
+                "-c",
+                'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        major, _, minor = version.partition(".")
+        if (int(major), int(minor)) < (5, 1):
+            pytest.skip(f"bash {version} has no array PROMPT_COMMAND")
+
+        result = _run_shell(
+            "bash",
+            ["echo sentinel_done"],
+            shell_home,
+            shell_cwd,
+            hook_files,
+            setup=["PROMPT_COMMAND=('echo FIRST_ELEMENT' 'echo SECOND_ELEMENT')"],
+        )
+        _wait_for_command(shell_home, "sentinel_done")
+        assert "FIRST_ELEMENT" in result.stdout, result.stdout
+        assert "SECOND_ELEMENT" in result.stdout, (
+            f"array elements past the first were dropped: {result.stdout!r}"
         )
 
 
