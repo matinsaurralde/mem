@@ -142,18 +142,23 @@ def search(
     if not terms:
         return []
 
+    # Cheap substring test on the raw JSONL line, so the expensive parse only
+    # runs for lines that could match. The needles are a *necessary* condition,
+    # never a sufficient one — `_matches` below is still the real filter.
+    needles = storage.prefilter_needles(terms)
+
     # Collect all matching commands
     all_commands: list[CapturedCommand] = []
 
     # Read current repo first for context boost
     if current_repo:
         repo_name = storage.sanitize_repo_name(current_repo)
-        for cmd in storage.read_commands(repo_name):
+        for cmd in storage.read_commands(repo_name, needles):
             if _matches(cmd.command, terms):
                 all_commands.append(cmd)
 
     # Read global fallback
-    for cmd in storage.read_commands("_global"):
+    for cmd in storage.read_commands("_global", needles):
         if _matches(cmd.command, terms):
             all_commands.append(cmd)
 
@@ -167,7 +172,7 @@ def search(
             repo_name = path.stem
             if repo_name == current_sanitized or repo_name == "_global":
                 continue  # already read
-            for cmd in storage.read_commands(repo_name):
+            for cmd in storage.read_commands(repo_name, needles):
                 if _matches(cmd.command, terms):
                     all_commands.append(cmd)
 

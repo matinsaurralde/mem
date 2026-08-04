@@ -158,6 +158,71 @@ class TestScoreFormula:
         )
 
 
+# Commands whose JSONL encoding differs from the text the user typed, plus a
+# query that must still find each one. These are the cases where a naive
+# "grep the raw line" prefilter silently returns nothing.
+ENCODED_COMMANDS = [
+    (r"grep \d+ access.log", r"\d+"),
+    (r"grep -P '\bword\b' file", r"\bword"),
+    ('echo "hello world"', '"hello'),
+    (r'sed "s/\\/x/g" f', "sed"),
+    ("echo café", "café"),
+    ("echo 日本語テスト", "日本語"),
+    ("printf 'a\tb'", "printf"),
+    ("git commit -m 'fix: don\\'t crash'", "crash"),
+    ("curl -H 'X-Auth: {\"k\":1}'", '{"k"'),
+    ("awk '{print $1}' f", "$1"),
+]
+
+
+class TestPrefilterNeverDropsAMatch:
+    """The raw-line prefilter is an optimisation; it must be invisible.
+
+    Skipping `json.loads` for lines that cannot match is where the speedup
+    comes from, but the raw line is *encoded*: `grep \\d` is stored as
+    `grep \\\\d`. Testing the raw text for the term as typed would silently
+    return nothing — and a search that quietly finds fewer results is far
+    worse than a slow one, because nobody notices.
+    """
+
+    @pytest.mark.parametrize(("command", "query"), ENCODED_COMMANDS)
+    def test_a_command_is_found_by_a_substring_of_itself(
+        self, tmp_mem_dir, command: str, query: str
+    ) -> None:
+        storage.append_command(make_command(command=command, repo=REPO))
+
+        results = search.search(query, current_repo=REPO)
+
+        assert [c.command for c, _ in results] == [command], (
+            f"prefilter dropped {command!r} when searching {query!r}"
+        )
+
+    def test_the_prefilter_matches_the_unfiltered_answer(self, tmp_mem_dir) -> None:
+        """Differential check: filtered and unfiltered reads agree exactly.
+
+        The parametrised cases above are the ones we thought of. This one
+        compares the optimised path against reading every line and filtering
+        in Python, over every command and every query, so a case nobody
+        thought of still fails the build.
+        """
+        for command, _ in ENCODED_COMMANDS:
+            storage.append_command(make_command(command=command, repo=REPO))
+
+        every_command = [c.command for c in storage.read_commands("_global")]
+        every_command += [
+            c.command for c in storage.read_commands(storage.sanitize_repo_name(REPO))
+        ]
+
+        for _, query in ENCODED_COMMANDS:
+            terms = [t for t in query.lower().split() if t]
+            unfiltered = sorted(
+                c for c in every_command if all(t in c.lower() for t in terms)
+            )
+            found = sorted(c.command for c, _ in search.search(query, REPO, limit=100))
+
+            assert found == unfiltered, f"prefilter changed the answer for {query!r}"
+
+
 class TestRankingIsNotJustFrequency:
     """Every signal other than frequency must be able to change the order.
 
