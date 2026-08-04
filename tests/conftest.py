@@ -1,6 +1,6 @@
 """Shared test fixtures for the mem test suite.
 
-Two invariants are enforced here for *every* test, whether it asks for them
+Three invariants are enforced here for *every* test, whether it asks for them
 or not:
 
 1. **No test may ever touch the developer's real ``~/.mem``.**  ``tmp_mem_dir``
@@ -12,10 +12,17 @@ or not:
    inference costs seconds per call and its output is non-deterministic, so
    the unit suite pretends the SDK is unavailable unless a test explicitly
    opts in with ``@pytest.mark.ai`` (deselected by default via ``addopts``).
+
+3. **No test may touch the developer's real Keychain.**  ``fake_keychain`` is
+   ``autouse`` and replaces the single function in ``mem.keychain`` that
+   spawns ``/usr/bin/security`` with an in-memory model of that binary. Tests
+   marked ``keychain_live`` (deselected by default) keep the real one, and
+   point it at a throwaway keychain file of their own.
 """
 
 from __future__ import annotations
 
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -24,6 +31,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from mem import keychain
 from mem import models
 from mem import patterns
 from mem import storage
@@ -120,6 +128,158 @@ def _no_real_inference(
     if "ai" in request.keywords:
         return
     monkeypatch.setattr(patterns, "_apple_fm_available", lambda: False)
+
+
+class FakeKeychain:
+    """An in-memory model of ``/usr/bin/security``, accurate where it matters.
+
+    Substituted for :func:`mem.keychain._run`, so everything above it — the
+    command line mem builds, the hex encoding, the parsing of the output — is
+    exercised for real. Only the process boundary is faked.
+
+    The fidelity that earns this its keep is :meth:`_render_password`: the
+    output format of ``find-generic-password -g`` is reproduced from output
+    recorded off the real binary, including the rule that decides between the
+    quoted and the hexadecimal form. mem's decoder is only as correct as that
+    rule, so guessing it here would make the round-trip tests agree with a
+    fiction.
+    """
+
+    #: Real `security -i` truncates an input line here and executes the head,
+    #: which is how a too-long value became a *silently truncated* Keychain
+    #: item. mem must never hand it a line this long.
+    MAX_LINE = 4096
+
+    def __init__(self) -> None:
+        self.items: dict[tuple[str, str], bytes] = {}
+        #: Every (argv, stdin) pair, so tests can assert what reached the
+        #: process table.
+        self.calls: list[tuple[list[str], bytes]] = []
+        #: When set, every operation fails with this message — a locked
+        #: keychain, or a user who clicked Deny.
+        self.failure: str | None = None
+
+    # -- helpers ----------------------------------------------------------
+
+    def secret(self, name: str, service: str = keychain.SERVICE) -> str | None:
+        """The stored value for a variable, decoded, or None."""
+        raw = self.items.get((service, name))
+        return None if raw is None else raw.decode("utf-8")
+
+    @staticmethod
+    def _render_password(data: bytes) -> bytes:
+        """Reproduce what ``find-generic-password -g`` writes to stderr."""
+        if not data:
+            return b"password: \n"
+        # Verified against the real tool: a backslash forces the hex form even
+        # though it is printable, while a double quote does not.
+        printable = all(0x20 <= b <= 0x7E and b != 0x5C for b in data)
+        if printable:
+            return b'password: "' + data + b'"\n'
+        escaped = bytearray()
+        for byte in data:
+            if 0x20 <= byte <= 0x7E and byte != 0x5C:
+                escaped.append(byte)
+            else:
+                escaped += f"\\{byte:03o}".encode("ascii")
+        return b"password: 0x" + data.hex().upper().encode() + b'  "' + escaped + b'"\n'
+
+    @staticmethod
+    def _not_found() -> tuple[int, bytes, bytes]:
+        return (
+            44,
+            b"",
+            b"security: SecKeychainSearchCopyNext: The specified item could "
+            b"not be found in the keychain.\n",
+        )
+
+    # -- the fake binary --------------------------------------------------
+
+    def run(self, argv: list[str], stdin: bytes = b"") -> tuple[int, bytes, bytes]:
+        """Stand in for :func:`mem.keychain._run`."""
+        self.calls.append((list(argv), stdin))
+        if self.failure is not None:
+            return 1, b"", f"security: {self.failure}\n".encode()
+
+        if argv[1:] == ["-i"]:
+            line = stdin.decode("utf-8").rstrip("\n")
+            assert len(line) <= self.MAX_LINE, (
+                "mem sent security a command line long enough to be truncated "
+                "and half-executed"
+            )
+            return self._interactive(shlex.split(line))
+        return self._command(argv[1:])
+
+    def _interactive(self, tokens: list[str]) -> tuple[int, bytes, bytes]:
+        assert tokens[0] == "add-generic-password", tokens
+        opts = self._options(tokens[1:])
+        service, account = opts["-s"], opts["-a"]
+        if "-X" in opts:
+            data = bytes.fromhex(opts["-X"])
+        else:
+            data = opts.get("-w", "").encode("utf-8")
+        if (service, account) in self.items and "-U" not in opts:
+            return 1, b"", b"security: The specified item already exists.\n"
+        self.items[(service, account)] = data
+        return 0, b"", b""
+
+    def _command(self, tokens: list[str]) -> tuple[int, bytes, bytes]:
+        verb, opts = tokens[0], self._options(tokens[1:])
+        key = (opts["-s"], opts["-a"])
+        if verb == "find-generic-password":
+            if key not in self.items:
+                return self._not_found()
+            return 0, b'keychain: "fake"\n', self._render_password(self.items[key])
+        if verb == "delete-generic-password":
+            if key not in self.items:
+                return self._not_found()
+            del self.items[key]
+            return 0, b"password has been deleted.\n", b""
+        raise AssertionError(f"unexpected security command: {verb}")
+
+    @staticmethod
+    def _options(tokens: list[str]) -> dict[str, str]:
+        """Parse `security`'s flags, keeping value-less flags like -U and -g."""
+        opts: dict[str, str] = {}
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if not token.startswith("-"):
+                opts.setdefault("keychain", token)
+                i += 1
+            elif token in {"-U", "-g", "-w"} and (
+                i + 1 >= len(tokens) or tokens[i + 1].startswith("-")
+            ):
+                opts[token] = ""
+                i += 1
+            elif token in {"-s", "-a", "-l", "-X", "-w"}:
+                opts[token] = tokens[i + 1]
+                i += 2
+            else:
+                opts[token] = ""
+                i += 1
+        return opts
+
+
+@pytest.fixture(autouse=True)
+def fake_keychain(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> FakeKeychain:
+    """Keep ``/usr/bin/security`` away from the developer's login keychain.
+
+    Autouse for the same reason ``tmp_mem_dir`` is: a test that forgot to ask
+    for isolation would not fail, it would quietly write the fixture's fake
+    tokens into the real Keychain and leave them there. The default suite must
+    be runnable on a laptop without side effects.
+
+    Tests marked ``keychain_live`` keep the real subprocess — they are
+    deselected by default and supply their own throwaway keychain.
+    """
+    fake = FakeKeychain()
+    if "keychain_live" not in request.keywords:
+        monkeypatch.delenv(keychain.KEYCHAIN_ENV, raising=False)
+        monkeypatch.setattr(keychain, "_run", fake.run)
+    return fake
 
 
 @pytest.fixture

@@ -2,8 +2,9 @@
 resolution status, and AI credential detection.
 
 `variables.py` is the module where secrets live: values pulled from the
-persistent store (`~/.mem/vars.json`), from the environment, or typed by the
-user at a hidden prompt are handed to the shell that `mem run` spawns. They
+persistent store (the macOS Keychain since ADR-009, indexed by
+`~/.mem/vars.json`), from the environment, or typed by the user at a hidden
+prompt are handed to the shell that `mem run` spawns. They
 reach it through the child's environment and are expanded by the shell —
 never spliced into the command text, which is what made every value a
 potential injection. This file pins down the two properties that matter:
@@ -373,6 +374,33 @@ class TestResolutionChain:
         )
         prompt.assert_not_called()
 
+    def test_a_store_entry_without_a_value_is_not_a_resolution(self) -> None:
+        """Contract: an unreadable Keychain value falls through, silently sane.
+
+        Since ADR-009 the store index knows a variable's *name* without
+        necessarily being able to produce its value — a locked Keychain, a
+        declined prompt, an item deleted in Keychain Access. Treating the
+        entry as resolved would export the string "None" into the child
+        environment; the value has to come from somewhere real instead.
+        """
+        resolved = variables.resolve_variables(
+            [_decl("API_TOKEN", default="fallback")],
+            inline_args={},
+            stored_vars={"API_TOKEN": StoredVariable(value=None)},
+            allow_prompt=False,
+        )
+        assert resolved == {"API_TOKEN": ("fallback", "default")}
+
+    def test_a_store_entry_with_a_value_still_wins(self) -> None:
+        """The other half of the same contract: a loaded value resolves."""
+        resolved = variables.resolve_variables(
+            [_decl("API_TOKEN", default="fallback")],
+            inline_args={},
+            stored_vars=_store(API_TOKEN="real"),
+            allow_prompt=False,
+        )
+        assert resolved == {"API_TOKEN": ("real", "store")}
+
 
 # ---------------------------------------------------------------------------
 # 3. Substitution: prefix collisions and escapes
@@ -687,7 +715,13 @@ class TestCommandInjection:
 
 
 class TestVarsFilePermissions:
-    """Contract: the file holding secrets is never readable by other users."""
+    """Contract: the vars file is never readable by other users.
+
+    Still load-bearing after ADR-009 moved the values into the Keychain: the
+    file keeps the list of variable *names*, which is worth keeping private on
+    its own, and it holds real cleartext for any entry whose migration has not
+    succeeded yet.
+    """
 
     def test_vars_file_is_owner_only(self, tmp_mem_dir: Path) -> None:
         """Contract: vars.json ends up at mode 0600."""

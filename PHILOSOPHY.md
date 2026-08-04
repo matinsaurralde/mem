@@ -61,6 +61,13 @@ shell conventions.
   and never a second write path — deleting it loses nothing
   ([ADR-005](docs/decisions/005-derived-index-jsonl-source-of-truth.md)).
   Any storage whose loss would lose user data is forbidden.
+- One exception, and only one: a **credential** is held by the OS
+  keychain rather than by a file mem writes
+  ([ADR-010](docs/decisions/010-keychain-for-variable-values.md)).
+  It is still a single source of truth, it is still readable without
+  mem (`security find-generic-password`, Keychain Access), and mem
+  keeps no copy of it. A secret is the one kind of data where
+  "you can `cat` it" is a defect and not a feature.
 - CLI output supports both human-readable (default) and JSON
   (`--json`) formats.
 - mem reads from stdin and writes results to stdout; errors
@@ -144,6 +151,12 @@ never silently.
   "no second source of truth". A local, derived, rebuildable index
   is permitted; storage whose loss would lose user data is not.
   See [ADR-005](docs/decisions/005-derived-index-jsonl-source-of-truth.md).
+- **2026-08-04** — Principle III: one carve-out for credentials. Values
+  set with `mem vars` live in the macOS Keychain, encrypted at rest,
+  instead of in plaintext JSON — because "human-readable" is the wrong
+  guarantee for an API token, and 0600 stops other users but not
+  backups, sync folders, or anything else running as you.
+  See [ADR-010](docs/decisions/010-keychain-for-variable-values.md).
 - **2026-08-04** — Principle I: strengthened. Explicitly no sockets,
   no listeners, no localhost, and no transitive networking
   dependencies; stdio pipes are explicitly not networking.

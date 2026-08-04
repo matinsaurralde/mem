@@ -464,7 +464,12 @@ class TestFilesystemContainment:
             ["stats"],
             ["save", "echo hi", "--comment", "greeting"],
             ["list"],
-            ["vars", "set", "TOKEN", "abc"],
+            # `vars set` is deliberately absent: since ADR-009 it writes the
+            # value into the macOS Keychain, and this test runs a real
+            # subprocess, so it would file a token in the developer's own
+            # login keychain — outside this fake HOME, where the containment
+            # assertions below cannot even see it. It is covered by the
+            # stubbed unit tests and by the `keychain_live` suite.
             ["vars", "list"],
             ["--version"],
         ]

@@ -234,7 +234,7 @@ Parse inline VAR=VALUE arguments
 Resolve all variables upfront (before any execution):
     1. Inline arguments  ← highest priority
     2. Shell environment (os.environ)
-    3. Persistent store (~/.mem/vars.json)
+    3. Persistent store (macOS Keychain, indexed by ~/.mem/vars.json)
     4. Default value (from --var at save time)
     5. Interactive prompt ← last resort
     ▼
@@ -324,13 +324,19 @@ Execute commands with substituted values
 }
 ```
 
-### Variable Store (`vars.json`)
+### Variable Store (`vars.json` + macOS Keychain)
+
+An index, not a vault. The values are Keychain items under the service
+`mem-cli-vars` with the variable name as the account
+([ADR-010](docs/decisions/010-keychain-for-variable-values.md)); `value` is
+`null` for every entry mem writes, and a non-null one is a pre-ADR-010
+plaintext value awaiting migration.
 
 ```json
 {
   "vars": {
-    "API_TOKEN": { "value": "sk-abc123...", "last_used": 1709600000 },
-    "DB_HOST": { "value": "staging.db.internal", "last_used": 1709500000 }
+    "API_TOKEN": { "value": null, "last_used": 1709600000, "backend": "keychain" },
+    "DB_HOST": { "value": null, "last_used": 1709500000, "backend": "keychain" }
   }
 }
 ```
@@ -398,6 +404,10 @@ Design points:
 - **Four read-only tools**, and nothing that executes a command.
 - **The access flag is read per request**, so `mem agent disable` takes effect
   without restarting the client.
+
+`backend` is derived from the absence of `value` on every read, never trusted
+from the file — so an entry cannot claim to be encrypted while holding a
+secret.
 
 ## Session Boundary Detection
 
