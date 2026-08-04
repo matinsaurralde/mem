@@ -21,7 +21,7 @@ Technical overview of how mem works under the hood.
 │  mem list          mem session      mem stats            │
 │  mem forget        mem export       mem import           │
 │  mem group *       mem saved *      mem vars *           │
-│  mem init <shell>                                       │
+│  mem init <shell>  mem agent *      mem mcp              │
 │  mem _capture (hidden)  mem _sync (hidden)              │
 └───┬────────────┬──────────┬──────────┬──────────────────┘
     │            │          │          │
@@ -63,6 +63,8 @@ Technical overview of how mem works under the hood.
 │    repos/                                               │
 │      myapp.json      vars.json            .sync_counter │
 │    _global.json      .session_state.json                │
+│                                                         │
+│  agent.json          agent-audit.jsonl                  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -332,6 +334,70 @@ Execute commands with substituted values
   }
 }
 ```
+
+### Agent Access Flag (`agent.json`)
+
+```json
+{
+  "enabled": false,
+  "updated_at": 1709600000
+}
+```
+
+Absent, unreadable or unparseable all mean `enabled: false`. A privacy switch
+must fail closed — the one thing it may never do is grant access because it
+could not read the answer.
+
+### Agent Audit Entry (`agent-audit.jsonl`)
+
+```json
+{
+  "ts": 1709600000,
+  "tool": "search_history",
+  "arguments": { "query": "kubectl prod" },
+  "results": 4,
+  "ok": true,
+  "error": null
+}
+```
+
+`arguments` is redacted before it is written: an agent can put a secret in a
+query string, and an audit log that records secrets is a second copy of the
+thing the audit exists to protect. The file is append-only and is never
+rotated; `mem forget` is the only thing that removes lines from it.
+
+## MCP Server (stdio)
+
+```
+Claude Code / Claude Desktop
+       │  spawns `mem mcp`, keeps the pipe open
+       ▼
+  stdin  ──→ newline-delimited JSON-RPC 2.0 ──→ mem.mcp.serve()
+                                                    │
+                                    ┌───────────────┼───────────────┐
+                                    ▼               ▼               ▼
+                             agent.json      search / groups    audit append
+                            (opt-in gate)      (read-only)     (agent-audit)
+                                    │
+                                    ▼
+                            redact_secrets()  ← single choke point
+                                    │
+  stdout ←── one JSON-RPC frame per line ←──────────┘
+```
+
+Design points:
+
+- **Stdio only.** No socket, no listener, no localhost port. The HTTP/SSE
+  transport is not implemented — "only on loopback" is still a listener.
+- **No MCP SDK dependency.** The official Python SDK pulls uvicorn, starlette
+  and httpx into a project whose first principle is that it never imports a
+  networking stack. The protocol is hand-rolled in `src/mem/mcp.py`.
+- **stdout is the wire.** `serve()` rebinds `sys.stdout` to stderr for its
+  whole lifetime, so a stray `print`, a Rich console write, or a
+  corrupted-JSONL warning becomes a diagnostic rather than a corrupt frame.
+- **Four read-only tools**, and nothing that executes a command.
+- **The access flag is read per request**, so `mem agent disable` takes effect
+  without restarting the client.
 
 ## Session Boundary Detection
 

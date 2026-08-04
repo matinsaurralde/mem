@@ -252,6 +252,73 @@ Replaying a session executes each command with per-command confirmation.
 
 ---
 
+## AI agents (MCP)
+
+mem can lend your shell memory to an AI agent — Claude Code, Claude Desktop, or
+anything else that speaks MCP — so it stops guessing at commands you have
+already run a hundred times.
+
+**It is off until you turn it on.**
+
+```bash
+mem agent status                 # disabled by default
+mem agent enable                 # opt in
+mem agent log                    # what an agent asked for, and when
+mem agent disable                # revoke — takes effect on the next request
+```
+
+### Register the server
+
+Claude Code:
+
+```bash
+claude mcp add mem -- mem mcp
+```
+
+Claude Desktop (`claude_desktop_config.json`) or a project-level `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mem": {
+      "command": "mem",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+That is the whole configuration. `mem mcp` speaks JSON-RPC 2.0 over stdin and
+stdout — there is no port, no URL and no token, because there is no server
+listening for anything. Run it by hand and it will simply wait on stdin.
+
+### What an agent can see
+
+| Tool | What it answers |
+|---|---|
+| `search_history` | How *you* actually run a tool in this repo — real flags, real hosts |
+| `list_runbooks` | Which named groups you have curated |
+| `get_runbook` | The ordered commands of one runbook, with your comments |
+| `recent_failures` | What broke recently, and what you ran next to fix it |
+
+Read-only, all four. **No tool executes anything.** An agent gets the *text* of
+a command to propose to you; you still press Enter.
+
+### What it cannot see
+
+- Anything, until `mem agent enable`.
+- Credentials: every string leaving mem passes through redaction first — AWS
+  keys, bearer tokens and JWTs, `PGPASSWORD=`, `curl -u user:pass`,
+  `--token=`, private key blobs, `.env`-style assignments and vendor tokens
+  (`ghp_`, `xox…`, `sk-…`, `AKIA…`) come out as `[REDACTED]`.
+- Your stored variable values (`~/.mem/vars.json`) — they are never exposed;
+  a runbook shows `$API_TOKEN`, never the token.
+
+Every request is appended to `~/.mem/agent-audit.jsonl`, redacted, and shown by
+`mem agent log`. `mem forget` scrubs that file too.
+
+---
+
 ## Other commands
 
 ```bash
@@ -314,6 +381,8 @@ beside them, is rebuilt from them, and is safe to delete:
       myapp.json             # repo-scoped groups and saved commands
     _global.json             # global groups and saved commands
   vars.json                  # persistent variable store (0600 permissions)
+  agent.json                 # AI agent access flag (off unless you enabled it)
+  agent-audit.jsonl          # append-only record of every agent request
 ```
 
 The suffix on a repo file is the first 8 hex characters of the sha256 of the
@@ -348,6 +417,7 @@ Data rotation happens automatically in the background:
 - Zero cloud dependencies — fully offline, always
 - On-device AI only — runs on your Mac's neural engine
 - Plain text storage — no proprietary formats, you own your data
+- Agent access off by default — opt-in, redacted and audited ([MCP](#ai-agents-mcp))
 
 Read more in [PHILOSOPHY.md](PHILOSOPHY.md).
 

@@ -1378,6 +1378,128 @@ def vars_clear(yes: bool) -> None:
     err_console.print(f"Cleared {count} variable(s).")
 
 
+# --- Agent access (MCP) ---
+
+
+@cli.group(name="agent")
+def agent_grp() -> None:
+    """Control AI agent access to your history over MCP."""
+
+
+@agent_grp.command(name="enable")
+def agent_enable() -> None:
+    """Allow AI agents to read your history over MCP (stdio only)."""
+    import time
+
+    from mem import storage
+    from mem.models import AgentAccess
+
+    storage.write_agent_access(AgentAccess(enabled=True, updated_at=int(time.time())))
+    err_console.print("Agent access enabled.")
+    err_console.print(
+        "  Agents can now read search results, runbooks and recent failures."
+    )
+    err_console.print("  Credentials are redacted; every request is logged.")
+    err_console.print("  Review with: mem agent log     Revoke with: mem agent disable")
+
+
+@agent_grp.command(name="disable")
+def agent_disable() -> None:
+    """Revoke AI agent access to your history."""
+    import time
+
+    from mem import storage
+    from mem.models import AgentAccess
+
+    storage.write_agent_access(AgentAccess(enabled=False, updated_at=int(time.time())))
+    err_console.print("Agent access disabled.")
+    err_console.print("  Takes effect on the next request — no restart needed.")
+
+
+@agent_grp.command(name="status")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def agent_status(as_json: bool) -> None:
+    """Show whether agents may read your history, and what they asked for."""
+    from mem import storage
+
+    access = storage.read_agent_access()
+    requests = sum(1 for _ in storage.read_agent_audit())
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "enabled": access.enabled,
+                    "updated_at": access.updated_at,
+                    "requests": requests,
+                    "audit_log": str(storage.agent_audit_file()),
+                },
+                indent=2,
+            )
+        )
+        return
+
+    state = "[green]enabled[/]" if access.enabled else "[yellow]disabled[/]"
+    console.print(f"\nAgent access: {state}")
+    if access.updated_at:
+        console.print(f"  Changed {_relative_time(access.updated_at)}")
+    console.print(f"  Requests logged: {requests}")
+    console.print(f"  Audit log: {safe(storage.agent_audit_file())}")
+    if not access.enabled:
+        console.print("\n  Enable with: mem agent enable")
+    console.print()
+
+
+@agent_grp.command(name="log")
+@click.option("--limit", "-n", default=20, help="Maximum entries (newest last)")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def agent_log(limit: int, as_json: bool) -> None:
+    """Show what an agent asked mem for, and when."""
+    from mem import storage
+
+    entries = list(storage.read_agent_audit())[-limit:] if limit > 0 else []
+
+    if as_json:
+        click.echo(json.dumps([e.model_dump() for e in entries], indent=2))
+        return
+
+    if not entries:
+        console.print("No agent requests recorded.")
+        return
+
+    console.print("\nAgent requests")
+    for entry in entries:
+        args = " ".join(f"{k}={v}" for k, v in entry.arguments.items())
+        mark = "[green]✓[/]" if entry.ok else "[yellow]✗[/]"
+        detail = entry.error or f"{entry.results} result(s)"
+        console.print(
+            f"  {mark} {safe(fit(entry.tool, 16))} {safe(fit(args, 40))}"
+            f"  [dim]{_relative_time(entry.ts)} — {safe(detail)}[/]"
+        )
+    console.print()
+
+
+@cli.command(name="mcp")
+def mcp_cmd() -> None:
+    """Serve mem to AI agents over MCP (JSON-RPC 2.0 on stdin/stdout).
+
+    Started by an MCP client, not by hand — stdin and stdout are the
+    protocol channel, so running it in a terminal just looks like a hang.
+    Register it with Claude Code:
+
+        claude mcp add mem -- mem mcp
+
+    or paste into claude_desktop_config.json / .mcp.json:
+
+        {"mcpServers": {"mem": {"command": "mem", "args": ["mcp"]}}}
+
+    Access is off until `mem agent enable`.
+    """
+    from mem.mcp import main
+
+    sys.exit(main())
+
+
 # The background sync is spawned as a subprocess, and `python -m mem.cli` only
 # imports this module — without this block it defined every command and exited
 # 0 having run none of them. That is how pattern extraction and data retention
