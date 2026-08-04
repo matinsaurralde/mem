@@ -1327,3 +1327,108 @@ class TestLegacyRepoFileMigration:
         """_global has no path to hash, so its filename does not change."""
         assert storage.resolve_repo_key(None) == "_global"
         assert storage.legacy_repo_key(None) == "_global"
+
+
+class TestForgetReachesEverywhereItScrubs:
+    """`mem forget` must not be blind to five of the six places it scrubs.
+
+    `forget_commands` scrubs command history, saved commands and runbooks,
+    stored variables, extracted patterns, sessions and the agent audit log —
+    but the CLI previewed only the first one and returned early when it found
+    nothing there. Text that lived *only* in a saved runbook, a variable or
+    the audit log was reported as absent and left in place. A command saved
+    but never run was unforgettable, which is exactly the case where somebody
+    has pasted a credential.
+    """
+
+    SECRET = "sk-live-forgettable-000"
+
+    def test_a_secret_only_in_a_saved_runbook_is_found(self, tmp_mem_dir):
+        from mem import groups
+
+        groups.save_command(
+            storage.GROUPS_GLOBAL_FILE,
+            f"curl -H 'Authorization: Bearer {self.SECRET}'",
+            group_name="ops",
+        )
+
+        assert "saved commands and runbooks" in storage.forget_targets(self.SECRET)
+
+    def test_a_secret_only_in_a_stored_variable_is_found(self, tmp_mem_dir):
+        storage.write_vars_file(
+            VarsFile(vars={"TOKEN": StoredVariable(value=self.SECRET)})
+        )
+
+        assert "stored variables" in storage.forget_targets(self.SECRET)
+
+    def test_a_secret_only_in_an_extracted_pattern_is_found(self, tmp_mem_dir):
+        storage.write_patterns(
+            PatternFile(
+                tool="curl",
+                patterns=[
+                    CommandPattern(
+                        pattern="curl <url>",
+                        example=f"curl -u {self.SECRET}",
+                        frequency=1,
+                    )
+                ],
+                last_updated=0,
+            )
+        )
+
+        assert "extracted patterns" in storage.forget_targets(self.SECRET)
+
+    def test_a_secret_only_in_a_session_is_found(self, tmp_mem_dir):
+        storage.append_session(
+            WorkSession(
+                id="s1",
+                summary="deploy",
+                started_at=1,
+                ended_at=2,
+                dir="/w",
+                commands=[f"deploy --key {self.SECRET}"],
+            )
+        )
+
+        assert "past work sessions" in storage.forget_targets(self.SECRET)
+
+    def test_nothing_stored_means_nothing_reported(self, tmp_mem_dir):
+        assert storage.forget_targets("never-typed-this") == []
+
+    def test_a_query_containing_json_metacharacters_is_still_found(self, tmp_mem_dir):
+        """The files are *encoded*; a raw grep would miss quotes and backslashes.
+
+        Answering "not here" about text that is here is the worst mistake this
+        code can make, so the search decodes the JSON instead of scanning it.
+        """
+        tricky = 'pass"word\\with\\slashes'
+        storage.write_vars_file(VarsFile(vars={"P": StoredVariable(value=tricky)}))
+
+        raw = storage.VARS_FILE.read_text(encoding="utf-8")
+
+        assert tricky not in raw, "fixture is stale — the value is not escaped on disk"
+        assert "stored variables" in storage.forget_targets(tricky)
+
+    def test_a_damaged_file_is_still_searched(self, tmp_mem_dir):
+        """A file that will not parse may still be holding the text."""
+        storage.ensure_dirs()
+        storage.VARS_FILE.write_text(
+            '{"vars": {broken ' + self.SECRET, encoding="utf-8"
+        )
+
+        assert "stored variables" in storage.forget_targets(self.SECRET)
+
+    def test_forgetting_actually_removes_it_from_the_runbook(self, tmp_mem_dir):
+        """End to end: the reported place is a place `forget_commands` clears."""
+        from mem import groups
+
+        groups.save_command(
+            storage.GROUPS_GLOBAL_FILE,
+            f"curl -H 'Bearer {self.SECRET}'",
+            group_name="ops",
+        )
+        assert storage.forget_targets(self.SECRET)
+
+        storage.forget_commands(self.SECRET)
+
+        assert storage.forget_targets(self.SECRET) == []

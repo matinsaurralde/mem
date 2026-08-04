@@ -370,8 +370,27 @@ def forget(query: str, yes: bool) -> None:
         if query in cmd.command:
             matches.append(cmd)
 
-    if not matches:
+    # Command history is only one of the six places `forget_commands` scrubs.
+    # Previewing just that one meant text living solely in a saved runbook, a
+    # stored variable, an extracted pattern or the agent audit log made this
+    # command print "no matching commands found" and return without scrubbing
+    # anything — so a command saved but never run was unforgettable, which is
+    # exactly where someone is most likely to have pasted a credential.
+    elsewhere = storage.forget_targets(query)
+
+    if not matches and not elsewhere:
         console.print("No matching commands found.")
+        return
+
+    if not matches:
+        console.print("No matching commands, but the text is still stored in:")
+        for place in elsewhere:
+            console.print(f"  [dim]·[/] {place}")
+        console.print()
+        if not yes and not click.confirm("Delete it from there?", default=False):
+            return
+        storage.forget_commands(query)
+        console.print("Deleted.")
         return
 
     if not yes:
