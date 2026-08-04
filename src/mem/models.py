@@ -6,7 +6,7 @@ generation schema for Apple FM SDK — one model definition serves three purpose
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class CapturedCommand(BaseModel):
@@ -129,14 +129,47 @@ class VarDeclaration(BaseModel):
 
 
 class StoredVariable(BaseModel):
-    """A persistent variable value managed by mem vars."""
+    """One entry in the persistent variable store managed by ``mem vars``.
 
-    value: str
+    Two shapes exist, and which one an entry has *is* which backend holds its
+    value:
+
+    - ``value is None`` — the value lives in the macOS Keychain, under the
+      service :data:`mem.keychain.SERVICE` and the variable's name as the
+      account. This is what every entry written since ADR-009 looks like.
+    - ``value`` is a string — a plaintext value from before the Keychain
+      backend existed, or one whose migration has not succeeded yet. Still
+      readable so nobody's setup breaks, never written by mem today.
+
+    Deriving the backend from the absence of the value, rather than storing a
+    ``backend`` field next to it, is deliberate: a field could disagree with
+    reality, and the dangerous direction of that disagreement is a file that
+    claims "keychain" while holding the secret in cleartext. Here the claim
+    *is* the absence, so it cannot lie.
+    """
+
+    value: str | None = None
     last_used: int = 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def backend(self) -> str:
+        """Where this variable's value actually lives.
+
+        Serialized into vars.json so the file explains itself to anyone who
+        cats it, and recomputed on every read — an entry hand-edited to say
+        ``"backend": "keychain"`` while carrying a value is still treated,
+        correctly, as plaintext.
+        """
+        return "plaintext" if self.value is not None else "keychain"
 
 
 class VarsFile(BaseModel):
-    """On-disk representation of the persistent variable store."""
+    """On-disk representation of the persistent variable store.
+
+    An index, not a vault: it records which variables exist and when they were
+    last used. Since ADR-009 the values themselves are in the Keychain.
+    """
 
     vars: dict[str, StoredVariable] = {}
 

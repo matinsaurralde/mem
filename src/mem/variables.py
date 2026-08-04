@@ -128,14 +128,16 @@ def resolve_variables(
     Priority chain (highest to lowest):
     1. Inline arguments (VAR=VALUE passed to mem run)
     2. Shell environment (os.environ)
-    3. Persistent store (~/.mem/vars.json)
+    3. Persistent store (`mem vars`, values held in the macOS Keychain)
     4. Default value (from --var NAME=default at save time)
     5. Interactive prompt (visible input)
 
     Args:
         var_list: Variable declarations from the saved command.
         inline_args: {name: value} from command-line VAR=VALUE pairs.
-        stored_vars: dict from VarsFile.vars (StoredVariable objects with .value).
+        stored_vars: {name: StoredVariable} with values already loaded, as
+            returned by storage.load_var_values(). Entries whose value is
+            None are ignored — the store knows the name but not the value.
         prompt_fn: Optional callable for prompting (for testing). Defaults to click.prompt.
         allow_prompt: If False, skip interactive prompts (for --yes mode).
 
@@ -166,9 +168,15 @@ def resolve_variables(
             resolved[name] = (env_val, "environment")
             continue
 
-        # Priority 3: persistent store
-        if name in stored_vars:
-            resolved[name] = (stored_vars[name].value, "store")
+        # Priority 3: persistent store.
+        #
+        # A value of None means the store holds the name but the value could
+        # not be loaded from the Keychain. Treating that as a resolution would
+        # export the string "None" into the child environment; falling through
+        # is what lets the default, or the user, still supply a real value.
+        stored = stored_vars.get(name)
+        if stored is not None and stored.value is not None:
+            resolved[name] = (stored.value, "store")
             continue
 
         # Priority 4: default value (resolve immediately when prompts disabled)
@@ -218,6 +226,10 @@ def check_resolution_status(
 
     Only checks non-interactive sources (env, store, default).
     Does not check inline args (those are runtime-only).
+
+    ``stored_vars`` is the store *index* — membership only. Printing a listing
+    deliberately does not read the Keychain: that would be one subprocess per
+    variable, and potentially an OS authorization prompt, for a tick mark.
     """
     if stored_vars is None:
         stored_vars = {}

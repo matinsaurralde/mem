@@ -21,9 +21,9 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, NamedTuple, Sequence
 
-from mem import _fsutil
+from mem import _fsutil, keychain
 from mem._fsutil import FILE_MODE, atomic_write
 from mem._fsutil import fsync_dir as _fsync_dir
 from mem._fsutil import harden_dir as _harden_dir
@@ -34,6 +34,7 @@ from mem.models import (
     CapturedCommand,
     GroupFile,
     PatternFile,
+    StoredVariable,
     VarsFile,
     WorkSession,
 )
@@ -767,22 +768,63 @@ def _entry_matches(entry: dict, query: str) -> bool:
 
 
 def _scrub_vars(query: str) -> None:
-    """Drop stored variables whose value is the forgotten text."""
+    """Drop stored variables whose name or value carries the forgotten text.
+
+    Matching a Keychain-backed variable costs one ``security`` call per
+    variable, because the value is no longer in the file mem can read. That is
+    the right trade here and only here: ``mem forget`` is rare, explicit and
+    destructive, and the alternative — matching on names alone — would report
+    success while leaving the secret in the Keychain.
+
+    A value that cannot be read is kept and reported. Deleting it would throw
+    away a credential on a guess, and silently keeping it would let ``forget``
+    claim a completeness it did not achieve.
+    """
     if not VARS_FILE.exists():
         return
-    try:
-        data = json.loads(VARS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    data = read_vars_file()
+    doomed: list[str] = []
+    for name, entry in sorted(data.vars.items()):
+        if query in name:
+            doomed.append(name)
+            continue
+        if entry.value is not None:
+            if query in entry.value:
+                doomed.append(name)
+            continue
+        try:
+            value = keychain.get_secret(name)
+        except keychain.KeychainError as exc:
+            print(
+                f"warning: could not check variable {name} against the "
+                f"Keychain, leaving it in place ({exc})",
+                file=sys.stderr,
+            )
+            continue
+        if value is not None and query in value:
+            doomed.append(name)
+
+    if not doomed:
         return
-    stored = data.get("vars", {})
-    kept = {
-        name: v
-        for name, v in stored.items()
-        if query not in v.get("value", "") and query not in name
-    }
-    if len(kept) != len(stored):
-        data["vars"] = kept
-        atomic_write(VARS_FILE, json.dumps(data, indent=2, ensure_ascii=False))
+
+    scrubbed = False
+    for name in doomed:
+        try:
+            keychain.delete_secret(name)
+        except keychain.KeychainError as exc:
+            # The index entry stays too. A name the user can still see is a
+            # name they can retry `mem vars remove` on; dropping it would
+            # leave the secret in the Keychain with nothing pointing at it.
+            print(
+                f"warning: could not remove variable {name} from the "
+                f"Keychain, leaving it in place ({exc})",
+                file=sys.stderr,
+            )
+            continue
+        data.vars.pop(name, None)
+        scrubbed = True
+    if scrubbed:
+        write_vars_file(data)
 
 
 def _scrub_session_state(query: str) -> None:
@@ -1022,10 +1064,14 @@ def write_group_file(path: Path, data: GroupFile) -> None:
 
 
 def read_vars_file() -> VarsFile:
-    """Read the persistent variable store. Returns empty if missing/corrupted.
+    """Read the persistent variable *index*. Returns empty if missing/corrupted.
 
     The vars file is global (not repo-scoped) because credentials and
     environment values typically apply across projects.
+
+    Since ADR-009 this file records which variables exist, not what they are:
+    values live in the macOS Keychain. Entries written by an older mem still
+    carry their value here until :func:`migrate_vars_to_keychain` moves it.
     """
     if not VARS_FILE.exists():
         return VarsFile()
@@ -1040,10 +1086,12 @@ def read_vars_file() -> VarsFile:
 
 
 def write_vars_file(data: VarsFile) -> None:
-    """Write the variable store atomically with restrictive permissions.
+    """Write the variable index atomically with restrictive permissions.
 
-    Uses tmp+rename pattern for crash safety. File permissions are set
-    to 0600 (owner read/write only) since the file may contain secrets.
+    Uses tmp+rename pattern for crash safety. File permissions are still 0600:
+    the values are in the Keychain now, but the list of variable names is
+    itself worth keeping to ourselves, and any not-yet-migrated entry is a
+    cleartext secret.
     """
     with exclusive_lock():
         atomic_write(VARS_FILE, data.model_dump_json(indent=2))
@@ -1127,3 +1175,226 @@ def read_agent_audit() -> Iterator[AgentAuditEntry]:
                     f"warning: skipping corrupted line {line_num} in {path.name}",
                     file=sys.stderr,
                 )
+
+
+class MigrationResult(NamedTuple):
+    """Outcome of one :func:`migrate_vars_to_keychain` pass.
+
+    ``failed`` names the variables still sitting in plaintext, and ``reason``
+    says why in one line the user can act on. Both are empty on the ordinary
+    path where there was nothing left to move.
+    """
+
+    migrated: int
+    failed: list[str]
+    reason: str | None
+
+
+def migrate_vars_to_keychain() -> MigrationResult:
+    """Move any plaintext values out of vars.json and into the Keychain.
+
+    Idempotent and cheap to call on every command that touches the store: the
+    steady state is one file read that finds nothing to do.
+
+    The ordering is the whole point. For each variable mem writes the value to
+    the Keychain, **reads it back and compares**, and only then rewrites
+    vars.json without it. A crash, a locked keychain or a declined prompt at
+    any point leaves the plaintext copy exactly where it was, and the next
+    invocation tries again — so the worst case is a value that is still
+    insecure, never a value that is gone.
+
+    The re-read under the lock before rewriting guards the other direction: a
+    concurrent ``mem vars set`` may have replaced the entry since this pass
+    started, and dropping *its* value because we confirmed the old one would
+    be data loss disguised as a migration.
+    """
+    pending = {
+        name: sv.value
+        for name, sv in read_vars_file().vars.items()
+        if sv.value is not None
+    }
+    if not pending:
+        return MigrationResult(0, [], None)
+
+    reason = keychain.unavailable_reason()
+    if reason is not None:
+        return MigrationResult(0, sorted(pending), reason)
+
+    migrated = 0
+    failed: list[str] = []
+    failure_reason: str | None = None
+
+    for name, value in sorted(pending.items()):
+        try:
+            keychain.set_secret(name, value)
+            if keychain.get_secret(name) != value:
+                raise keychain.KeychainError(
+                    "the Keychain did not return the value just written"
+                )
+        except keychain.KeychainError as exc:
+            failed.append(name)
+            failure_reason = failure_reason or str(exc)
+            continue
+
+        with exclusive_lock():
+            current = read_vars_file()
+            entry = current.vars.get(name)
+            if entry is None or entry.value != value:
+                continue  # someone changed it under us; leave it to the next pass
+            current.vars[name] = StoredVariable(value=None, last_used=entry.last_used)
+            write_vars_file(current)
+        migrated += 1
+
+    return MigrationResult(migrated, failed, failure_reason)
+
+
+def set_var(name: str, value: str, last_used: int = 0) -> None:
+    """Store a variable's value in the Keychain and record it in the index.
+
+    Raises :class:`mem.keychain.KeychainError` — and writes nothing at all —
+    when the Keychain refuses. There is deliberately no plaintext fallback:
+    mem promising encryption and quietly delivering a 0600 file would be worse
+    than the plaintext store it replaced, because the user would stop
+    worrying about it.
+
+    The value is read back before the index is touched, so a name only appears
+    in ``mem vars list`` once the value behind it is genuinely retrievable.
+    """
+    keychain.set_secret(name, value)
+    if keychain.get_secret(name) != value:
+        raise keychain.KeychainError(
+            f"Keychain accepted {name} but did not return the same value; "
+            f"refusing to record it"
+        )
+    with exclusive_lock():
+        data = read_vars_file()
+        data.vars[name] = StoredVariable(value=None, last_used=last_used)
+        write_vars_file(data)
+
+
+def get_var_value(name: str) -> str | None:
+    """Value of one stored variable, from whichever backend holds it.
+
+    None means "mem has no such variable". A Keychain that exists but cannot
+    be read raises instead — see :func:`mem.keychain.get_secret` for why that
+    distinction is worth keeping.
+    """
+    entry = read_vars_file().vars.get(name)
+    if entry is None:
+        return None
+    if entry.value is not None:
+        return entry.value  # not migrated yet
+    return keychain.get_secret(name)
+
+
+def load_var_values(
+    names: Iterable[str],
+) -> tuple[dict[str, StoredVariable], list[str]]:
+    """Load the store entries for *names*, with their values filled in.
+
+    Returns ``(entries, unreadable)``. Only the requested names are fetched:
+    every Keychain read is a subprocess and potentially an OS prompt, so
+    listing a runbook must not pull every secret the user owns out of the
+    Keychain just to print a tick next to a name.
+
+    A variable whose value cannot be read is reported in ``unreadable`` and
+    left out of ``entries``, so resolution falls through to the next source
+    instead of silently substituting an empty string. The caller is expected
+    to tell the user.
+    """
+    stored = read_vars_file().vars
+    entries: dict[str, StoredVariable] = {}
+    unreadable: list[str] = []
+    for name in names:
+        entry = stored.get(name)
+        if entry is None:
+            continue
+        if entry.value is not None:
+            entries[name] = entry
+            continue
+        try:
+            value = keychain.get_secret(name)
+        except keychain.KeychainError:
+            unreadable.append(name)
+            continue
+        if value is None:
+            # In the index but not in the Keychain: the item was deleted with
+            # Keychain Access, or a migration was interrupted after the file
+            # was rewritten. Not resolvable, and not silently an empty value.
+            unreadable.append(name)
+            continue
+        entries[name] = StoredVariable(value=value, last_used=entry.last_used)
+    return entries, unreadable
+
+
+def touch_vars(names: Iterable[str], when: int) -> None:
+    """Record that variables were just used.
+
+    Read-modify-write of the index under the lock, so two shells running
+    runbooks at the same moment cannot lose each other's entries — the
+    previous version of this read outside the lock and wrote the whole file
+    back.
+    """
+    names = list(names)
+    if not names:
+        return
+    with exclusive_lock():
+        data = read_vars_file()
+        changed = False
+        for name in names:
+            entry = data.vars.get(name)
+            if entry is not None:
+                entry.last_used = when
+                changed = True
+        if changed:
+            write_vars_file(data)
+
+
+def remove_var(name: str) -> bool:
+    """Delete a variable from both the Keychain and the index.
+
+    False if the index had no such name. The Keychain item is deleted even
+    then: an item that exists there but not in the index is exactly what a
+    half-failed earlier removal leaves behind, and leaving a secret
+    encrypted-but-orphaned would make ``mem vars remove`` a lie.
+
+    The Keychain goes first so that a Keychain failure leaves the store
+    untouched and the error honest. The reverse order can only ever fail
+    *after* the name is gone from the index, which is the state where the user
+    is told the secret was removed and it was not.
+    """
+    keychain.delete_secret(name)
+    with exclusive_lock():
+        data = read_vars_file()
+        existed = name in data.vars
+        if existed:
+            del data.vars[name]
+            write_vars_file(data)
+    return existed
+
+
+def clear_vars() -> tuple[int, list[str]]:
+    """Delete every stored variable from both backends.
+
+    Returns ``(removed, kept)``, where ``kept`` names the variables whose
+    Keychain item could not be deleted. Those keep their index entry too: a
+    name the user can still see and retry is recoverable, an orphaned secret
+    with nothing pointing at it is not.
+    """
+    data = read_vars_file()
+    removed: list[str] = []
+    kept: list[str] = []
+    for name in sorted(data.vars):
+        try:
+            keychain.delete_secret(name)
+        except keychain.KeychainError:
+            kept.append(name)
+            continue
+        removed.append(name)
+
+    with exclusive_lock():
+        current = read_vars_file()
+        for name in removed:
+            current.vars.pop(name, None)
+        write_vars_file(current)
+    return len(removed), kept

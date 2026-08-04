@@ -76,10 +76,11 @@ testpaths = ["tests"]
 # Branch coverage is on because mem is mostly branching I/O: line coverage
 # reports a `try/except` or an `if not path.exists()` as covered after the
 # happy path alone, which is exactly the half that never gets tested.
-addopts = "-m 'not ai and not perf' --cov=mem --cov-branch --cov-report=term-missing"
+addopts = "-m 'not ai and not perf and not keychain_live' --cov=mem --cov-branch --cov-report=term-missing"
 markers = [
     "ai: requires the real on-device Apple Foundation Models runtime (deselected by default)",
     "perf: wall-clock measurement, too machine-dependent to gate a PR (deselected by default)",
+    "keychain_live: drives the REAL /usr/bin/security against a throwaway keychain (deselected by default)",
 ]
 
 [tool.coverage.run]

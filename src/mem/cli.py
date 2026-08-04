@@ -811,8 +811,17 @@ def run(
 
     resolved: dict[str, tuple[str, str]] = {}
     if all_vars:
-        vars_data = storage.read_vars_file()
         unique_var_list = list(all_vars.values())
+
+        _sync_var_backend()
+        # Only the variables this run actually needs are fetched from the
+        # Keychain — one subprocess each, and each one a possible OS prompt.
+        stored, unreadable = storage.load_var_values(all_vars)
+        if unreadable:
+            err_console.print(
+                f"[yellow]![/] Could not read from the Keychain: "
+                f"{safe(', '.join(sorted(unreadable)))}"
+            )
 
         # In --yes mode, check for unresolvable variables first
         if yes:
@@ -822,7 +831,7 @@ def run(
                 if (
                     name not in inline_args
                     and name not in os.environ
-                    and name not in vars_data.vars
+                    and name not in stored
                     and v.default is None
                 ):
                     missing.append(name)
@@ -836,7 +845,7 @@ def run(
         resolved = resolve_variables(
             unique_var_list,
             inline_args,
-            vars_data.vars,
+            stored,
             allow_prompt=not yes,
         )
 
@@ -845,14 +854,10 @@ def run(
         for name, (value, source) in resolved.items():
             console.print(f"  [green]✓[/] ${safe(name)} resolved from {safe(source)}")
 
-        # Update last_used for store-resolved variables
-        updated_store = False
-        for name, (_value, source) in resolved.items():
-            if source == "store" and name in vars_data.vars:
-                vars_data.vars[name].last_used = int(time.time())
-                updated_store = True
-        if updated_store:
-            storage.write_vars_file(vars_data)
+        storage.touch_vars(
+            [name for name, (_value, source) in resolved.items() if source == "store"],
+            int(time.time()),
+        )
 
     # Values are handed to the shell through the environment and the command is
     # run verbatim, so the shell expands $NAME itself. Splicing the value into
@@ -1467,9 +1472,39 @@ def saved_edit(global_flag: bool) -> None:
 # --- Variable store subgroup ---
 
 
+def _sync_var_backend() -> None:
+    """Move any plaintext values into the Keychain, out loud.
+
+    Called from every command that reads or writes the variable store, so the
+    migration happens on first use rather than waiting for a maintenance
+    command nobody runs. It is a no-op — one file read — once the store is
+    clean.
+
+    Both outcomes are announced on stderr, every time. A silent migration
+    would leave the user unable to tell whether their tokens are encrypted,
+    and a silent *failure* would leave them believing they are when they are
+    not. stderr keeps it out of `--json` and out of pipes.
+    """
+    from mem import storage
+
+    result = storage.migrate_vars_to_keychain()
+    if result.migrated:
+        err_console.print(
+            f"Moved {result.migrated} variable value(s) from "
+            f"{safe(str(storage.VARS_FILE))} into the macOS Keychain."
+        )
+    if result.failed:
+        err_console.print(
+            f"[yellow]![/] {len(result.failed)} variable(s) are still stored "
+            f"in plaintext: {safe(', '.join(result.failed))}"
+        )
+        if result.reason:
+            err_console.print(f"  {safe(result.reason)}")
+
+
 @cli.group(name="vars")
 def vars_grp() -> None:
-    """Manage persistent variables."""
+    """Manage persistent variables (values live in the macOS Keychain)."""
 
 
 @vars_grp.command(name="set")
@@ -1479,37 +1514,66 @@ def vars_set(name: str, value: str | None) -> None:
     """Set a persistent variable value."""
     import re
 
-    from mem import storage
-    from mem.models import StoredVariable
+    from mem import keychain, storage
 
     if not re.match(r"^[A-Z][A-Z0-9_]+$", name):
         raise click.ClickException(
             f"Invalid variable name '{name}'. Use uppercase letters, digits, and underscores."
         )
 
-    if value is None:
-        value = click.prompt(f"  Value for {name}")
+    _sync_var_backend()
 
-    vars_data = storage.read_vars_file()
-    vars_data.vars[name] = StoredVariable(value=value, last_used=0)
-    storage.write_vars_file(vars_data)
-    err_console.print(f"Stored: {name}")
+    if value is None:
+        # hide_input because this is the prompt the README promises behaves
+        # "like sudo" — and because the value typed here is, by construction,
+        # the one the user did not want on their screen.
+        value = click.prompt(f"  Value for {name}", hide_input=True)
+    else:
+        # mem's own argv is the last place a secret can still leak: it was
+        # visible to `ps` while this command ran, and mem's shell hook has
+        # already written the whole command line into the history it keeps.
+        err_console.print(
+            "[dim]Note: the value was passed on the command line, so it is in "
+            "your shell history and was visible to `ps`. Run `mem vars set "
+            f"{safe(name)}` with no value for a hidden prompt.[/]"
+        )
+
+    try:
+        storage.set_var(name, value)
+    except keychain.KeychainError as exc:
+        # No plaintext fallback, deliberately. See ADR-009: a tool that
+        # promises the Keychain and quietly writes cleartext when the Keychain
+        # is busy is more dangerous than one that never promised anything.
+        raise click.ClickException(
+            f"{exc}\nNothing was stored. mem does not fall back to writing "
+            f"the value in plaintext."
+        ) from exc
+
+    err_console.print(f"Stored: {name} (macOS Keychain)")
 
 
 @vars_grp.command(name="list")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def vars_list(as_json: bool) -> None:
     """List stored variables (values hidden)."""
-    from mem import storage
+    from mem import keychain, storage
+
+    _sync_var_backend()
 
     vars_data = storage.read_vars_file()
+    reason = keychain.unavailable_reason()
 
     if as_json:
         output = {
             "variables": [
-                {"name": name, "last_used": sv.last_used}
+                {"name": name, "backend": sv.backend, "last_used": sv.last_used}
                 for name, sv in sorted(vars_data.vars.items())
-            ]
+            ],
+            "keychain": {
+                "service": keychain.SERVICE,
+                "available": reason is None,
+                "reason": reason,
+            },
         }
         click.echo(json.dumps(output, indent=2))
         return
@@ -1518,13 +1582,32 @@ def vars_list(as_json: bool) -> None:
         console.print("No stored variables.")
         return
 
-    console.print("\nStored variables (values hidden)")
+    console.print(
+        f"\nStored variables (values hidden) — macOS Keychain, service "
+        f"'{safe(keychain.SERVICE)}'"
+    )
+    plaintext = 0
     for name, sv in sorted(vars_data.vars.items()):
         if sv.last_used == 0:
             time_str = "never used"
         else:
             time_str = f"last used {_relative_time(sv.last_used)}"
-        console.print(f"  {safe(fit(name, 20))} {time_str}")
+        # The backend is printed per value, not once for the store: a store
+        # that is half migrated is exactly the case where a single header
+        # would be a lie about half the rows.
+        if sv.backend == "plaintext":
+            plaintext += 1
+            where = "[yellow]plaintext[/]"
+        else:
+            where = "[green]keychain [/]"
+        console.print(f"  {safe(fit(name, 20))} {where}  {time_str}")
+
+    if plaintext:
+        console.print(
+            f"\n  [yellow]![/] {plaintext} value(s) are still in plaintext in "
+            f"{safe(str(storage.VARS_FILE))}."
+        )
+        console.print(f"  {safe(reason or 'Run any mem vars command to retry.')}")
     console.print()
 
 
@@ -1532,15 +1615,16 @@ def vars_list(as_json: bool) -> None:
 @click.argument("name")
 def vars_remove(name: str) -> None:
     """Remove a stored variable."""
-    from mem import storage
+    from mem import keychain, storage
 
-    vars_data = storage.read_vars_file()
+    try:
+        existed = storage.remove_var(name)
+    except keychain.KeychainError as exc:
+        raise click.ClickException(f"{exc}\n'{name}' was left untouched.") from exc
 
-    if name not in vars_data.vars:
+    if not existed:
         raise click.ClickException(f"Variable '{name}' not found.")
 
-    del vars_data.vars[name]
-    storage.write_vars_file(vars_data)
     err_console.print(f"Removed: {name}")
 
 
@@ -1562,10 +1646,15 @@ def vars_clear(yes: bool) -> None:
         if not click.confirm(f"Clear all {count} variable(s)?", default=False):
             return
 
-    from mem.models import VarsFile
-
-    storage.write_vars_file(VarsFile())
-    err_console.print(f"Cleared {count} variable(s).")
+    removed, kept = storage.clear_vars()
+    err_console.print(f"Cleared {removed} variable(s).")
+    if kept:
+        raise click.ClickException(
+            "Could not remove from the Keychain: "
+            + ", ".join(kept)
+            + "\nThey are still listed by `mem vars list`; try again once the "
+            "Keychain is unlocked."
+        )
 
 
 # --- Agent access (MCP) ---
