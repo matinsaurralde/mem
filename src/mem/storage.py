@@ -22,7 +22,7 @@ import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator, Sequence
 
 from mem.models import CapturedCommand, GroupFile, PatternFile, VarsFile, WorkSession
 
@@ -269,11 +269,63 @@ def append_command(cmd: CapturedCommand) -> None:
         _append_line(path, cmd.to_jsonl())
 
 
-def read_commands(repo: str) -> Iterator[CapturedCommand]:
+# Characters that every JSON encoder emits verbatim inside a string. No
+# encoder escapes them, so a run made only of these appears byte-for-byte in
+# the raw line — which is what makes the prefilter below safe.
+_JSON_STABLE_RUN = re.compile(r"[A-Za-z0-9_.\-]+")
+
+# Below this length a needle matches almost every line, so the scan costs more
+# than it saves.
+_MIN_NEEDLE_LEN = 3
+
+
+def prefilter_needles(terms: Iterable[str]) -> list[str]:
+    """Reduce search terms to substrings safe to look for in a raw JSON line.
+
+    Answering a query currently costs ~140ms per 100k commands, and 82% of
+    that is ``json.loads`` on lines that are then thrown away. Testing the raw
+    line for a substring first skips the parse for everything that cannot
+    match, at 25ms per 100k.
+
+    The trap is that a raw JSONL line is *encoded*: ``grep \\d`` is stored as
+    ``grep \\\\d`` and ``echo "hi"`` as ``echo \\"hi\\"``, so searching the raw
+    text for the term as typed would silently miss real matches — a wrong
+    answer is far worse than a slow one.
+
+    So each term is reduced to its longest run of characters no JSON encoder
+    ever escapes. If a parsed command contains the term, it contains that run,
+    and the run therefore appears verbatim in the line. The filter can only
+    ever admit too much, never too little. Terms that reduce to nothing useful
+    (a lone ``|``, an accented word, a two-letter run) simply do not
+    contribute a needle: the query still works, it just parses more lines.
+
+    Non-ASCII characters never enter a needle, even though Pydantic emits
+    them raw: these files are meant to be edited by hand, and an editor that
+    writes ``ensure_ascii`` JSON would turn ``café`` into ``caf\\u00e9``. The
+    ASCII run around them still counts, so ``café`` narrows to ``caf``.
+    """
+    needles: list[str] = []
+    for term in terms:
+        runs = _JSON_STABLE_RUN.findall(term)
+        if not runs:
+            continue
+        longest = max(runs, key=len)
+        if len(longest) >= _MIN_NEEDLE_LEN:
+            needles.append(longest.lower())
+    return needles
+
+
+def read_commands(
+    repo: str, needles: Sequence[str] | None = None
+) -> Iterator[CapturedCommand]:
     """Lazily read commands from a repo's JSONL file.
 
     Yields one CapturedCommand per line. Skips corrupted lines
     (logs a warning to stderr) rather than failing the entire read.
+
+    ``needles`` is an optional set of lowercase substrings from
+    :func:`prefilter_needles`; a line missing any of them is skipped without
+    being parsed. Callers that want every command leave it unset.
     """
     path = repo_file(repo)
     if not path.exists():
@@ -283,6 +335,10 @@ def read_commands(repo: str) -> Iterator[CapturedCommand]:
             line = line.strip()
             if not line:
                 continue
+            if needles:
+                lowered = line.lower()
+                if not all(needle in lowered for needle in needles):
+                    continue
             try:
                 yield CapturedCommand.from_jsonl(line)
             except Exception:

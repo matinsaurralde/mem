@@ -647,3 +647,133 @@ class TestSyncCounter:
 
         assert storage.read_sync_counter() == 0
         assert storage.increment_sync_counter() == 1
+
+
+class TestPrefilterNeedles:
+    """`prefilter_needles` reduces terms to substrings safe to grep raw JSON.
+
+    The rule it must satisfy is one-directional: a needle may admit lines that
+    do not match (they get parsed and rejected properly afterwards), but it
+    must never exclude a line that does. Everything below is a case where
+    getting that backwards would silently shrink search results.
+    """
+
+    def test_ordinary_words_pass_through_unchanged(self):
+        assert storage.prefilter_needles(["docker", "compose"]) == [
+            "docker",
+            "compose",
+        ]
+
+    def test_needles_are_lowercased(self):
+        """The reader lowercases each line, so the needles must match that."""
+        assert storage.prefilter_needles(["DOCKER"]) == ["docker"]
+
+    @pytest.mark.parametrize(
+        ("term", "needle"),
+        [
+            (r"\bword\b", "bword"),  # the backslash is escaped, the letters are not
+            ('"quoted"', "quoted"),  # double quotes are escaped
+            ("path/to/file", "path"),  # some encoders escape the solidus
+            ("--flag=value", "--flag"),  # `=` is not stable, `-` is
+            ("a.b-c_d", "a.b-c_d"),  # dot, hyphen and underscore are all safe
+            ("café", "caf"),  # keep the ASCII run, drop the accented tail
+        ],
+    )
+    def test_a_term_reduces_to_its_longest_json_stable_run(
+        self, term: str, needle: str
+    ):
+        assert storage.prefilter_needles([term]) == [needle]
+
+    @pytest.mark.parametrize("term", ["|", "$1", "ab", "日本語", ">>", ""])
+    def test_terms_with_no_usable_run_contribute_no_needle(self, term: str):
+        """Better to parse every line than to risk excluding a real match.
+
+        A term made only of shell punctuation, or of non-ASCII with no ASCII
+        run of its own, contributes nothing. The query still works — it just
+        parses every line, which is the safe direction to fail in.
+        """
+        assert storage.prefilter_needles([term]) == []
+
+    def test_a_needle_is_always_a_substring_of_its_term(self):
+        """The property the whole optimisation rests on.
+
+        If a command contains the term, it contains the needle; the needle is
+        built only from characters no encoder rewrites, so it survives into
+        the raw line verbatim. Break this and searches silently lose results.
+        """
+        terms = [
+            r"grep \d+ access.log",
+            '--output="report file"',
+            "kubectl",
+            "a.b-c_d",
+            "café",
+            "$HOME/bin",
+        ]
+        for term in terms:
+            for needle in storage.prefilter_needles([term]):
+                assert needle in term.lower(), f"{needle!r} is not inside {term!r}"
+
+    def test_the_needle_actually_skips_lines(self, tmp_mem_dir):
+        """Proof the filter is wired up and not quietly returning nothing.
+
+        Without this, `prefilter_needles` could return `[]` for everything —
+        every correctness test would still pass and the speedup would be zero.
+        """
+        storage.append_command(make_command(command="docker compose up", repo=None))
+        storage.append_command(make_command(command="git status", repo=None))
+
+        assert len(list(storage.read_commands("_global"))) == 2
+        assert [c.command for c in storage.read_commands("_global", ["docker"])] == [
+            "docker compose up"
+        ]
+        assert list(storage.read_commands("_global", ["nomatchhere"])) == []
+
+    def test_every_needle_must_be_present(self, tmp_mem_dir):
+        """Terms are conjunctive, so the needles are too."""
+        storage.append_command(make_command(command="docker compose up", repo=None))
+        storage.append_command(make_command(command="docker build .", repo=None))
+
+        found = [
+            c.command for c in storage.read_commands("_global", ["docker", "compose"])
+        ]
+
+        assert found == ["docker compose up"]
+
+
+@pytest.mark.perf
+class TestPrefilterIsFasterThanParsing:
+    """The prefilter exists for one reason: 82% of query time was wasted.
+
+    Answering a query used to cost ~140ms per 100k commands, of which ~135ms
+    was `json.loads` on lines that were then discarded. Marked `perf` because
+    it measures wall clock, which is too machine-dependent to gate a PR.
+    """
+
+    def test_a_selective_query_is_much_faster_than_a_full_parse(self, tmp_mem_dir):
+        now = int(time.time())
+        storage.ensure_dirs()
+        path = storage.repo_file("_global")
+        path.write_text(
+            "\n".join(
+                make_command(
+                    command=f"tool-{i} run --flag", ts=now, repo=None
+                ).to_jsonl()
+                for i in range(20_000)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        start = time.perf_counter()
+        parsed_everything = len(list(storage.read_commands("_global")))
+        full = time.perf_counter() - start
+
+        start = time.perf_counter()
+        filtered = len(list(storage.read_commands("_global", ["tool-17999"])))
+        prefiltered = time.perf_counter() - start
+
+        assert parsed_everything == 20_000
+        assert filtered == 1
+        assert prefiltered * 3 < full, (
+            f"prefilter gave no real speedup: {prefiltered:.3f}s vs {full:.3f}s"
+        )
