@@ -37,7 +37,41 @@ they produced no error, no warning, and a zero exit code.
   executes anything. Access is off until `mem agent enable`, everything
   returned passes through credential redaction, and `mem agent log` shows what
   was asked for.
-- Four architecture decision records in `docs/decisions/`, including a
+- **Ranking that learns from what you select.** Choosing a result in the
+  finder is the one moment you say, unambiguously, which command you meant,
+  and it was being thrown away. Simulated over 1,200 retrieval episodes,
+  recording it moves MRR@10 from **0.039 to 0.575** and top-1 from 0.025 to
+  0.477 — one selection is enough to move a command past one you happen to
+  have run twenty times. Picks fade with a three-week half-life. With none
+  recorded, ranking is byte-for-byte what it was.
+- **`mem fix`** — what fixed this last time. Mined deterministically from
+  exit codes and sequence, with no AI. The obvious approach (string
+  similarity) turns out to be *inverted*: `pytest test_a.py` →
+  `pytest test_b.py` scores 0.94 and is not a fix, while `git psuh` →
+  `git push` scores 0.88 and is. Corrections are matched by edit shape
+  instead: 19/20 recall at 0/20 false positives on hand-built pairs.
+- **Variable values live in the macOS Keychain**, encrypted at rest, handed
+  to `/usr/bin/security` over a pipe and never on a command line where `ps`
+  would show them. Existing plaintext values migrate on first use, and mem
+  refuses to store rather than fall back to plaintext.
+- **Search answers questions, not just substrings.** Asking *"what did I use
+  to fix the certificate"* used to return nothing, because the words people
+  describe a command with are not the words in the command. A curated map of
+  224 concepts takes recall@5 over natural-language questions from **0/10 to
+  10/10** — four times better than an on-device language model at the same
+  task, and 500 times faster. It is a JSON file you can read, grep, correct
+  and extend at `~/.mem/concepts.json`; expansion only runs when the literal
+  search found nothing, so a literal match is never displaced.
+- **`mem promote`** — the runbooks you already have but never wrote down.
+  Groups are the most original thing in mem and were barely used, because
+  creating one meant remembering to run `mem save`. This reads the sequences
+  you actually repeat and offers to save them, with the varying argument
+  already extracted as a `$VAR`. Calibrated on 8 synthetic 45-day histories:
+  **0 false positives out of 40** in the default five-candidate listing, with
+  88% of planted workflows surfaced. Roughly 1 in 8 suggestions is the
+  `git add; commit; push` class — real repetition, poor runbook — which mem
+  cannot distinguish and says so.
+- Architecture decision records in `docs/decisions/`, including a
   constitutional amendment permitting a *derived*, discardable index while the
   JSONL files remain the only source of truth.
 
@@ -86,6 +120,11 @@ they produced no error, no warning, and a zero exit code.
 - **Concurrent writes could lose data**, history files were world-readable,
   `forget` could resurrect what it deleted, and `rotate` deleted entries it
   could not date.
+- **The query prefilter matched JSON field names, not commands.** Every
+  record contains the names `command`, `dir`, `exit_code`, `duration_ms`,
+  `session` and `imported`, so searching for `exit` matched all 20,000 lines
+  of a test store and the filter saved nothing — for exactly the queries most
+  likely to be slow. Never a wrong answer, which is why it went unseen.
 - Multi-word queries silently dropped every word but the first. `-g` meant
   `--global` in nine commands and `--group` in two. Rich markup in a command
   could corrupt or crash the display. `--yes` could still hang on a prompt.
@@ -126,6 +165,23 @@ Stated because they are real, not because they are comfortable:
   surrounding context, or attached short flags like `mysql -phunter2` — `-p`
   collides with `mkdir -p`. There is deliberately no entropy heuristic; it
   would eat git SHAs and base64.
+- Selection-aware ranking is worth nothing until you have used the finder,
+  and `~/.mem/picks.json` is now the one file here that cannot be rebuilt
+  from your history. A mistaken selection is learned; the three-week decay
+  bounds how long it costs, but there is no undo for a single pick.
+- A machine with no usable Keychain can no longer store new variables at all.
+  That is deliberate — the alternative is writing plaintext while promising
+  encryption — but it is a capability that used to work.
+- `security` truncates a command longer than ~4 KB **and executes the
+  remainder**, so mem refuses to store a value that large rather than
+  silently keeping a truncated secret.
+- `mem fix` needs explicit exit codes on both sides of a pair, so imported
+  shell history — which records none — is invisible to it. It also misses
+  corrections that rewrite the command rather than adjust it: `git push` →
+  `git pull --rebase` is a known miss.
+- The 0.039 → 0.575 ranking figure is a simulation over 1,200 synthetic
+  retrieval episodes, not a field study. The distribution is realistic and
+  the mechanism is sound, but nobody has measured it against a real week.
 
 ## [0.4.1] and earlier
 
