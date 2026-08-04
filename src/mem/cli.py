@@ -357,6 +357,118 @@ def stats(as_json: bool) -> None:
             console.print(f"  {i:>2}  {safe(fit(repo, 20))} {count}")
 
 
+def _fix_line(label: str, style: str, value: str) -> Text:
+    """Build one ``label  command`` row of ``mem fix`` output.
+
+    Returned as a :class:`Text` rather than a markup string because the value
+    is a command line the user once typed: ``sed 's/[a-z]//'`` interpolated
+    into a styled string loses its character class, and a bare ``[/]`` raises
+    ``MarkupError``. Only the label carries a style; the data carries none.
+    """
+    line = Text("  ")
+    line.append(f"{label:<9}", style=style)
+    line.append(value)
+    return line
+
+
+def _fix_detail(text: str) -> Text:
+    """Build a dim continuation line, aligned under the command above it."""
+    return Text(f"           {text}", style="dim")
+
+
+def _fix_evidence(entry: dict) -> str:
+    """Summarize how strong the evidence for one fix is, in words.
+
+    The count is the claim. "Seen once" and "seen 6 times" are different
+    statements about the same kind of observation, and a tool that renders
+    them identically is overstating the first one.
+    """
+    times = entry["occurrences"]
+    seen = "seen once" if times == 1 else f"seen {times} times"
+    parts = [seen, f"last worked {_relative_time(entry['last_seen'])}"]
+    if entry["confidence"] == "weak":
+        parts.append("one observation only")
+    return " · ".join(parts)
+
+
+@cli.command(name="fix")
+@click.argument("query", nargs=-1)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--limit", "-n", default=3, help="Maximum fixes to show")
+def fix_cmd(query: tuple[str, ...], as_json: bool, limit: int) -> None:
+    """Show what fixed a failed command the last time it broke.
+
+    With no argument, answers for the most recent failure in this repository
+    (falling back to the whole store). With a QUERY, answers for the most
+    recent failure matching every word given.
+
+    The answer is mined from exit codes already in your history: a command
+    that failed, and the near-variant of it that succeeded seconds later. It
+    is printed, never executed — mem hands you the line and you decide.
+    """
+    from mem import fix as fix_mining
+
+    text = " ".join(query) if query else None
+    report = fix_mining.build_report(
+        query=text, current_repo=_current_repo(), limit=max(1, limit)
+    )
+    payload = fix_mining.report_payload(report)
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    failure = payload["failure"]
+    if failure is None:
+        # No invention: if nothing failed, there is nothing to say about it.
+        if text:
+            console.print(
+                f'No failed command matching "{safe(text)}" in mem\'s memory.'
+            )
+        else:
+            console.print("No failed commands captured yet — nothing to fix.")
+        return
+
+    console.print()
+    console.print(_fix_line("failed", "bold red", failure["command"]))
+    where = failure["repo"] or failure["dir"]
+    console.print(
+        _fix_detail(
+            f"exit {failure['exit_code']} · {_relative_time(failure['ts'])} · {where}"
+        )
+    )
+    console.print()
+
+    if not payload["fixes"]:
+        console.print(_fix_detail("mem has no record of anything fixing this."))
+        console.print()
+        return
+
+    best, *others = payload["fixes"]
+    console.print(_fix_line("fixed by", "bold green", best["command"]))
+    console.print(_fix_detail(_fix_evidence(best)))
+    if best["failed_since"]:
+        times = best["failed_since"]
+        console.print(
+            _fix_detail(
+                f"careful: this command has itself failed "
+                f"{times} time{'s' if times > 1 else ''} since."
+            )
+        )
+
+    if others:
+        console.print()
+        # Ranked, so "also tried" is genuinely the weaker evidence, not a
+        # second opinion of equal standing.
+        for entry in others:
+            console.print(_fix_line("also", "dim", entry["command"]))
+            console.print(_fix_detail(_fix_evidence(entry)))
+
+    console.print()
+    console.print(_fix_detail("mem does not run it for you. Read it, then decide."))
+    console.print()
+
+
 @cli.command()
 @click.argument("query")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
