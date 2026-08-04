@@ -53,3 +53,28 @@ _mem_precmd() {
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _mem_preexec
 add-zsh-hook precmd _mem_precmd
+
+# --- Ctrl+R ------------------------------------------------------------------
+#
+# The finder prints the chosen command to stdout and draws its interface on
+# /dev/tty, so the substitution below captures the choice and nothing else.
+# The command is placed on the command line, never executed: you get to read
+# it, edit it, and decide. A history search that runs things behind your back
+# is how people delete the wrong branch.
+#
+# Set MEM_NO_KEYBINDING=1 before loading this hook to keep zsh's own Ctrl+R.
+
+_mem_search_widget() {
+  local selected
+  selected=$(mem tui -- "$BUFFER" </dev/tty) || { zle reset-prompt; return 0; }
+  if [[ -n "$selected" ]]; then
+    BUFFER="$selected"
+    CURSOR=${#BUFFER}
+  fi
+  zle reset-prompt
+}
+
+if [[ -z "$MEM_NO_KEYBINDING" ]]; then
+  zle -N _mem_search_widget
+  bindkey '^R' _mem_search_widget
+fi

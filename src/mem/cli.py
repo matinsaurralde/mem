@@ -195,6 +195,24 @@ def init(shell: str) -> None:
     click.echo(read_hook(shell))
 
 
+@cli.command(
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("query", nargs=-1)
+def tui(query: tuple[str, ...]) -> None:
+    """Interactive history finder (bound to Ctrl+R by the shell hook).
+
+    Registered here so it shows up in ``mem --help`` and behaves like every
+    other subcommand. It is not normally reached through this path:
+    ``mem/_entry.py`` dispatches ``mem tui`` before Click is imported,
+    because the finder's entire latency budget is smaller than that import.
+    Reaching it through Click still works — it is just slower to appear.
+    """
+    from mem.tui import main as tui_main
+
+    sys.exit(tui_main(list(query)))
+
+
 @cli.command(name="_sync", hidden=True)
 def sync_cmd() -> None:
     """Internal: background pattern extraction and data rotation.
