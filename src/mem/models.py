@@ -10,15 +10,29 @@ from pydantic import BaseModel, Field
 
 
 class CapturedCommand(BaseModel):
-    """A single shell command captured by the shell hook."""
+    """A single shell command captured by the shell hook — or imported.
+
+    ``imported`` marks a command that came from an existing shell history
+    file (``mem import --from-shell-history``) rather than from the hook.
+    It defaults to ``False``, so every JSONL line written before the field
+    existed still validates and is correctly read back as hook-captured.
+
+    ``exit_code`` and ``duration_ms`` are ``None`` for imported commands.
+    A shell history file records neither, and there is no honest integer to
+    put there: ``0`` would claim every imported command succeeded, and a
+    ``0`` duration is indistinguishable from a genuinely fast command. They
+    also default to ``None`` so old lines — which always carry both — keep
+    validating unchanged.
+    """
 
     command: str
     ts: int
     dir: str
     repo: str | None = None
-    exit_code: int
-    duration_ms: int = Field(ge=0)
+    exit_code: int | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
     session: str | None = None
+    imported: bool = False
 
     def to_jsonl(self) -> str:
         """Serialize to a single JSONL line for append-only storage."""
