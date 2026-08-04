@@ -559,12 +559,24 @@ You type a command
 **Search scoring:**
 
 ```
-score = (frequency × 0.4) + (recency × 0.4) + (context × 0.2)
+score = (picks × 0.40) + (frequency × 0.21) + (recency × 0.21)
+      + (prefix × 0.09) + (context × 0.09)
 ```
 
-- **Frequency** — how often you've run this command
+- **Picks** — how often you chose this command in the finder, halving every
+  21 days. Weighted highest because it is the only signal that is not an
+  inference: it is you having already answered the question. Zero until you
+  use `Ctrl+R`, and with none recorded the ordering is exactly what the other
+  four produce on their own.
+- **Frequency** — how often you ran it: `log1p(n)/log1p(50)`, capped, so the
+  jump from 1 to 5 counts and one repeated command cannot own every result
 - **Recency** — exponential decay, 7-day half-life
-- **Context** — 1.0 same repo, 0.5 same directory prefix, 0.0 otherwise
+- **Prefix** — the command *starts with* your query, not merely contains it
+- **Context** — 1.0 same repo, 0.5 sibling directory, 0.0 otherwise
+
+Every feature is normalised to [0, 1] and the weights sum to 1, so a score
+reads as a fraction. If nothing matches literally, the
+[concept map](#search) expands the query — and only then.
 
 **AI features** use [Apple Foundation Models](https://developer.apple.com/machine-learning/api/) running entirely on your Mac's neural engine. No API keys, no cloud, no data leaves the machine. If Apple Intelligence isn't available, everything still works — you just don't get pattern extraction or credential detection.
 
@@ -591,7 +603,7 @@ beside them, is rebuilt from them, and is safe to delete:
       myapp.json             # repo-scoped groups and saved commands
     _global.json             # global groups and saved commands
   concepts.json              # your concept map, layered over the shipped one
-  vars.json                  # persistent variable store (0600 permissions)
+  vars.json                  # which variables exist (values are in the Keychain)
   agent.json                 # AI agent access flag (off unless you enabled it)
   agent-audit.jsonl          # append-only record of every agent request
 ```
@@ -627,7 +639,10 @@ Data rotation happens automatically in the background:
 - Zero telemetry — no analytics, no crash reports
 - Zero cloud dependencies — fully offline, always
 - On-device AI only — runs on your Mac's neural engine
-- Plain text storage — no proprietary formats, you own your data
+- Plain text storage — no proprietary formats, you own your data. The one
+  deliberate exception is variable *values*, which live in the macOS
+  Keychain: "readable with `cat`" is the wrong property for a password
+  ([ADR-010](docs/decisions/010-keychain-for-variable-values.md))
 - Agent access off by default — opt-in, redacted and audited ([MCP](#ai-agents-mcp))
 
 Read more in [PHILOSOPHY.md](PHILOSOPHY.md).

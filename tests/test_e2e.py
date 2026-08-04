@@ -600,3 +600,79 @@ class TestStartupCost:
             assert "mem" in result.stdout
 
         assert min(durations) < 0.5, f"mem --version took {min(durations):.3f}s"
+
+
+class TestDocumentationDoesNotDrift:
+    """Docs that state a formula the code no longer uses are worse than none.
+
+    Both `README.md` and `ARCHITECTURE.md` published
+    `score = frequency*0.4 + recency*0.4 + context*0.2` for two releases after
+    that formula stopped existing — through the fix that normalised it and the
+    feature that added two more terms. Nothing detects prose going stale, so
+    the checks that can be mechanical are made mechanical.
+    """
+
+    DOCS = ["README.md", "ARCHITECTURE.md", "PHILOSOPHY.md", "CHANGELOG.md"]
+
+    def test_every_adr_is_listed(self) -> None:
+        """A decision nobody can find from the index may as well not exist."""
+        index = (REPO_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        missing = [
+            path.name
+            for path in sorted((REPO_ROOT / "docs" / "decisions").glob("*.md"))
+            if path.name not in index
+        ]
+
+        assert not missing, f"ADRs not linked from ARCHITECTURE.md: {missing}"
+
+    def test_no_link_to_a_decision_record_is_broken(self) -> None:
+        import re
+
+        broken: list[tuple[str, str]] = []
+        for name in self.DOCS:
+            text = (REPO_ROOT / name).read_text(encoding="utf-8")
+            for match in re.finditer(r"\]\((docs/decisions/[^)]+)\)", text):
+                if not (REPO_ROOT / match.group(1)).exists():
+                    broken.append((name, match.group(1)))
+
+        assert not broken, f"broken ADR links: {broken}"
+
+    def test_the_published_scoring_formula_names_every_feature(self) -> None:
+        """The docs must not describe a ranking that stopped existing.
+
+        Checked against `mem.ranking`'s own weight constants rather than a
+        hard-coded list, so adding a sixth feature fails here until it is
+        written down.
+        """
+        from mem import ranking
+
+        features = [
+            name[2:].lower()
+            for name in dir(ranking)
+            if name.startswith("W_") and isinstance(getattr(ranking, name), float)
+        ]
+        assert features, "no weight constants found — did they get renamed?"
+
+        for name in ("README.md", "ARCHITECTURE.md"):
+            formula = self._formula_in(REPO_ROOT / name)
+            unmentioned = [f for f in features if f not in formula]
+            assert not unmentioned, (
+                f"{name} publishes a formula missing {unmentioned}; "
+                f"it is describing a ranking the code does not use:\n{formula}"
+            )
+
+    @staticmethod
+    def _formula_in(path: Path) -> str:
+        """The formula itself, not the prose around it.
+
+        Bounded at the first blank line after `score =`. An earlier version
+        took a fixed 400-character window, which reached far enough to include
+        the bullet list underneath — so the check passed against a formula
+        with a term deleted, because the term was still named in the prose.
+        Verified by deleting one.
+        """
+        text = path.read_text(encoding="utf-8").lower()
+        start = text.find("score =")
+        assert start != -1, f"{path.name} no longer shows the scoring formula"
+        end = text.find("\n\n", start)
+        return text[start : end if end != -1 else len(text)]
