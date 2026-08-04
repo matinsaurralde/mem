@@ -92,6 +92,13 @@ def tmp_mem_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr(storage, "SYNC_COUNTER_FILE", tmp_path / ".sync_counter")
     monkeypatch.setattr(storage, "VARS_FILE", tmp_path / "vars.json")
+
+    # `mem.picks` resolves its path per call and honours $MEM_DIR, because it
+    # is imported by the interactive finder and cannot reach into
+    # `mem.storage` (which would drag Pydantic into the fast path). Setting
+    # the variable puts pick counters in the same throwaway directory as
+    # everything else, instead of a second one nobody thinks to look in.
+    monkeypatch.setenv("MEM_DIR", str(tmp_path))
     return tmp_path
 
 

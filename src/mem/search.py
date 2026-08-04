@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from collections import Counter
 
-from mem import ranking, storage
+from mem import picks, ranking, storage
 from mem.models import CapturedCommand, CommandPattern, WorkSession
 
 
@@ -19,6 +19,7 @@ def score_command(
     query: str,
     current_repo: str | None,
     frequency: int,
+    pick_weight: float = 0.0,
 ) -> float:
     """Score a command for search relevance.
 
@@ -68,6 +69,7 @@ def score_command(
         current_repo=current_repo,
         frequency=frequency,
         now=time.time(),
+        pick_weight=pick_weight,
     )
 
 
@@ -148,10 +150,21 @@ def search(
     # Compute frequency per unique command string
     freq = Counter(cmd.command for cmd in all_commands)
 
+    # What the user has actually chosen before, decayed. Read once for the
+    # whole page rather than per candidate: it is one small file, and reading
+    # it inside the loop would turn a search into thousands of stat() calls.
+    pick_weights = picks.load()
+
     # Score and deduplicate — keep highest score per unique command
     best: dict[str, tuple[CapturedCommand, float]] = {}
     for cmd in all_commands:
-        s = score_command(cmd, query, current_repo, freq[cmd.command])
+        s = score_command(
+            cmd,
+            query,
+            current_repo,
+            freq[cmd.command],
+            pick_weights.get(cmd.command, 0.0),
+        )
         if cmd.command not in best or s > best[cmd.command][1]:
             best[cmd.command] = (cmd, s)
 

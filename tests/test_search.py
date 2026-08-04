@@ -45,6 +45,7 @@ def expected_score(
     recency: float,
     prefix: float,
     context: float,
+    picks: float = 0.0,
 ) -> float:
     """Re-derive the documented score from literal weights.
 
@@ -53,11 +54,18 @@ def expected_score(
     test cannot fail when that code changes.
     """
     normalized_frequency = min(1.0, math.log1p(frequency) / math.log1p(50))
-    return 0.35 * normalized_frequency + 0.35 * recency + 0.15 * prefix + 0.15 * context
+    normalized_picks = (1.0 - 2.0**-picks) if picks else 0.0
+    return (
+        0.40 * normalized_picks
+        + 0.21 * normalized_frequency
+        + 0.21 * recency
+        + 0.09 * prefix
+        + 0.09 * context
+    )
 
 
 class TestScoreFormula:
-    """0.35*frequency + 0.35*recency + 0.15*prefix + 0.15*context, all in [0,1].
+    """0.40*picks + 0.21*freq + 0.21*recency + 0.09*prefix + 0.09*context.
 
     These tests assert the numeric score, not just the resulting order.
     Order-only assertions are satisfied by many wrong formulas — for example

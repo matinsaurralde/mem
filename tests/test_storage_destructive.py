@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterator
 import pytest
 
 from conftest import make_command
-from mem import capture, patterns, search, storage
+from mem import _fsutil, capture, patterns, search, storage
 from mem.models import (
     CommandPattern,
     Group,
@@ -1264,7 +1264,10 @@ class TestLegacyRepoFileMigration:
         observed: dict[str, Any] = {"depth": None}
 
         def watching_replace(src: Any, dst: Any) -> Any:
-            observed["depth"] = storage._lock_depth
+            # The re-entrancy counter lives in `_fsutil` now: the lock is
+            # shared with modules that cannot import Pydantic, so both sides
+            # have to count the same depth or the nesting guard is fiction.
+            observed["depth"] = _fsutil._lock_depth
             return real_replace(src, dst)
 
         with pytest.MonkeyPatch.context() as hook:
