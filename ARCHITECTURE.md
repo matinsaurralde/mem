@@ -122,15 +122,21 @@ search.search("kubectl", current_repo="infra")
     ├── read other repo files
     │
     ▼
-Filter: substring match "kubectl" in command text
+Prefilter: needle test on the raw line's command span (skips json.loads)
     │
     ▼
-Score each match:
-    score = (frequency × 0.4) + (recency × 0.4) + (context × 0.2)
+Filter: every query term must appear in the command text
+    │   (if nothing matches, expand through the concept map and retry)
+    ▼
+Score each match (mem/ranking.py — stdlib only, shared with the finder):
+    score = (picks × 0.40) + (frequency × 0.21) + (recency × 0.21)
+          + (prefix × 0.09) + (context × 0.09)
     │
-    ├── frequency: count of identical commands
-    ├── recency: exp(-days × ln2/7), half-life 7 days
-    └── context: 1.0 same repo, 0.5 same prefix, 0.0 other
+    ├── picks:     1 - 2^-w over the finder's decayed selections, 21d half-life
+    ├── frequency: log1p(n)/log1p(50), capped at 1
+    ├── recency:   exp(-days × ln2/7), half-life 7 days
+    ├── prefix:    1.0 if the command starts with the query
+    └── context:   1.0 same repo, 0.5 sibling, 0.0 other
     │
     ▼
 Deduplicate by command string (keep highest score)
@@ -423,3 +429,10 @@ See `docs/decisions/` for detailed ADRs:
 - [002: Apple FM SDK for Patterns](docs/decisions/002-apple-fm-sdk-for-patterns.md)
 - [003: No Daemon, Background Subprocess Instead](docs/decisions/003-no-daemon.md)
 - [004: Per-Repository JSONL Files](docs/decisions/004-per-repo-jsonl.md)
+- [005: A Derived Index, With the JSONL as the Source of Truth](docs/decisions/005-derived-index-jsonl-source-of-truth.md)
+- [006: App Intents, Shortcuts and Spotlight — Evaluated and Deferred](docs/decisions/006-app-intents-shortcuts-spotlight-deferred.md)
+- [007: MCP Over Stdio, Never HTTP](docs/decisions/007-mcp-over-stdio-never-http.md)
+- [008: The Interactive TUI Is Built on the Standard Library](docs/decisions/008-stdlib-tui.md)
+- [009: Ranking Learns From What You Select](docs/decisions/009-ranking-learns-from-selections.md)
+- [010: The Keychain for Variable Values](docs/decisions/010-keychain-for-variable-values.md)
+- [011: A Concept Map, Not Embeddings](docs/decisions/011-concept-map-over-embeddings.md)
