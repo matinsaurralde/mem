@@ -153,7 +153,7 @@ class TestCaptureCommand:
         ):
             capture_command("git status", "/Users/test/projects/myapp", 0, 1)
 
-        repo_name = storage.sanitize_repo_name("/Users/test/projects/myapp")
+        repo_name = storage.repo_key("/Users/test/projects/myapp")
         assert [c.command for c in storage.read_commands(repo_name)] == ["git status"]
         assert list(storage.read_commands("_global")) == []
 

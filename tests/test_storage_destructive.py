@@ -24,6 +24,7 @@ import multiprocessing as mp
 import os
 import stat
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -31,7 +32,7 @@ from typing import Any, Callable, Iterator
 import pytest
 
 from conftest import make_command
-from mem import capture, patterns, storage
+from mem import capture, patterns, search, storage
 from mem.models import (
     CommandPattern,
     Group,
@@ -740,7 +741,7 @@ class TestForgetScrubsEveryDestination:
         capture.capture_command(f"export TOKEN={SECRET}", "/w/app", 0, 12)
 
         assert storage.forget_commands(SECRET) == 1
-        assert commands_in(tmp_mem_dir / "repos" / "w-app.jsonl") == []
+        assert commands_in(storage.repo_file(storage.repo_key("/w/app"))) == []
 
         # >300s idle closes the session and flushes the buffer to sessions/.
         capture.SessionTracker().update(
@@ -858,7 +859,7 @@ class TestConcurrentWriters:
             proc.join(timeout=60)
         assert all(p.exitcode == 0 for p in procs)
 
-        path = tmp_mem_dir / "repos" / "w-app.jsonl"
+        path = storage.repo_file(storage.repo_key("/w/app"))
         lines = read_commands_raw(path)
         assert len(lines) == 30
         assert set(commands_in(path)) == {
@@ -906,7 +907,7 @@ class TestConcurrentWriters:
         now = int(time.time())
         path = write_repo_file(
             tmp_mem_dir,
-            "w-app",
+            storage.repo_key("/w/app"),
             [command_line("old", now - 200 * DAY), command_line("kept", now)],
         )
         proc = start_in_process(
@@ -959,7 +960,7 @@ class TestConcurrentWriters:
         # times, so the test would pass while proving nothing.
         assert [p.exitcode for p in procs] == [0, 0], "a writer process failed"
 
-        path = tmp_mem_dir / "repos" / "w-app.jsonl"
+        path = storage.repo_file(storage.repo_key("/w/app"))
         lines = list(read_commands_raw(path))
         assert lines, "no lines were written: the concurrency check is vacuous"
         for line in lines:
@@ -1051,7 +1052,7 @@ class TestStoragePermissions:
         """Command history files must be 0600 — they contain whatever was typed."""
         storage.append_command(make_command(command="export TOKEN=abc", repo="/w/app"))
 
-        path = tmp_mem_dir / "repos" / "w-app.jsonl"
+        path = storage.repo_file(storage.repo_key("/w/app"))
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
     def test_session_files_are_owner_only(self, tmp_mem_dir, strict_umask):
@@ -1092,11 +1093,6 @@ class TestRepoNameCollisions:
             "/w/a/b/c"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-COLLISION: '/w/a-b/c' y '/w/a/b/c' se sanitizan al mismo "
-        "'w-a-b-c' y mezclan el historial de dos repos distintos",
-    )
     def test_hyphen_in_path_does_not_collide_with_separator(self, tmp_mem_dir):
         """Two different repos must never share a history file."""
         storage.append_command(make_command(command="build-alpha", repo="/w/a-b/c"))
@@ -1106,11 +1102,6 @@ class TestRepoNameCollisions:
         assert len(files) == 2, f"two repos collapsed into {[f.name for f in files]}"
         assert [commands_in(f) for f in files] != [["build-alpha", "build-beta"]]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-COLLISION: '/x/proj.api' y '/x/proj-api' se sanitizan al "
-        "mismo 'x-proj-api' y mezclan el historial de dos repos distintos",
-    )
     def test_dot_does_not_collide_with_hyphen(self, tmp_mem_dir):
         """A dotted repo name must not land in the hyphenated repo's file."""
         storage.append_command(
@@ -1123,11 +1114,6 @@ class TestRepoNameCollisions:
         files = sorted((tmp_mem_dir / "repos").glob("*.jsonl"))
         assert len(files) == 2, f"two repos collapsed into {[f.name for f in files]}"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P1-COLLISION: al colisionar los nombres, forget/rotate sobre un "
-        "repo tambien alcanzan el historial del otro",
-    )
     def test_collision_leaks_history_across_repos(self, tmp_mem_dir):
         """Reading one repo's history must never surface another repo's commands."""
         storage.append_command(make_command(command="build-alpha", repo="/w/a-b/c"))
@@ -1135,3 +1121,209 @@ class TestRepoNameCollisions:
 
         history = [c.command for c in storage.read_commands("w-a-b-c")]
         assert history != ["build-alpha", "build-beta"]
+
+
+# --- migration off the colliding filename scheme ---------------------------
+
+
+class TestLegacyRepoFileMigration:
+    """History written under the pre-fix filename must survive the rename.
+
+    Changing the naming scheme without a migration would orphan every
+    existing install's history — a worse bug than the collision it fixes.
+    """
+
+    def test_legacy_file_is_moved_to_the_new_name(self, tmp_mem_dir):
+        """The old file is found, renamed, and left behind nowhere."""
+        now = int(time.time())
+        legacy = write_repo_file(
+            tmp_mem_dir, "w-app", [command_line("deploy", now), ""]
+        )
+
+        key = storage.resolve_repo_key("/w/app")
+
+        assert not legacy.exists()
+        assert commands_in(storage.repo_file(key)) == ["deploy"]
+
+    def test_new_name_keeps_the_readable_slug(self):
+        """The store stays browsable: the hash disambiguates, it does not hide."""
+        key = storage.repo_key("/w/app")
+        assert key.startswith("w-app-")
+        assert key != "w-app"
+
+    def test_append_migrates_before_it_writes(self, tmp_mem_dir):
+        """A capture on an un-migrated install lands in one file, not two."""
+        now = int(time.time())
+        write_repo_file(tmp_mem_dir, "w-app", [command_line("old", now - 10)])
+
+        storage.append_command(make_command(command="new", repo="/w/app", ts=now))
+
+        files = sorted((tmp_mem_dir / "repos").glob("*.jsonl"))
+        assert [f.name for f in files] == [f"{storage.repo_key('/w/app')}.jsonl"]
+        assert commands_in(files[0]) == ["old", "new"]
+
+    def test_reading_through_search_migrates_too(self, tmp_mem_dir):
+        """`mem search` is what most users run first after upgrading."""
+        now = int(time.time())
+        write_repo_file(tmp_mem_dir, "w-app", [command_line("docker compose up", now)])
+
+        results = search.search("docker", current_repo="/w/app")
+
+        assert [cmd.command for cmd, _ in results] == ["docker compose up"]
+        assert not (tmp_mem_dir / "repos" / "w-app.jsonl").exists()
+
+    def test_both_files_present_loses_nothing(self, tmp_mem_dir):
+        """A half-migrated install merges instead of overwriting either side."""
+        now = int(time.time())
+        write_repo_file(tmp_mem_dir, "w-app", [command_line("legacy", now - 100)])
+        write_repo_file(
+            tmp_mem_dir, storage.repo_key("/w/app"), [command_line("current", now)]
+        )
+
+        key = storage.resolve_repo_key("/w/app")
+
+        # Legacy entries are older, so they must come first: `mem save !` reads
+        # the last line as the most recent command.
+        assert commands_in(storage.repo_file(key)) == ["legacy", "current"]
+        assert not (tmp_mem_dir / "repos" / "w-app.jsonl").exists()
+
+    def test_migration_is_idempotent(self, tmp_mem_dir):
+        """Every capture calls the migration; only the first one may do work."""
+        now = int(time.time())
+        write_repo_file(tmp_mem_dir, "w-app", [command_line("deploy", now)])
+
+        for _ in range(3):
+            key = storage.resolve_repo_key("/w/app")
+
+        assert commands_in(storage.repo_file(key)) == ["deploy"]
+
+    def test_replayed_migration_does_not_duplicate(self, tmp_mem_dir):
+        """A crash between writing the destination and unlinking the legacy file.
+
+        The merge path writes every destination first and unlinks the legacy
+        file last, so a crash in between re-runs the whole migration. Replaying
+        it must be a no-op, not a doubled history.
+        """
+        now = int(time.time())
+        line = command_line("legacy", now - 100)
+        write_repo_file(tmp_mem_dir, "w-app", [line])
+        write_repo_file(
+            tmp_mem_dir, storage.repo_key("/w/app"), [command_line("current", now)]
+        )
+        key = storage.resolve_repo_key("/w/app")
+
+        write_repo_file(tmp_mem_dir, "w-app", [line])  # the crash left it behind
+        storage.resolve_repo_key("/w/app")
+
+        assert commands_in(storage.repo_file(key)) == ["legacy", "current"]
+
+    def test_collided_file_is_split_by_the_repo_field(self, tmp_mem_dir):
+        """Each captured line records its exact repo, so the split is not a guess."""
+        now = int(time.time())
+        write_repo_file(
+            tmp_mem_dir,
+            "w-a-b-c",
+            [
+                command_line("alpha", now, repo="/w/a-b/c"),
+                command_line("beta", now, repo="/w/a/b/c"),
+            ],
+        )
+
+        storage.resolve_repo_key("/w/a-b/c")
+
+        assert commands_in(storage.repo_file(storage.repo_key("/w/a-b/c"))) == ["alpha"]
+        assert commands_in(storage.repo_file(storage.repo_key("/w/a/b/c"))) == ["beta"]
+        assert not (tmp_mem_dir / "repos" / "w-a-b-c.jsonl").exists()
+
+    def test_unattributable_lines_follow_the_migrating_repo(self, tmp_mem_dir):
+        """The documented trade-off: keep the data, attribute it to the first asker.
+
+        A line with no ``repo`` field (hand-edited, truncated, corrupted) cannot
+        be traced back to a repo. Dropping it would be data loss and inventing
+        an owner would be a guess, so it follows the repo that triggered the
+        migration — which at least shares the slug it was already filed under.
+        """
+        now = int(time.time())
+        orphan = json.dumps(
+            {"command": "no-repo", "ts": now, "dir": "/w/app", "exit_code": 0}
+        )
+        write_repo_file(tmp_mem_dir, "w-app", [orphan, "THIS IS NOT JSON"])
+
+        key = storage.resolve_repo_key("/w/app")
+
+        assert read_commands_raw(storage.repo_file(key)) == [
+            orphan,
+            "THIS IS NOT JSON",
+        ]
+
+    def test_migration_runs_under_the_exclusive_lock(self, tmp_mem_dir):
+        """Renaming history out from under a concurrent append would lose it."""
+        now = int(time.time())
+        write_repo_file(tmp_mem_dir, "w-app", [command_line("deploy", now)])
+        real_replace = os.replace
+        observed: dict[str, Any] = {"depth": None}
+
+        def watching_replace(src: Any, dst: Any) -> Any:
+            observed["depth"] = storage._lock_depth
+            return real_replace(src, dst)
+
+        with pytest.MonkeyPatch.context() as hook:
+            hook.setattr(os, "replace", watching_replace)
+            storage.resolve_repo_key("/w/app")
+
+        assert observed["depth"] is not None, "the migration never renamed anything"
+        assert observed["depth"] > 0, "the migration renamed without holding the lock"
+
+    def test_migrated_file_is_owner_only(self, tmp_mem_dir, strict_umask):
+        """Pre-fix installs left history at 0644; the migration must fix it."""
+        now = int(time.time())
+        legacy = write_repo_file(tmp_mem_dir, "w-app", [command_line("deploy", now)])
+        legacy.chmod(0o644)
+
+        key = storage.resolve_repo_key("/w/app")
+
+        assert stat.S_IMODE(storage.repo_file(key).stat().st_mode) == 0o600
+
+    def test_collided_file_can_be_claimed_by_a_repo_that_owns_none_of_it(
+        self, tmp_mem_dir
+    ):
+        """The repo that asks first may own nothing in the file it triggers.
+
+        It must not inherit the other repo's history just for being first —
+        and it must not end up with an empty file pretending to be history.
+        """
+        now = int(time.time())
+        write_repo_file(tmp_mem_dir, "w-a-b-c", [command_line("beta", now, "/w/a/b/c")])
+
+        storage.resolve_repo_key("/w/a-b/c")
+
+        files = sorted((tmp_mem_dir / "repos").glob("*.jsonl"))
+        assert [f.name for f in files] == [f"{storage.repo_key('/w/a/b/c')}.jsonl"]
+        assert commands_in(files[0]) == ["beta"]
+
+    def test_second_migration_attempt_finds_nothing_to_do(self, tmp_mem_dir):
+        """A migration that lost the race must not crash on the missing file.
+
+        Simulated by deleting the legacy file while the migration waits for the
+        lock — exactly what a concurrent capture in another shell does.
+        """
+        now = int(time.time())
+        legacy = write_repo_file(tmp_mem_dir, "w-app", [command_line("deploy", now)])
+        real_lock = storage.exclusive_lock
+
+        @contextmanager
+        def stealing_lock() -> Iterator[None]:
+            legacy.unlink(missing_ok=True)
+            with real_lock():
+                yield
+
+        with pytest.MonkeyPatch.context() as hook:
+            hook.setattr(storage, "exclusive_lock", stealing_lock)
+            key = storage.resolve_repo_key("/w/app")
+
+        assert not storage.repo_file(key).exists()
+
+    def test_global_history_is_never_migrated(self, tmp_mem_dir):
+        """_global has no path to hash, so its filename does not change."""
+        assert storage.resolve_repo_key(None) == "_global"
+        assert storage.legacy_repo_key(None) == "_global"

@@ -275,7 +275,7 @@ You type a command
        ▼
   mem _capture  ← runs in background, <5ms
        │
-       ├─→ Append to ~/.mem/repos/<repo>.jsonl
+       ├─→ Append to ~/.mem/repos/<repo-slug>-<hash>.jsonl
        └─→ Every 20 captures: background pattern extraction
 ```
 
@@ -302,7 +302,7 @@ beside them, is rebuilt from them, and is safe to delete:
 ```
 ~/.mem/
   repos/
-    myapp.jsonl              # commands captured in this git repo
+    myapp-3f9a1c07.jsonl     # commands captured in this git repo
     _global.jsonl            # commands outside any repo
   sessions/
     2026-03-07.jsonl         # work sessions by date
@@ -316,11 +316,18 @@ beside them, is rebuilt from them, and is safe to delete:
   vars.json                  # persistent variable store (0600 permissions)
 ```
 
+The suffix on a repo file is the first 8 hex characters of the sha256 of the
+repo's absolute path. It exists because the readable slug alone is ambiguous —
+`/work/a-b/c` and `/work/a/b/c` both slugify to `work-a-b-c` — and two unrelated
+repos sharing one history file merged their commands and leaked them into each
+other. History written by an older version is migrated to the new name
+automatically the first time mem touches that repo.
+
 Inspect anything:
 
 ```bash
-cat ~/.mem/repos/myapp.jsonl
-tail -f ~/.mem/repos/myapp.jsonl    # watch commands arrive in real-time
+cat ~/.mem/repos/myapp-*.jsonl
+tail -f ~/.mem/repos/myapp-*.jsonl  # watch commands arrive in real-time
 grep "docker" ~/.mem/repos/*.jsonl  # search across repos
 ```
 

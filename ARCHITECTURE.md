@@ -55,8 +55,8 @@ Technical overview of how mem works under the hood.
 │                    ~/.mem/ (filesystem)                  │
 │                                                         │
 │  repos/              sessions/           patterns/      │
-│    myapp.jsonl         2026-03-05.jsonl    kubectl.json  │
-│    infra.jsonl         2026-03-06.jsonl    docker.json   │
+│    myapp-3f9a1c07.jsonl 2026-03-05.jsonl   kubectl.json  │
+│    infra-b21d4e88.jsonl 2026-03-06.jsonl   docker.json   │
 │    _global.jsonl                           git.json      │
 │                                                         │
 │  groups/                                                │
@@ -90,7 +90,7 @@ capture.capture_command()
     │ builds CapturedCommand with all metadata
     ▼
 storage.append_command()
-    │ appends one JSON line to ~/.mem/repos/<repo>.jsonl
+    │ appends one JSON line to ~/.mem/repos/<repo-slug>-<hash>.jsonl
     ▼
 capture.SessionTracker.update()
     │ checks idle time and repo change
@@ -115,7 +115,7 @@ cli.cli() dispatches to search
     ▼
 search.search("kubectl", current_repo="infra")
     │
-    ├── read ~/.mem/repos/infra.jsonl (current repo first)
+    ├── read ~/.mem/repos/infra-<hash>.jsonl (current repo first)
     ├── read ~/.mem/repos/_global.jsonl
     ├── read other repo files
     │
@@ -245,7 +245,7 @@ Execute commands with substituted values
 
 ## JSONL Schemas
 
-### Command Entry (`repos/<repo>.jsonl`)
+### Command Entry (`repos/<repo-slug>-<hash>.jsonl`)
 
 ```json
 {

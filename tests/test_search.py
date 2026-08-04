@@ -208,10 +208,11 @@ class TestPrefilterNeverDropsAMatch:
         for command, _ in ENCODED_COMMANDS:
             storage.append_command(make_command(command=command, repo=REPO))
 
-        every_command = [c.command for c in storage.read_commands("_global")]
-        every_command += [
-            c.command for c in storage.read_commands(storage.sanitize_repo_name(REPO))
-        ]
+        # Read through `read_all_commands` rather than naming the files: the
+        # baseline must not depend on how a repo path maps to a filename, or
+        # the test silently compares against an empty list the day that
+        # mapping changes.
+        every_command = [c.command for c in storage.read_all_commands()]
 
         for _, query in ENCODED_COMMANDS:
             terms = [t for t in query.lower().split() if t]

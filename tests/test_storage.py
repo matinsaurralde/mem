@@ -91,7 +91,9 @@ class TestAppendAndRead:
         )
         storage.append_command(cmd)
 
-        results = list(storage.read_commands("Users-test-projects-myapp"))
+        results = list(
+            storage.read_commands(storage.repo_key("/Users/test/projects/myapp"))
+        )
         assert len(results) == 1
         assert results[0].command == "docker compose up -d"
         assert results[0].repo == "/Users/test/projects/myapp"
@@ -105,7 +107,9 @@ class TestAppendAndRead:
                 make_command(command=f"cmd{i}", repo="/Users/test/projects/myapp")
             )
 
-        results = list(storage.read_commands("Users-test-projects-myapp"))
+        results = list(
+            storage.read_commands(storage.repo_key("/Users/test/projects/myapp"))
+        )
         assert [c.command for c in results] == ["cmd0", "cmd1", "cmd2"]
 
     def test_one_json_object_per_line(self, tmp_mem_dir):
@@ -117,7 +121,7 @@ class TestAppendAndRead:
         storage.append_command(make_command(command="a", repo="/r/one"))
         storage.append_command(make_command(command="b", repo="/r/one"))
 
-        raw = storage.repo_file("r-one").read_text(encoding="utf-8")
+        raw = storage.repo_file(storage.repo_key("/r/one")).read_text(encoding="utf-8")
         assert raw.endswith("\n")
         lines = raw.splitlines()
         assert len(lines) == 2
@@ -130,8 +134,12 @@ class TestAppendAndRead:
         storage.append_command(cmd_a)
         storage.append_command(cmd_b)
 
-        results_a = list(storage.read_commands("Users-test-projects-repo-a"))
-        results_b = list(storage.read_commands("Users-test-projects-repo-b"))
+        results_a = list(
+            storage.read_commands(storage.repo_key("/Users/test/projects/repo-a"))
+        )
+        results_b = list(
+            storage.read_commands(storage.repo_key("/Users/test/projects/repo-b"))
+        )
         assert len(results_a) == 1
         assert results_a[0].command == "make test"
         assert len(results_b) == 1
@@ -201,6 +209,26 @@ class TestSanitizeRepoName:
     def test_repo_file_lands_in_repos_subdir(self, tmp_mem_dir):
         """repo_file() composes MEM_DIR/repos/<name>.jsonl."""
         assert storage.repo_file("abc") == tmp_mem_dir / "repos" / "abc.jsonl"
+
+    def test_repo_key_separates_paths_the_slug_conflates(self):
+        """The slug is ambiguous by construction; the key must not be."""
+        assert storage.sanitize_repo_name("/w/a-b/c") == storage.sanitize_repo_name(
+            "/w/a/b/c"
+        )
+        assert storage.repo_key("/w/a-b/c") != storage.repo_key("/w/a/b/c")
+
+    def test_repo_key_is_deterministic(self):
+        """The same repo must resolve to the same file on every capture."""
+        assert storage.repo_key("/w/app") == storage.repo_key("/w/app")
+
+    def test_repo_key_is_a_bare_filename(self):
+        """A key can never escape the repos/ directory either."""
+        for hostile in ("../../etc/passwd", "/", "..", "a/../../b", "-"):
+            key = storage.repo_key(hostile)
+            assert key
+            assert "/" not in key
+            assert not key.startswith("-")
+            assert ".." not in key
 
 
 class TestPatterns:
@@ -325,14 +353,16 @@ class TestCorruptedLines:
     def test_skips_corrupted_lines(self, tmp_mem_dir, capsys):
         """Corrupted JSONL lines are skipped, not fatal."""
         storage.ensure_dirs()
-        path = storage.repo_file("Users-test-projects-myapp")
+        path = storage.repo_file(storage.repo_key("/Users/test/projects/myapp"))
         cmd = make_command(command="good command")
         with path.open("a") as f:
             f.write(cmd.to_jsonl() + "\n")
             f.write("THIS IS NOT JSON\n")
             f.write(cmd.to_jsonl() + "\n")
 
-        results = list(storage.read_commands("Users-test-projects-myapp"))
+        results = list(
+            storage.read_commands(storage.repo_key("/Users/test/projects/myapp"))
+        )
         assert len(results) == 2
         assert {r.command for r in results} == {"good command"}
         err = capsys.readouterr().err
@@ -438,10 +468,10 @@ class TestRotate:
     def test_returns_zero_and_keeps_everything_when_nothing_expired(self, tmp_mem_dir):
         """A no-op rotate reports 0 and leaves the file byte-identical."""
         self._add("fresh", age_days=1)
-        before = storage.repo_file("r-app").read_bytes()
+        before = storage.repo_file(storage.repo_key("/r/app")).read_bytes()
 
         assert storage.rotate() == (0, 0)
-        assert storage.repo_file("r-app").read_bytes() == before
+        assert storage.repo_file(storage.repo_key("/r/app")).read_bytes() == before
 
     def test_deletes_repo_file_when_every_command_expires(self, tmp_mem_dir):
         """An emptied repo file is unlinked, not left as a zero-byte husk."""
@@ -451,18 +481,22 @@ class TestRotate:
         removed, _ = storage.rotate(keep_commands_days=90)
 
         assert removed == 2
-        assert not storage.repo_file("r-app").exists()
+        assert not storage.repo_file(storage.repo_key("/r/app")).exists()
 
     def test_corrupted_lines_are_never_rotated_away(self, tmp_mem_dir):
         """Unparsable lines are preserved: we cannot prove they are stale."""
         self._add("ancient", age_days=200)
-        with storage.repo_file("r-app").open("a", encoding="utf-8") as f:
+        with storage.repo_file(storage.repo_key("/r/app")).open(
+            "a", encoding="utf-8"
+        ) as f:
             f.write("NOT JSON\n")
 
         removed, _ = storage.rotate(keep_commands_days=90)
 
         assert removed == 1
-        assert "NOT JSON" in storage.repo_file("r-app").read_text(encoding="utf-8")
+        assert "NOT JSON" in storage.repo_file(storage.repo_key("/r/app")).read_text(
+            encoding="utf-8"
+        )
 
     def test_deletes_session_files_older_than_cutoff(self, tmp_mem_dir):
         """Old daily session files are unlinked; recent ones survive."""
