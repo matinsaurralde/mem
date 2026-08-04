@@ -221,6 +221,28 @@ def _append_line(path: Path, line: str) -> None:
         _harden_file(path)
 
 
+def _append_lines(path: Path, lines: list[str]) -> None:
+    """Append many lines to a JSONL file in a single write.
+
+    Separate from :func:`_append_line` because a shell history import writes
+    tens of thousands of entries at once: opening, writing and closing the
+    file per entry turns a sub-second operation into a visible pause, and
+    leaves a partially written import if the process dies halfway.
+    """
+    if not lines:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _harden_dir(path.parent)
+    existed = path.exists()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)
+    try:
+        os.write(fd, "".join(line + "\n" for line in lines).encode("utf-8"))
+    finally:
+        os.close(fd)
+    if existed:
+        _harden_file(path)
+
+
 def repo_file(repo: str) -> Path:
     """Path to a repo's command history file."""
     return MEM_DIR / "repos" / f"{repo}.jsonl"
@@ -430,6 +452,28 @@ def append_command(cmd: CapturedCommand) -> None:
         _append_line(path, cmd.to_jsonl())
 
 
+def append_commands(cmds: list[CapturedCommand]) -> int:
+    """Append many commands in one locked pass, returning how many were written.
+
+    Groups by destination file so each file is opened once. Holding the lock
+    for the whole batch is what makes an import atomic with respect to
+    rotate() and forget_commands(), which rewrite these files wholesale.
+    """
+    if not cmds:
+        return 0
+    ensure_dirs()
+    by_repo: dict[str, list[str]] = {}
+    for cmd in cmds:
+        repo = resolve_repo_key(cmd.repo)
+        by_repo.setdefault(repo, []).append(cmd.to_jsonl())
+    with exclusive_lock():
+        for repo, lines in by_repo.items():
+            _append_lines(repo_file(repo), lines)
+    return len(cmds)
+
+
+
+
 # Characters that every JSON encoder emits verbatim inside a string. No
 # encoder escapes them, so a run made only of these appears byte-for-byte in
 # the raw line — which is what makes the prefilter below safe.
@@ -623,6 +667,17 @@ def rotate(
                             lines_kept.append(line_stripped)  # keep corrupted lines
                             continue
                         ts = data.get("ts")
+                        # Imported history is exempt from retention. It is old
+                        # by definition — that is the point of importing it —
+                        # so the age rule would delete the entire import at the
+                        # first background sync after it landed, which is the
+                        # user asking mem to remember and mem forgetting twenty
+                        # commands later. Retention exists to bound what the
+                        # hook accumulates; the import is a one-off the user
+                        # asked for and can undo with `mem forget`.
+                        if data.get("imported"):
+                            lines_kept.append(line_stripped)
+                            continue
                         # A missing timestamp means unknown age, not epoch 0.
                         # Deleting it would be silent data loss, and it would be
                         # inconsistent with keeping lines we cannot parse at all.
