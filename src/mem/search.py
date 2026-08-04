@@ -7,24 +7,11 @@ formula, and returns ranked results. No ML — just math.
 
 from __future__ import annotations
 
-import math
 import time
 from collections import Counter
-from mem import storage
+
+from mem import ranking, storage
 from mem.models import CapturedCommand, CommandPattern, WorkSession
-
-
-# A command run this many times is treated as maximally frequent. Above it the
-# curve is flat, which is the point: the difference between 50 runs and 500 is
-# not information, while the difference between 1 and 10 is.
-FREQUENCY_CEILING = 50
-
-# Weights over features that are all in [0, 1]. They sum to 1, so a score is
-# directly readable as "how good is this match, out of 1".
-W_FREQUENCY = 0.35
-W_RECENCY = 0.35
-W_PREFIX = 0.15
-W_CONTEXT = 0.15
 
 
 def score_command(
@@ -66,40 +53,21 @@ def score_command(
     checking whether a service is down, or probing until something works. The
     useful version of this signal is the *pair* (what failed, what fixed it),
     which is a different feature, not a penalty term here.
+
+    The arithmetic itself lives in :mod:`mem.ranking`, which imports nothing
+    but the standard library. The interactive finder has to rank without
+    paying Pydantic's ~58ms import, and two implementations of a ranking
+    formula would drift until the same history sorted differently depending
+    on how you asked for it.
     """
-    now = time.time()
-    days_since = max((now - cmd.ts) / 86400, 0)
-
-    # Frequency: logarithmic and bounded, so it can be weighed against the rest
-    normalized_frequency = min(
-        1.0, math.log1p(max(frequency, 0)) / math.log1p(FREQUENCY_CEILING)
-    )
-
-    # Recency: exponential decay, half-life 7 days
-    recency = math.exp(-days_since * math.log(2) / 7)
-
-    # Prefix: the query is how the command begins, not just something it contains
-    prefix = 1.0 if cmd.command.lower().startswith(query.strip().lower()) else 0.0
-
-    # Context: 1.0 same repo, 0.5 sibling repos (same parent dir), 0.0 otherwise
-    if current_repo and cmd.repo and cmd.repo == current_repo:
-        context = 1.0
-    elif (
-        current_repo
-        and cmd.repo
-        and "/" in current_repo
-        and "/" in cmd.repo
-        and cmd.repo.rsplit("/", 1)[0] == current_repo.rsplit("/", 1)[0]
-    ):
-        context = 0.5
-    else:
-        context = 0.0
-
-    return (
-        normalized_frequency * W_FREQUENCY
-        + recency * W_RECENCY
-        + prefix * W_PREFIX
-        + context * W_CONTEXT
+    return ranking.score(
+        command=cmd.command,
+        ts=cmd.ts,
+        repo=cmd.repo,
+        query=query,
+        current_repo=current_repo,
+        frequency=frequency,
+        now=time.time(),
     )
 
 

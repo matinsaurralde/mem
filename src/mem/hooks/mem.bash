@@ -124,3 +124,29 @@ if [[ -n "${BASH_VERSINFO[0]:-}" ]] &&
 else
   PROMPT_COMMAND="_mem_prompt_cmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 fi
+
+# --- Ctrl+R ------------------------------------------------------------------
+#
+# The finder prints the chosen command to stdout and draws its interface on
+# /dev/tty, so the substitution below captures the choice and nothing else.
+# The command is placed on the command line, never executed: you get to read
+# it, edit it, and decide. A history search that runs things behind your back
+# is how people delete the wrong branch.
+#
+# Set MEM_NO_KEYBINDING=1 before loading this hook to keep bash's own Ctrl+R.
+
+_mem_search_widget() {
+  local selected
+  selected=$(mem tui -- "$READLINE_LINE" </dev/tty) || return 0
+  if [[ -n "$selected" ]]; then
+    READLINE_LINE="$selected"
+    READLINE_POINT=${#READLINE_LINE}
+  fi
+}
+
+if [[ -z "${MEM_NO_KEYBINDING:-}" ]]; then
+  # `bind -x` needs an interactive shell with readline; in anything else
+  # (a script sourcing this file, a shell with `set +o emacs`) it fails
+  # harmlessly and capture still works.
+  bind -x '"\C-r": _mem_search_widget' 2>/dev/null
+fi

@@ -54,7 +54,9 @@ dev = [
 ]
 
 [project.scripts]
-mem = "mem.cli:cli"
+# Not `mem.cli:cli` — see src/mem/_entry.py. The indirection is what lets the
+# Ctrl+R finder start without importing Click, Rich and Pydantic first.
+mem = "mem._entry:main"
 
 [project.urls]
 GitHub = "https://github.com/matinsaurralde/mem"

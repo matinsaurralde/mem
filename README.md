@@ -61,7 +61,28 @@ echo 'mem init fish | source' >> ~/.config/fish/config.fish
 source ~/.config/fish/config.fish
 ```
 
-That's it. Every command you type is now silently captured with full context (directory, git repo, exit code, duration).
+That's it. Every command you type is now silently captured with full context (directory, git repo, exit code, duration), and **Ctrl+R** now searches it.
+
+---
+
+## Ctrl+R
+
+The shell hook rebinds Ctrl+R to mem's finder. Type to filter, `↑`/`↓` to move, `⏎` to put the command on your command line — where you can read it and edit it before running it. `esc` cancels and leaves your line untouched.
+
+```
+mem kube▏  3/12417
+────────────────────────────────────────────────────────────
+ ▸   kubectl logs -f deploy/api -n prod            infra  2h
+     kubectl get pods -w                           infra  1d
+   ✗ kubectl rollout undo deploy/api               infra  3d
+↑↓ select · ⏎ accept · ^U clear · esc cancel
+```
+
+Results are ranked by the same formula `mem <query>` uses, so the two never disagree. Commands that failed are marked, because "the one that worked" is usually what you are looking for.
+
+It never runs anything for you. A history search that executes behind your back is how people delete the wrong branch.
+
+Prefer your shell's own Ctrl+R? Set `MEM_NO_KEYBINDING=1` before loading the hook; capture still works.
 
 ---
 
@@ -260,6 +281,8 @@ mem stats --json                 # machine-readable stats
 mem forget "API_KEY=sk-..."      # permanently delete matching commands
 mem forget "password" --yes      # skip confirmation
 mem init zsh                     # print shell hook code (also: bash, fish)
+mem tui                          # the Ctrl+R finder, on demand
+mem tui -- kubectl               # ...opened on a query
 ```
 
 ---
