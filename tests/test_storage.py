@@ -811,3 +811,123 @@ class TestPrefilterIsFasterThanParsing:
         assert prefiltered * 3 < full, (
             f"prefilter gave no real speedup: {prefiltered:.3f}s vs {full:.3f}s"
         )
+
+    def test_a_field_name_query_is_not_slower_than_no_filter(self, tmp_mem_dir):
+        """The prefilter must never cost more than the work it skips.
+
+        Two ways to get this wrong, and both happened. Scanning the whole raw
+        line made `exit` match every record via `exit_code`, so the filter
+        admitted everything and saved nothing. Narrowing the scan with a
+        character-by-character Python loop then cost *more* than the
+        `json.loads` it existed to avoid — 165ms per 100k records against
+        137ms for simply parsing them all.
+        """
+        now = int(time.time())
+        storage.ensure_dirs()
+        storage.repo_file("_global").write_text(
+            "\n".join(
+                make_command(command=f"tool-{i} run", ts=now, repo=None).to_jsonl()
+                for i in range(20_000)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        start = time.perf_counter()
+        everything = len(list(storage.read_commands("_global")))
+        full = time.perf_counter() - start
+
+        # "exit" appears in the `exit_code` field name of every single record.
+        needles = storage.prefilter_needles(["exit"])
+        start = time.perf_counter()
+        matched = len(list(storage.read_commands("_global", needles)))
+        filtered = time.perf_counter() - start
+
+        assert everything == 20_000
+        assert matched == 0, "a field name still matches every record"
+        assert filtered < full, (
+            f"the prefilter cost more than parsing: {filtered:.3f}s vs {full:.3f}s"
+        )
+
+
+class TestCommandSpan:
+    """The prefilter must scan the command, not the whole encoded record.
+
+    Every record contains the field *names* `command`, `dir`, `exit_code`,
+    `duration_ms`, `session` and `imported`, so scanning the raw line made a
+    search for `exit` — or `dir`, or `port` — match every line in the store.
+    The filter admitted everything and saved nothing, precisely for the
+    queries most likely to be slow.
+    """
+
+    def test_it_returns_only_the_command(self):
+        line = make_command(command="git push", repo="/r").to_jsonl()
+
+        assert storage.command_span(line) == "git push"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo "hi"',  # escaped quotes must not end the span early
+            r"grep \d+ log",
+            r'sed "s/\\/x/g"',
+            "echo café",
+            "printf 'a\tb'",
+            "curl -H 'X: {\"k\":1}'",
+            "",
+        ],
+    )
+    def test_it_survives_anything_a_command_can_contain(self, command: str):
+        """The span is the *encoded* text, which is what the needles match.
+
+        Deliberately not the decoded command: decoding is the expensive step
+        this whole path exists to skip, and the needles are built from
+        characters that survive JSON encoding unchanged precisely so they can
+        be matched against encoded text. `json.dumps(x)[1:-1]` is that
+        encoding with the surrounding quotes removed.
+        """
+        line = json.dumps({"command": command, "ts": 1, "dir": "/x"})
+
+        assert storage.command_span(line) == json.dumps(command)[1:-1]
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "not json at all",
+            "{}",
+            '{"ts": 1}',  # no command field
+            '{"command": 42}',  # not a string
+            '{"command": "unterminated',
+            "",
+        ],
+    )
+    def test_an_unrecognisable_line_is_scanned_whole(self, line: str):
+        """Admitting too much is the safe direction; excluding a match is not."""
+        assert storage.command_span(line) == line
+
+    def test_whitespace_after_the_colon_is_tolerated(self):
+        """These files are documented as hand-editable, so formatting varies."""
+        assert storage.command_span('{"command" :  "ls -la", "ts": 1}') == "ls -la"
+
+    def test_a_field_name_no_longer_matches_every_record(self, tmp_mem_dir):
+        """The bug itself: `exit` matched every line because of `exit_code`."""
+        storage.append_command(make_command(command="git push", repo=None))
+        storage.append_command(make_command(command="exit", repo=None))
+
+        found = [c.command for c in storage.read_commands("_global", ["exit"])]
+
+        assert found == ["exit"]
+
+    def test_a_directory_name_no_longer_matches_the_command(self, tmp_mem_dir):
+        """`repo` and `dir` are stored on every record and are not the command."""
+        storage.append_command(
+            make_command(command="ls", repo="/Users/me/projects/kubernetes")
+        )
+
+        matched = list(
+            storage.read_commands(
+                storage.repo_key("/Users/me/projects/kubernetes"), ["kubernetes"]
+            )
+        )
+
+        assert matched == [], "the prefilter matched the repo path, not the command"
