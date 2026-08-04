@@ -937,3 +937,61 @@ class TestRepoDetection:
         monkeypatch.chdir(repo)
 
         assert tui._current_repo() == str(repo)
+
+
+class TestEntryPointDispatch:
+    """`mem/_entry.py` decides, per argument, what to import.
+
+    It shows as 0% covered because every other test reaches it through a
+    subprocess, where coverage cannot see it. The dispatch table is small but
+    it is a second place that names subcommands, so it can drift from the
+    Click group — and the failure would be a command that exists in `--help`
+    and does something else when you run it.
+    """
+
+    def test_every_fast_path_is_a_real_command(self):
+        """A fast path naming a command Click does not have is unreachable."""
+        from mem import _entry
+        from mem.cli import cli
+
+        assert _entry._FAST_PATHS
+        assert _entry._FAST_PATHS <= set(cli.commands)
+
+    def test_a_fast_path_argument_never_imports_the_cli(self, monkeypatch):
+        """The whole reason this module exists, asserted in-process.
+
+        Watching `__import__` rather than `sys.modules`: by the time this test
+        runs, `mem.cli` has been imported by other tests, so its presence in
+        `sys.modules` says nothing. What matters is whether *this call*
+        reaches for it.
+        """
+        import builtins
+
+        from mem import _entry
+
+        monkeypatch.setattr(sys, "argv", ["mem", "tui", "--help"])
+        requested: list[str] = []
+        real_import = builtins.__import__
+
+        def watching_import(name, *args, **kwargs):
+            requested.append(name)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", watching_import)
+        with pytest.raises(SystemExit) as exit_info:
+            _entry.main()
+
+        assert exit_info.value.code == 0
+        assert "mem.cli" not in requested
+        assert "mem.tui" in requested
+
+    def test_anything_else_goes_to_the_full_cli(self, monkeypatch, capsys):
+        from mem import _entry
+
+        monkeypatch.setattr(sys, "argv", ["mem", "--version"])
+
+        with pytest.raises(SystemExit) as exit_info:
+            _entry.main()
+
+        assert exit_info.value.code == 0
+        assert capsys.readouterr().out.startswith("mem, version ")

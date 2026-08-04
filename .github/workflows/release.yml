@@ -56,7 +56,23 @@ jobs:
             echo "::error::wheel reports '$OUT', expected '$EXPECTED'"
             exit 1
           fi
-          /tmp/smoke/bin/mem init zsh > /dev/null
+          # The hooks reach users only through the wheel, and they used to be
+          # looked up at a repo-relative path no installed wheel has — so
+          # `mem init` silently served a stale inlined copy and the test suite,
+          # always running from a checkout, never noticed. CI checks this on
+          # every PR; checking it again here costs two seconds and covers a tag
+          # pushed at a commit that somehow skipped it.
+          # `$(...)` strips every trailing newline and printf puts exactly one
+          # back, which normalises the extra newline click.echo appends.
+          for shell in zsh bash fish; do
+            OUT="$(/tmp/smoke/bin/mem init "$shell")"
+            diff <(printf '%s\n' "$OUT") "src/mem/hooks/mem.$shell" \
+              || { echo "::error::mem init $shell does not match the source hook"; exit 1; }
+          done
+
+          # The console script dispatches through mem._entry now; a broken
+          # dispatch breaks every command, and --version alone would not show it.
+          /tmp/smoke/bin/mem tui --help > /dev/null
           echo "wheel smoke test passed"
 
       # TODO: migrate to PyPI Trusted Publishing (pypa/gh-action-pypi-publish
