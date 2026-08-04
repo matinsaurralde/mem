@@ -17,6 +17,7 @@ pattern that put a stale shell hook in front of every pip user.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 from mem import picks
 
@@ -47,6 +48,17 @@ W_CONTEXT = 0.09
 
 # Recency halves every this many days.
 RECENCY_HALF_LIFE_DAYS = 7
+
+# Credit a query concept earns when the command contains the user's own word,
+# versus a synonym the concept map supplied. Both live below the hard boundary
+# that keeps *every* fully literal match above *any* expanded one (see
+# ``mem.search.search``), so this is a tie-breaker inside the expanded tier,
+# not the mechanism that protects literal matches. It is deliberately mild:
+# make it severe and a command matching only a vague literal word ("fix")
+# outranks the one that matched a precise concept ("certificate" -> openssl),
+# which is the opposite of what the map is for.
+LITERAL_CREDIT = 1.0
+EXPANDED_CREDIT = 0.8
 
 _LN2 = math.log(2)
 _LOG_CEILING = math.log1p(FREQUENCY_CEILING)
@@ -136,3 +148,69 @@ def score(
         + prefix_score(command, query) * W_PREFIX
         + context_score(repo, current_repo) * W_CONTEXT
     )
+
+
+def idf(document_frequency: int, n_documents: int) -> float:
+    """How much a term's presence tells you, normalised to [0, 1].
+
+    The BM25 form, ``log(1 + (N - df + 0.5) / (df + 0.5))``, divided by its own
+    value at ``df = 1`` so the result reads as a fraction like every other
+    feature here. A term in one command out of a thousand scores 1.0; a term in
+    all thousand scores ~0.
+
+    This is what stops query expansion from doing harm. The concept map is
+    hand-written, so it will eventually contain a synonym that is far too
+    common — a ``"version control": ["git", ...]`` in a history that is 40%
+    git. Without idf that entry would drag every git command into the answer
+    for any question mentioning version control. With it, a term matching half
+    the candidates scores below 0.2 (and keeps falling as the history grows),
+    so it cannot move the ranking: the weighting makes a bad entry inert
+    instead of harmful, which is the property a hand-edited file needs.
+
+    Both counts are measured over the *candidates* for this query, not the
+    whole history. Ranking only has to separate the results from each other,
+    and a term present in every candidate separates nothing however rare it is
+    globally. It is also the cheap answer: the candidate set is already in
+    memory, while a corpus-wide count is another pass over every file.
+    """
+    if n_documents <= 1:
+        return 1.0
+    df = min(max(document_frequency, 1), n_documents)
+    raw = math.log(1 + (n_documents - df + 0.5) / (df + 0.5))
+    rarest = math.log(1 + (n_documents - 0.5) / 1.5)
+    return raw / rarest
+
+
+def coverage(credits: Sequence[float], weights: Sequence[float]) -> float:
+    """How much of the query's *information* a command accounts for, in [0, 1].
+
+    ``credits[i]`` is how well concept *i* was satisfied — 1.0 by the user's
+    own words, 0.8 by a synonym, 0.0 not at all — and ``weights[i]`` is that
+    concept's idf. Weighting by idf rather than counting concepts is what makes
+    a match on "certificate" worth more than a match on "fix": the first
+    narrows a history to a handful of commands, the second barely narrows it at
+    all, and treating them as one-concept-one-vote would rank the vague hit
+    first.
+
+    When no concept discriminates (every one of them matches every candidate,
+    which is the ordinary case for a one-word query) all the weights are ~0.
+    Falling back to the unweighted mean keeps the multiplier meaningful instead
+    of collapsing every score to zero and leaving the order to chance.
+    """
+    if not credits:
+        return 0.0
+    total = sum(weights)
+    if total <= 0:
+        return sum(credits) / len(credits)
+    return sum(c * w for c, w in zip(credits, weights)) / total
+
+
+def expanded_score(base: float, match_coverage: float) -> float:
+    """Scale a score by how much of the query the command actually covered.
+
+    Multiplicative, not additive: a command that satisfies one concept out of
+    three should not be able to buy its way back with frequency and recency.
+    The result stays in [0, 1], so the ``score`` field in ``--json`` still
+    reads as a fraction.
+    """
+    return base * match_coverage
