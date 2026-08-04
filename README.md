@@ -24,6 +24,7 @@ mem silently captures every command you type, then lets you search, save, and re
 ```bash
 Ctrl+R                 # interactive finder, ranked
 mem deploy             # or search from the command line
+mem fix                # what fixed the last thing that broke
 mem save "cmd" -t ops  # save a command to a group
 mem run ops            # run the group interactively
 mem vars set API_KEY   # store a secret for saved commands
@@ -147,6 +148,97 @@ Patterns for "kubectl":
   kubectl logs <pod> [--tail=<n>]
   kubectl apply -f <file>
 ```
+
+---
+
+## Fix
+
+`mem fix` answers one question: **last time this failed, what did you do next that worked?**
+
+mem has been recording the exit code of every command since day one. `mem fix` reads them back, looking for a command that failed and a near-variant of it that succeeded seconds later — the shape of you reading an error message and retyping the line.
+
+```bash
+mem fix                  # the last thing that failed here
+mem fix npm build        # a specific one
+mem fix --json           # machine-readable
+mem fix -n 5             # show more candidate fixes
+```
+
+```
+  failed   npm run buld
+           exit 1 · 3m ago · /Users/dev/work/api
+
+  fixed by npm run build
+           seen 4 times · last worked 3m ago
+
+  also     npm run build --if-present
+           seen once · last worked 2d ago · one observation only
+
+           mem does not run it for you. Read it, then decide.
+```
+
+**It never runs anything.** `mem fix` prints the command and stops. Same reason `mem run` asks before each step: a tool that executes on your behalf is how people delete the wrong branch.
+
+**Confidence is repetition.** A pair seen four times and a pair seen once are different claims, and the output says which. Candidates are ranked by how often the pairing was observed, then by whether the fix has itself broken since, then by recency.
+
+```
+  fixed by npm ci
+           seen 3 times · last worked 1h ago
+           careful: this command has itself failed 2 times since.
+```
+
+**When there is no evidence, it says so.** No suggestion is invented:
+
+```
+  failed   terraform apply
+           exit 1 · just now · /Users/dev/infra
+
+           mem has no record of anything fixing this.
+```
+
+### What it will and won't pair
+
+The matching is deterministic — no AI, no network, just exit codes and text. It is deliberately strict, because a wrong "fix" suggested confidently is worse than no suggestion at all. A pair is only recorded when all of these hold:
+
+| Condition | Why |
+|---|---|
+| The first command exited non-zero, the second exited exactly `0` | A missing exit code is not a success |
+| At most 3 commands apart | You often `ls` and `cat` before fixing |
+| Typed within 60 seconds | Longer, and the connection is a guess |
+| Same terminal session | Two tabs in one repo interleave in one history file |
+| Same program (after ignoring `sudo`) | `git status` failing then `git push` working is two events |
+| The second is the first *retyped* | See below |
+
+"Retyped" means the edit has the shape of a correction: a flag or argument **added**, a flag **removed**, or **one token mistyped** — a transposition (`psuh` → `push`), a dropped letter (`buld` → `build`), a doubled one (`hostt` → `host`).
+
+It specifically does **not** use fuzzy string similarity, because that measures the wrong thing. `test_a.py`/`test_b.py` scores *higher* than `psuh`/`push`, so any threshold that catches the real typo also reports "the fix for `pytest tests/test_a.py` is `pytest tests/test_b.py`". Substituting one token for a different one is never treated as a correction.
+
+Things mem finds:
+
+```
+apt install htop        →  sudo apt install htop
+npm i                   →  npm i --legacy-peer-deps
+gti status              →  git status          (only when the shell said "command not found")
+kubectl get pods -n prd →  kubectl get pods -n prod
+npm ci --frozen-lockfile → npm ci
+```
+
+Things mem deliberately refuses, even though they sit next to each other in your history:
+
+```
+pytest tests/test_a.py  →  pytest tests/test_b.py     a different file
+terraform plan          →  terraform apply            the next step, not a repair
+brew install jq         →  brew install yq            a different package
+ssh prod-1              →  ssh prod-2                 a different host
+ls /nope                →  ls                         worked by doing less
+```
+
+Two consequences worth knowing:
+
+- **Imported history is invisible to `mem fix`.** `mem import` reads your old `.zsh_history`, which records no exit codes, so there is nothing to mine. Only commands captured by the shell hook are paired.
+- **Some real fixes are missed.** `git push` → `git pull --rebase` is not found, because the rule that would find it would also produce the false positives above. Missing a fix is invisible; inventing one is not.
+
+Credentials are removed from the output using the same redaction that guards the MCP server, so a `curl` with an auth header still shows you the fix without reprinting the token.
 
 ---
 
@@ -398,6 +490,8 @@ Every request is appended to `~/.mem/agent-audit.jsonl`, redacted, and shown by
 ## Other commands
 
 ```bash
+mem fix                          # what fixed the last failure (see Fix)
+mem fix kubectl --json           # ...for a specific one, machine-readable
 mem stats                        # top commands, repos, totals
 mem stats --json                 # machine-readable stats
 mem forget "API_KEY=sk-..."      # permanently delete matching commands

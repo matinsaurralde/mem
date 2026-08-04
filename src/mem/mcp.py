@@ -380,42 +380,44 @@ def _tool_recent_failures(args: dict[str, Any]) -> dict[str, Any]:
     later successful run of the *same* command is proof the fix worked —
     which is the single most useful thing a shell history can tell an agent
     and needs no inference to extract.
+
+    The scan itself lives in :mod:`mem.fix`, which mines the same two facts
+    for ``mem fix``. Sharing it is deliberate: two independent definitions of
+    "a failure and what came after it" would drift, and this codebase has
+    already been bitten twice by exactly that — a stale shell hook served to
+    every pip user, and a ranking formula duplicated across two call sites.
+    What stays here is what is genuinely this tool's own: the shape of the
+    JSON, the two-command lookahead, and ``retried_successfully``.
     """
+    from mem.fix import iter_failures, iter_histories
+
     limit = _optional_limit(args, 10)
     repo_filter = _optional_str(args, "repo")
 
-    repos_dir = storage.MEM_DIR / "repos"
-    if not repos_dir.exists():
-        return {"count": 0, "failures": []}
-
     sanitized = storage.sanitize_repo_name(repo_filter) if repo_filter else None
+    include = None if sanitized is None else (lambda stem: stem == sanitized)
     failures: list[dict[str, Any]] = []
 
-    for path in sorted(repos_dir.glob("*.jsonl")):
-        if sanitized is not None and path.stem != sanitized:
-            continue
-        commands = list(storage.read_commands(path.stem))
+    for _key, commands in iter_histories(include):
         succeeded_later: dict[str, int] = {}
         for index, cmd in enumerate(commands):
             if cmd.exit_code == 0:
                 succeeded_later.setdefault(cmd.command, index)
 
-        for index, cmd in enumerate(commands):
-            if cmd.exit_code == 0:
-                continue
-            retry = succeeded_later.get(cmd.command)
+        for failure in iter_failures(commands, lookahead=2):
+            retry = succeeded_later.get(failure.command.command)
             failures.append(
                 {
-                    "command": cmd.command,
-                    "repo": cmd.repo,
-                    "ts": cmd.ts,
-                    "when": _iso(cmd.ts),
-                    "exit_code": cmd.exit_code,
+                    "command": failure.command.command,
+                    "repo": failure.command.repo,
+                    "ts": failure.command.ts,
+                    "when": _iso(failure.command.ts),
+                    "exit_code": failure.command.exit_code,
                     "followed_by": [
                         {"command": nxt.command, "exit_code": nxt.exit_code}
-                        for nxt in commands[index + 1 : index + 3]
+                        for nxt in failure.following
                     ],
-                    "retried_successfully": retry is not None and retry > index,
+                    "retried_successfully": retry is not None and retry > failure.index,
                 }
             )
 
