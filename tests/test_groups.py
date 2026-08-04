@@ -276,13 +276,12 @@ class TestSaveCommand:
 
 class TestGetLastCapturedCommand:
     def test_reads_last_command(self, tmp_mem_dir: Path):
-        repo_name = "test-repo"
-        path = storage.repo_file(repo_name)
+        path = storage.repo_file(storage.repo_key("/test-repo"))
         path.parent.mkdir(parents=True, exist_ok=True)
         from conftest import make_command
 
-        cmd1 = make_command(command="first", repo="/test")
-        cmd2 = make_command(command="second", repo="/test")
+        cmd1 = make_command(command="first", repo="/test-repo")
+        cmd2 = make_command(command="second", repo="/test-repo")
         with path.open("w", encoding="utf-8") as f:
             f.write(cmd1.to_jsonl() + "\n")
             f.write(cmd2.to_jsonl() + "\n")

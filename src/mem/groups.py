@@ -135,8 +135,7 @@ def get_last_captured_command(repo: str | None) -> str:
     Used by ``mem save !`` to grab the most recently captured command
     without the user having to retype it.
     """
-    sanitized = storage.sanitize_repo_name(repo) if repo else "_global"
-    path = storage.repo_file(sanitized)
+    path = storage.repo_file(storage.resolve_repo_key(repo))
 
     if not path.exists():
         raise click.ClickException(

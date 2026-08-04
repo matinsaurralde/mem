@@ -152,7 +152,7 @@ def search(
 
     # Read current repo first for context boost
     if current_repo:
-        repo_name = storage.sanitize_repo_name(current_repo)
+        repo_name = storage.resolve_repo_key(current_repo)
         for cmd in storage.read_commands(repo_name, needles):
             if _matches(cmd.command, terms):
                 all_commands.append(cmd)
@@ -165,9 +165,7 @@ def search(
     # Also read other repo files if current_repo didn't cover everything
     repos_dir = storage.MEM_DIR / "repos"
     if repos_dir.exists():
-        current_sanitized = (
-            storage.sanitize_repo_name(current_repo) if current_repo else None
-        )
+        current_sanitized = storage.repo_key(current_repo) if current_repo else None
         for path in sorted(repos_dir.glob("*.jsonl")):
             repo_name = path.stem
             if repo_name == current_sanitized or repo_name == "_global":

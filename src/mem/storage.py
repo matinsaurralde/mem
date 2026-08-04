@@ -13,6 +13,7 @@ beyond Python stdlib.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -41,6 +42,16 @@ GROUPS_GLOBAL_FILE = GROUPS_DIR / "_global.json"
 
 # --- Variable store ---
 VARS_FILE = MEM_DIR / "vars.json"
+
+# Key used for commands captured outside any git repo. Reserved: a real repo
+# path can never produce it, because sanitize_repo_name() drops underscores.
+GLOBAL_REPO_KEY = "_global"
+
+# Length of the hex digest appended to a repo's history filename. 32 bits of
+# sha256 is the trade-off point: long enough that an accidental collision needs
+# tens of thousands of distinct repos on one machine, short enough that the
+# filename stays something a human can read and match by eye in `ls`.
+REPO_KEY_HASH_LEN = 8
 
 
 def _lock_file() -> Path:
@@ -245,27 +256,177 @@ def ensure_dirs() -> None:
 
 
 def sanitize_repo_name(name: str) -> str:
-    """Sanitize a repository name for use as a filename.
+    """Sanitize a repository name into a readable, filesystem-safe slug.
 
     Replaces non-alphanumeric characters (except hyphens) with hyphens.
     Handles repos with special chars or spaces in their names.
+
+    NOT injective, and never enough on its own to name a history file:
+    ``/w/a-b/c`` and ``/w/a/b/c`` both collapse to ``w-a-b-c``. Use
+    :func:`repo_key` for anything that decides which file a repo's data
+    lands in — see the comment there.
     """
     return re.sub(r"[^a-zA-Z0-9-]", "-", name).strip("-")
+
+
+def repo_key(repo: str | None) -> str:
+    """Injective storage key for a repo path: ``<slug>-<hash>``.
+
+    The slug alone loses information — every separator becomes a hyphen — so
+    two unrelated repos used to share one history file. That merged their
+    command histories (a correctness bug) and let ``forget``/``rotate`` on one
+    repo reach into the other's data (a privacy bug).
+
+    The suffix is a truncated sha256 of the *exact* original path, so distinct
+    paths get distinct files while the name stays browsable with ``ls``/``cat``
+    — a pure hash would have fixed the collision and destroyed the plain-text
+    store that is the point of this project.
+
+    The slug can come back empty (``/`` sanitizes to ``""``), in which case the
+    digest alone names the file; it is hex, so it is always a safe bare
+    filename with no leading hyphen and no path separators.
+    """
+    if not repo:
+        return GLOBAL_REPO_KEY
+    digest = hashlib.sha256(repo.encode("utf-8")).hexdigest()[:REPO_KEY_HASH_LEN]
+    slug = sanitize_repo_name(repo)
+    return f"{slug}-{digest}" if slug else digest
+
+
+def legacy_repo_key(repo: str | None) -> str:
+    """Storage key a pre-fix version of mem would have used for this repo.
+
+    Kept as its own function so the migration never has to reimplement the
+    buggy scheme inline, and so a future change to sanitize_repo_name() cannot
+    silently orphan history written before the fix.
+    """
+    if not repo:
+        return GLOBAL_REPO_KEY
+    return sanitize_repo_name(repo)
+
+
+def resolve_repo_key(repo: str | None) -> str:
+    """Return a repo's storage key, migrating any legacy history file first.
+
+    Every read and write path goes through here so that an install predating
+    the collision fix finds its history under the new name on the very first
+    command it runs — a migration the user has to invoke by hand is a
+    migration most users never run.
+    """
+    key = repo_key(repo)
+    if repo:
+        _migrate_legacy_repo_file(repo, key)
+    return key
+
+
+def _migrate_legacy_repo_file(repo: str, key: str) -> None:
+    """Move a repo's pre-fix history file onto the collision-free name.
+
+    Cheap to call on every capture: the common case is one ``stat()`` that
+    finds nothing, because after the first migration the legacy file is gone.
+    """
+    legacy = repo_file(legacy_repo_key(repo))
+    if legacy == repo_file(key) or not legacy.exists():
+        return
+
+    with exclusive_lock():
+        # Re-checked under the lock: a concurrent capture may have migrated
+        # the same file between the stat() above and the lock being granted.
+        if not legacy.exists():
+            return
+        _migrate_legacy_repo_file_locked(legacy, key)
+
+
+def _migrate_legacy_repo_file_locked(legacy: Path, fallback_key: str) -> None:
+    """Split a legacy history file across its rightful new-scheme files.
+
+    A legacy file may be a *collided* file holding two repos' histories. Each
+    captured line records the exact ``repo`` path it came from, so the split is
+    done from that field rather than guessed — the entries go back to the repo
+    that produced them and the privacy leak does not survive the migration.
+
+    Honest limitation: a line that carries no ``repo`` (hand-edited, truncated,
+    or corrupted) cannot be attributed. Those lines follow ``fallback_key``,
+    i.e. they land in the history of whichever repo triggered the migration.
+    Dropping them would be data loss and inventing an owner would be a guess;
+    the fallback at least keeps them inside the slug they were already filed
+    under, since every repo mapping to this legacy name shares that slug.
+
+    The caller must hold :func:`exclusive_lock`.
+    """
+    raw = legacy.read_text(encoding="utf-8", errors="replace")
+    # Seeded with the requesting repo so an empty legacy file still migrates
+    # (and keeps existing) instead of being silently deleted.
+    buckets: dict[str, list[str]] = {fallback_key: []}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        buckets.setdefault(_owner_key_of_line(line, fallback_key), []).append(line)
+
+    destination = repo_file(fallback_key)
+    if list(buckets) == [fallback_key] and not destination.exists():
+        # Uncollided file, free destination: one rename is both atomic and
+        # crash-safe, and it preserves the inode (and its 0600 mode).
+        os.replace(legacy, destination)
+        _harden_file(destination)
+        _fsync_dir(destination.parent)
+        return
+
+    for key, lines in buckets.items():
+        if not lines:
+            continue  # the seeded bucket, when every line had a real owner
+        _merge_lines_into(repo_file(key), lines)
+    legacy.unlink(missing_ok=True)
+    _fsync_dir(legacy.parent)
+
+
+def _owner_key_of_line(line: str, fallback_key: str) -> str:
+    """Storage key of the repo that produced one legacy JSONL line."""
+    try:
+        entry = json.loads(line)
+        owner = entry.get("repo")
+    except (ValueError, AttributeError):
+        return fallback_key
+    return repo_key(owner) if isinstance(owner, str) and owner else fallback_key
+
+
+def _merge_lines_into(dest: Path, lines: list[str]) -> None:
+    """Fold migrated lines into a new-scheme file that already exists.
+
+    Migrated lines go first: they predate anything written under the new
+    scheme, and ``mem save !`` reads the last line as the most recent command.
+
+    Lines already present verbatim are skipped. Writing every destination and
+    only then unlinking the legacy file leaves a crash window in which the
+    migration can run twice; skipping duplicates makes that replay a no-op
+    instead of doubling the user's history.
+    """
+    existing = (
+        dest.read_text(encoding="utf-8", errors="replace").splitlines()
+        if dest.exists()
+        else []
+    )
+    seen = set(existing)
+    merged = [line for line in lines if line not in seen] + existing
+    atomic_write(dest, "".join(f"{line}\n" for line in merged))
 
 
 def append_command(cmd: CapturedCommand) -> None:
     """Append a captured command to the appropriate repo file.
 
-    Commands inside a git repo go to repos/<repo>.jsonl.
+    Commands inside a git repo go to repos/<slug>-<hash>.jsonl.
     Commands outside any repo go to repos/_global.jsonl.
     Append-only writes are atomic at the OS level for single lines.
     """
     ensure_dirs()
-    repo = sanitize_repo_name(cmd.repo) if cmd.repo else "_global"
-    path = repo_file(repo)
     # The lock is what keeps an append from landing between rotate()'s read
-    # and its rename(), which would drop the command silently.
+    # and its rename(), which would drop the command silently. Resolving the
+    # key inside it keeps a legacy-file migration and the append that follows
+    # in one critical section — the lock is re-entrant, so the nested
+    # acquisition in the migration is free.
     with exclusive_lock():
+        path = repo_file(resolve_repo_key(cmd.repo))
         _append_line(path, cmd.to_jsonl())
 
 
