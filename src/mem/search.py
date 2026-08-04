@@ -14,6 +14,19 @@ from mem import storage
 from mem.models import CapturedCommand, CommandPattern, WorkSession
 
 
+# A command run this many times is treated as maximally frequent. Above it the
+# curve is flat, which is the point: the difference between 50 runs and 500 is
+# not information, while the difference between 1 and 10 is.
+FREQUENCY_CEILING = 50
+
+# Weights over features that are all in [0, 1]. They sum to 1, so a score is
+# directly readable as "how good is this match, out of 1".
+W_FREQUENCY = 0.35
+W_RECENCY = 0.35
+W_PREFIX = 0.15
+W_CONTEXT = 0.15
+
+
 def score_command(
     cmd: CapturedCommand,
     query: str,
@@ -22,36 +35,51 @@ def score_command(
 ) -> float:
     """Score a command for search relevance.
 
-    Uses a deterministic formula:
-        score = (frequency * 0.4) + (recency * 0.4) + (context * 0.2)
+    A linear combination of four features, each normalised to [0, 1]:
 
-    Why these weights:
-    - Frequency (40%): Commands you run often are commands you need often.
-      This is the strongest baseline signal.
-    - Recency (40%): Equal weight to frequency because recent commands
-      reflect current work context. A command from today is almost certainly
-      more relevant than one from last month.
-    - Context (20%): A tiebreaker that boosts commands from the current
-      repo (1.0) or sibling repos sharing the same parent directory (0.5).
-      Lower weight because frequency and recency already capture most
-      relevance — context just refines the ranking.
+        score = 0.35*frequency + 0.35*recency + 0.15*prefix + 0.15*context
 
-    Why exit code is NOT included (v1): Per specification clarification,
-    exit code is captured and stored but does not affect ranking. Failed
-    commands may be intentional (e.g., checking if a service is down).
-    Exit-code-based deprioritization is deferred to a future version.
+    Why the normalisation matters more than the weights: the previous formula
+    was ``0.4*frequency + 0.4*recency + 0.2*context`` with ``frequency`` as a
+    *raw count*. Recency and context are bounded by 1, so a command run ten
+    times scored 4.0 against a ceiling of 0.6 for everything else — the two
+    signals the docstring described as equally weighted could not move the
+    ranking at all. mem was sorting by frequency and calling it a formula. The
+    weights are a design choice; that was a bug.
 
-    Recency uses exponential decay with a 7-day half-life:
-        recency = exp(-days_since * ln(2) / 7)
-    A command run today scores 1.0; 7 days ago scores 0.5; 14 days ago 0.25.
-    This mirrors how human memory fades — recent events are vivid,
-    older ones require stronger signals (high frequency) to surface.
+    - **Frequency** (35%): ``log1p(n) / log1p(50)``, capped at 1. Logarithmic
+      because the jump from 1 run to 5 says much more than 100 to 105, and
+      capped so one pathologically repeated command cannot own every result.
+    - **Recency** (35%): exponential decay with a 7-day half-life,
+      ``exp(-days * ln(2) / 7)``. Today scores 1.0, a week ago 0.5, two weeks
+      0.25. Human memory fades the same way: older commands need a stronger
+      signal to surface.
+    - **Prefix** (15%): 1.0 when the command starts with the query. Someone
+      typing ``mem git push`` wants ``git push origin main``, not the
+      ``echo "remember to git push"`` they ran more often. Nothing else in the
+      formula could express "this is what you meant", because every result
+      already contains every term.
+    - **Context** (15%): 1.0 for the current repo, 0.5 for a sibling sharing a
+      parent directory. A refinement, not a driver.
+
+    Why exit code is NOT included: a failed command is often deliberate —
+    checking whether a service is down, or probing until something works. The
+    useful version of this signal is the *pair* (what failed, what fixed it),
+    which is a different feature, not a penalty term here.
     """
     now = time.time()
     days_since = max((now - cmd.ts) / 86400, 0)
 
+    # Frequency: logarithmic and bounded, so it can be weighed against the rest
+    normalized_frequency = min(
+        1.0, math.log1p(max(frequency, 0)) / math.log1p(FREQUENCY_CEILING)
+    )
+
     # Recency: exponential decay, half-life 7 days
     recency = math.exp(-days_since * math.log(2) / 7)
+
+    # Prefix: the query is how the command begins, not just something it contains
+    prefix = 1.0 if cmd.command.lower().startswith(query.strip().lower()) else 0.0
 
     # Context: 1.0 same repo, 0.5 sibling repos (same parent dir), 0.0 otherwise
     if current_repo and cmd.repo and cmd.repo == current_repo:
@@ -67,7 +95,12 @@ def score_command(
     else:
         context = 0.0
 
-    return (frequency * 0.4) + (recency * 0.4) + (context * 0.2)
+    return (
+        normalized_frequency * W_FREQUENCY
+        + recency * W_RECENCY
+        + prefix * W_PREFIX
+        + context * W_CONTEXT
+    )
 
 
 def _terms(query: str) -> list[str]:

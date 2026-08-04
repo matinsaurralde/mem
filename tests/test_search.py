@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 
 import pytest
@@ -39,14 +40,32 @@ def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> int:
     return FROZEN_NOW
 
 
+def expected_score(
+    frequency: int,
+    recency: float,
+    prefix: float,
+    context: float,
+) -> float:
+    """Re-derive the documented score from literal weights.
+
+    Deliberately spelled out with literals instead of importing the module's
+    own constants: a test that reads its expectation out of the code under
+    test cannot fail when that code changes.
+    """
+    normalized_frequency = min(1.0, math.log1p(frequency) / math.log1p(50))
+    return 0.35 * normalized_frequency + 0.35 * recency + 0.15 * prefix + 0.15 * context
+
+
 class TestScoreFormula:
-    """The documented formula: 0.4*frequency + 0.4*recency + 0.2*context.
+    """0.35*frequency + 0.35*recency + 0.15*prefix + 0.15*context, all in [0,1].
 
     These tests assert the numeric score, not just the resulting order.
     Order-only assertions are satisfied by many wrong formulas — for example
     dropping the recency term entirely still orders correctly whenever
     frequency happens to agree with recency, which is the common case in a
-    hand-written fixture.
+    hand-written fixture. That is exactly how the unnormalised frequency term
+    survived: every ordering test passed while the formula was, in effect,
+    sorting on one signal.
     """
 
     def test_weights_for_a_current_repo_command(self):
@@ -55,8 +74,10 @@ class TestScoreFormula:
 
         score = search.score_command(cmd, "git", current_repo=REPO, frequency=3)
 
-        # 3*0.4 (frequency) + 1.0*0.4 (recency, run just now) + 1.0*0.2 (context)
-        assert score == pytest.approx(1.8, abs=1e-3)
+        # run 3 times, run just now, starts with the query, current repo
+        assert score == pytest.approx(
+            expected_score(3, recency=1.0, prefix=1.0, context=1.0), abs=1e-3
+        )
 
     def test_sibling_repo_gets_half_the_context_boost(self):
         """Repos sharing a parent directory are related, but not the same repo."""
@@ -65,8 +86,9 @@ class TestScoreFormula:
 
         score = search.score_command(cmd, "git", current_repo=REPO, frequency=1)
 
-        # 0.4 + 0.4 + 0.5*0.2
-        assert score == pytest.approx(0.9, abs=1e-3)
+        assert score == pytest.approx(
+            expected_score(1, recency=1.0, prefix=1.0, context=0.5), abs=1e-3
+        )
 
     def test_unrelated_repo_gets_no_context_boost(self):
         now = int(time.time())
@@ -74,7 +96,9 @@ class TestScoreFormula:
 
         score = search.score_command(cmd, "git", current_repo=REPO, frequency=1)
 
-        assert score == pytest.approx(0.8, abs=1e-3)
+        assert score == pytest.approx(
+            expected_score(1, recency=1.0, prefix=1.0, context=0.0), abs=1e-3
+        )
 
     def test_context_ladder_is_strictly_ordered(self, frozen_clock: int):
         """same repo > sibling > unrelated, with everything else held equal."""
@@ -95,7 +119,9 @@ class TestScoreFormula:
 
         assert search.score_command(
             cmd, "git", current_repo=None, frequency=1
-        ) == pytest.approx(0.8, abs=1e-3)
+        ) == pytest.approx(
+            expected_score(1, recency=1.0, prefix=1.0, context=0.0), abs=1e-3
+        )
 
     @pytest.mark.parametrize(
         ("age_days", "recency"), [(0, 1.0), (7, 0.5), (14, 0.25), (21, 0.125)]
@@ -107,7 +133,9 @@ class TestScoreFormula:
 
         score = search.score_command(cmd, "c", current_repo=None, frequency=1)
 
-        assert score == pytest.approx(0.4 + 0.4 * recency, abs=1e-3)
+        assert score == pytest.approx(
+            expected_score(1, recency=recency, prefix=1.0, context=0.0), abs=1e-3
+        )
 
     def test_future_timestamps_are_clamped_to_now(self):
         """Clock skew must not produce a recency bonus above 1.0."""
@@ -116,7 +144,9 @@ class TestScoreFormula:
 
         assert search.score_command(
             cmd, "c", current_repo=None, frequency=1
-        ) == pytest.approx(0.8, abs=1e-3)
+        ) == pytest.approx(
+            expected_score(1, recency=1.0, prefix=1.0, context=0.0), abs=1e-3
+        )
 
     def test_exit_code_does_not_affect_score(self, frozen_clock: int):
         """Documented v1 decision: failures are captured but not deprioritised."""
@@ -126,6 +156,94 @@ class TestScoreFormula:
         assert search.score_command(ok, "c", REPO, 1) == search.score_command(
             failed, "c", REPO, 1
         )
+
+
+class TestRankingIsNotJustFrequency:
+    """Every signal other than frequency must be able to change the order.
+
+    `frequency` used to enter the formula as a raw count while every other
+    feature was bounded by 1, so a command run ten times scored 4.0 against a
+    ceiling of 0.6 for recency and context combined. Nothing except frequency
+    could ever decide a ranking. These are the orderings that were impossible.
+    """
+
+    def test_a_recent_command_beats_a_stale_one_run_far_more_often(
+        self, tmp_mem_dir
+    ) -> None:
+        """Twenty runs six months ago lose to one run today."""
+        now = int(time.time())
+        for _ in range(20):
+            storage.append_command(
+                make_command(command="deploy old-way", ts=now - 180 * 86400, repo=REPO)
+            )
+        storage.append_command(
+            make_command(command="deploy new-way", ts=now, repo=REPO)
+        )
+
+        results = search.search("deploy", current_repo=REPO)
+
+        assert [c.command for c, _ in results] == ["deploy new-way", "deploy old-way"]
+
+    def test_the_current_repo_beats_an_unrelated_one_run_more_often(
+        self, tmp_mem_dir
+    ) -> None:
+        """Context is a real signal, not decoration."""
+        now = int(time.time())
+        for _ in range(8):
+            storage.append_command(
+                make_command(command="make elsewhere", ts=now, repo=UNRELATED)
+            )
+        storage.append_command(make_command(command="make here", ts=now, repo=REPO))
+
+        results = search.search("make", current_repo=REPO)
+
+        assert [c.command for c, _ in results][0] == "make here"
+
+    def test_the_command_you_meant_beats_one_that_merely_mentions_it(
+        self, tmp_mem_dir
+    ) -> None:
+        """Typing `git push` should surface the command, not a note about it."""
+        now = int(time.time())
+        for _ in range(6):
+            storage.append_command(
+                make_command(command='echo "remember to git push"', ts=now, repo=REPO)
+            )
+        storage.append_command(
+            make_command(command="git push origin main", ts=now, repo=REPO)
+        )
+
+        results = search.search("git push", current_repo=REPO)
+
+        assert [c.command for c, _ in results][0] == "git push origin main"
+
+    def test_frequency_saturates_instead_of_running_away(self, tmp_mem_dir) -> None:
+        """A pathologically repeated command cannot own every result.
+
+        The gap between 1 and 10 runs must be much larger than the gap between
+        50 and 500 — that is what a logarithm with a ceiling is for. Under a
+        raw count the second gap was fifty times the first.
+        """
+        cmd = make_command(command="c", ts=int(time.time()), repo=None)
+
+        def score(n: int) -> float:
+            return search.score_command(cmd, "c", current_repo=None, frequency=n)
+
+        early_gain = score(10) - score(1)
+        late_gain = score(500) - score(50)
+
+        assert late_gain == pytest.approx(0.0, abs=1e-9)
+        assert early_gain > 0.05
+        assert score(10_000) <= 1.0
+
+    def test_no_score_can_exceed_one(self, tmp_mem_dir) -> None:
+        """Every feature is in [0,1] and the weights sum to 1.
+
+        Worth pinning: a score that reads as a fraction is the only reason the
+        `--json` output's `score` field means anything to a caller.
+        """
+        cmd = make_command(command="git status", ts=int(time.time()), repo=REPO)
+
+        assert search.score_command(cmd, "git", REPO, 10_000) <= 1.0
 
 
 class TestScoring:
@@ -170,7 +288,9 @@ class TestScoring:
         top_cmd, top_score = results[0]
         assert top_cmd.repo == REPO
         # frequency 2 across both files, current-repo context
-        assert top_score == pytest.approx(2 * 0.4 + 0.4 + 0.2, abs=1e-3)
+        assert top_score == pytest.approx(
+            expected_score(2, recency=1.0, prefix=1.0, context=1.0), abs=1e-3
+        )
 
     def test_sibling_repo_outranks_unrelated_repo(self, tmp_mem_dir):
         """The 0.5 sibling tier must actually change the ranking."""
@@ -200,7 +320,9 @@ class TestScoring:
         cmd, score = results[0]
         # The surviving occurrence must be the recent one, not the stale one
         assert cmd.ts == now
-        assert score == pytest.approx(2 * 0.4 + 0.4 + 0.2, abs=1e-3)
+        assert score == pytest.approx(
+            expected_score(2, recency=1.0, prefix=1.0, context=1.0), abs=1e-3
+        )
 
     def test_results_are_sorted_by_score_descending(self, tmp_mem_dir):
         now = int(time.time())
@@ -265,7 +387,9 @@ class TestScoring:
 
         _, score = search.search("ls", current_repo=REPO)[0]
         # frequency 1, not 2
-        assert score == pytest.approx(0.4 + 0.4, abs=1e-3)
+        assert score == pytest.approx(
+            expected_score(1, recency=1.0, prefix=1.0, context=0.0), abs=1e-3
+        )
 
 
 class TestSearchPatterns:
