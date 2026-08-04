@@ -25,7 +25,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from mem.models import CapturedCommand, GroupFile, PatternFile, VarsFile, WorkSession
+from mem.models import (
+    AgentAccess,
+    AgentAuditEntry,
+    CapturedCommand,
+    GroupFile,
+    PatternFile,
+    VarsFile,
+    WorkSession,
+)
 
 MEM_DIR = Path.home() / ".mem"
 
@@ -789,6 +797,7 @@ def forget_commands(query: str) -> int:
         _scrub_groups(query)
         _scrub_vars(query)
         _scrub_session_state(query)
+        _scrub_agent_audit(query)
 
     return removed
 
@@ -911,6 +920,43 @@ def _scrub_session_state(query: str) -> None:
         path.unlink()
 
 
+def _scrub_agent_audit(query: str) -> None:
+    """Drop audit entries whose recorded arguments carry the forgotten text.
+
+    The audit log is append-only against *time*, not against the user: an
+    agent's query string is stored, and a query is free text the user may
+    later want gone. ``mem forget`` promises no traces anywhere, and this is
+    one of the places a trace can hide.
+    """
+    path = agent_audit_file()
+    if not path.exists():
+        return
+    kept: list[str] = []
+    matched = 0
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                kept.append(stripped)
+                continue
+            args = data.get("arguments") or {}
+            if isinstance(args, dict) and any(query in str(v) for v in args.values()):
+                matched += 1
+            else:
+                kept.append(stripped)
+
+    if not matched:
+        return
+    if kept:
+        atomic_write(path, "\n".join(kept) + "\n")
+    else:
+        path.unlink()
+
+
 # --- Sync counter ---
 
 SYNC_COUNTER_FILE = MEM_DIR / ".sync_counter"
@@ -1016,3 +1062,83 @@ def write_vars_file(data: VarsFile) -> None:
     """
     with exclusive_lock():
         atomic_write(VARS_FILE, data.model_dump_json(indent=2))
+
+
+# --- Agent access (MCP) ---
+#
+# These two paths are derived at call time instead of being module constants
+# like VARS_FILE, for the same reason as _lock_file(): a constant is bound to
+# whatever MEM_DIR was at import time, so a test (or anything else) that
+# repoints MEM_DIR would still read and write the developer's real ~/.mem.
+# For the flag that decides whether an AI agent may read the user's shell
+# history, "the test accidentally used the real file" is not an acceptable
+# failure mode.
+
+
+def agent_file() -> Path:
+    """Path to the agent access flag."""
+    return MEM_DIR / "agent.json"
+
+
+def agent_audit_file() -> Path:
+    """Path to the append-only agent audit log."""
+    return MEM_DIR / "agent-audit.jsonl"
+
+
+def read_agent_access() -> AgentAccess:
+    """Read the agent access flag, defaulting to disabled.
+
+    Every failure mode — missing file, unreadable file, corrupted JSON —
+    resolves to disabled. A privacy switch must fail closed: the one thing
+    it may never do is grant access because it could not read the answer.
+    """
+    path = agent_file()
+    if not path.exists():
+        return AgentAccess()
+    try:
+        return AgentAccess.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception:
+        print(
+            f"warning: corrupted agent file {path.name}, treating as disabled",
+            file=sys.stderr,
+        )
+        return AgentAccess()
+
+
+def write_agent_access(access: AgentAccess) -> None:
+    """Write the agent access flag atomically, owner-only."""
+    ensure_dirs()
+    with exclusive_lock():
+        atomic_write(agent_file(), access.model_dump_json(indent=2))
+
+
+def append_agent_audit(entry: AgentAuditEntry) -> None:
+    """Append one agent request to the audit log.
+
+    Append-only by design and never rotated by :func:`rotate`: the value of
+    an audit trail is that it cannot be quietly shortened. It is scrubbed by
+    ``mem forget`` (see :func:`_scrub_agent_audit`), which is a deliberate,
+    user-initiated deletion rather than a background one.
+    """
+    ensure_dirs()
+    with exclusive_lock():
+        _append_line(agent_audit_file(), entry.to_jsonl())
+
+
+def read_agent_audit() -> Iterator[AgentAuditEntry]:
+    """Lazily read the agent audit log, skipping corrupted lines."""
+    path = agent_audit_file()
+    if not path.exists():
+        return
+    with path.open("r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield AgentAuditEntry.from_jsonl(line)
+            except Exception:
+                print(
+                    f"warning: skipping corrupted line {line_num} in {path.name}",
+                    file=sys.stderr,
+                )

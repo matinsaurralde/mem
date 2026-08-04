@@ -169,3 +169,48 @@ class GroupFile(BaseModel):
 
     saved: list[SavedCommand] = []
     groups: dict[str, Group] = {}
+
+
+# --- Agent access (MCP) ---
+
+
+class AgentAccess(BaseModel):
+    """Whether an AI agent may read mem's store over MCP.
+
+    Default ``False`` is the whole point: history is captured for the human
+    who typed it, and handing it to a model is a separate decision that has
+    to be made explicitly with ``mem agent enable``. ``updated_at`` records
+    when that decision was last changed so ``mem agent status`` can show it.
+    """
+
+    enabled: bool = False
+    updated_at: int = 0
+
+
+class AgentAuditEntry(BaseModel):
+    """One line of the append-only record of what an agent asked mem for.
+
+    Stored per tool call rather than per session: a session boundary is not
+    observable over stdio (the client can keep the process alive for hours),
+    while a call is the unit a user would actually want to review.
+
+    ``arguments`` is redacted before it is written — an agent can put a
+    secret in a query string, and an audit log that records secrets is a
+    second copy of the thing this feature exists to protect.
+    """
+
+    ts: int
+    tool: str
+    arguments: dict[str, str] = {}
+    results: int = 0
+    ok: bool = True
+    error: str | None = None
+
+    def to_jsonl(self) -> str:
+        """Serialize to a single JSONL line for append-only storage."""
+        return self.model_dump_json()
+
+    @classmethod
+    def from_jsonl(cls, line: str) -> AgentAuditEntry:
+        """Deserialize from a JSONL line, stripping whitespace."""
+        return cls.model_validate_json(line.strip())

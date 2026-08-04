@@ -529,3 +529,213 @@ def detect_credentials(cmd: str) -> list[tuple[str, str, str]]:
         return _deduplicate_detections(raw, cmd)
     except Exception:
         return []
+
+
+# --- Deterministic redaction -------------------------------------------------
+#
+# Why this exists alongside detect_credentials(): they answer different
+# questions under different constraints.
+#
+# detect_credentials() is an *interactive suggestion*. It runs Apple FM, so it
+# needs the optional `ai` extra, costs seconds, is non-deterministic, and is
+# allowed to be wrong in both directions because a human confirms every hit at
+# the prompt. It exists to help you turn a secret you already typed into a
+# named variable.
+#
+# redact_secrets() is a *boundary*. It runs on every string that leaves the
+# machine's owner and reaches an AI agent over MCP. It therefore has to work
+# with no optional dependency, in microseconds, identically on every run, and
+# with nobody watching. Those requirements rule out an AI detector entirely, so
+# this is a fixed rule set — pattern-based, deliberately conservative, and
+# documented for exactly what it does and does not catch.
+#
+# What it does NOT do, on purpose: there is no generic "long high-entropy
+# string" rule. Shell history is full of git SHAs, base64 file contents, UUIDs,
+# checksums and container digests; a length-or-entropy heuristic would redact
+# those and turn a search result into noise. Secrets are caught by the shape of
+# the *context* they appear in (a known key prefix, a credential-ish name, an
+# auth header, a URL userinfo field), not by looking secret.
+
+REDACTED = "[REDACTED]"
+
+# A name that, when it appears on the left of an assignment or as a flag,
+# means the value to its right is a credential. The leading `[A-Za-z0-9_.-]*`
+# lets a prefix through (PGPASSWORD, AWS_SECRET_ACCESS_KEY, --api-key) while
+# still requiring the name to *end* at one of the alternatives — so BYPASSED,
+# PASSTHROUGH and KEYBOARD do not match.
+_SECRET_WORD = (
+    r"(?:passwords?|passwd|passphrase|secrets?|tokens?|api[-_]?keys?|"
+    r"access[-_]?key|secret[-_]?key|private[-_]?key|credentials?|"
+    r"auth[-_]?token|mysql_pwd)"
+)
+_SECRET_NAME = rf"[A-Za-z0-9_.-]*{_SECRET_WORD}"
+
+# The same idea, but requiring a prefix: `aws_secret_access_key`, not a bare
+# `secret`. Used only by the whitespace-separated rule, where a bare word is
+# far too weak a signal — `kubectl get secret my-app-secret` would lose the
+# resource name, and `grep token /var/log/app.log` would lose the path.
+_QUALIFIED_SECRET_NAME = rf"[A-Za-z0-9_.-]*[_.-]{_SECRET_WORD}"
+
+# A value that is a variable reference, not a secret. `mem run` deliberately
+# stores `$API_TOKEN` rather than the token, and redacting the placeholder
+# would destroy the one piece of information the agent actually needs: which
+# variable the runbook expects.
+_PLACEHOLDER = re.compile(r"^\$\$?\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
+
+_QUOTED_OR_BARE = r"\"[^\"]*\"|'[^']*'|\S+"
+
+# For whitespace-separated forms only: a value that starts with a dash is the
+# next flag, not the secret (`--password --verbose` means "prompt me").
+_QUOTED_OR_BARE_VALUE = r"\"[^\"]*\"|'[^']*'|[^-\s]\S*"
+
+
+def _is_placeholder(value: str) -> bool:
+    """True if a captured value is a shell/mem variable reference."""
+    return bool(_PLACEHOLDER.match(value.strip("\"'")))
+
+
+def _redact_tail(match: re.Match[str]) -> str:
+    """Replace the last group of a match with the redaction marker.
+
+    Used by the assignment and flag rules, which capture the name and the
+    separator so they can be preserved: `--token=[REDACTED]` still tells the
+    reader (and the agent) what kind of value belonged there.
+    """
+    value = match.group(match.re.groups)
+    if _is_placeholder(value):
+        return match.group(0)
+    prefix = match.group(0)[: match.start(match.re.groups) - match.start(0)]
+    return prefix + REDACTED
+
+
+def _redact_userinfo(match: re.Match[str]) -> str:
+    """Redact the password half of a `user:pass` pair, keeping the user.
+
+    Keeping the username is deliberate: it is rarely the secret and it is
+    often the part that makes a history entry recognisable. Purely numeric
+    right-hand sides are left alone because `-u 1000:1000` (docker) and
+    `:8080` are far more common in a shell history than a numeric password.
+
+    Group 4, when the pattern has one, is the trailing `@` of a URL. It has
+    to be put back explicitly — an earlier version dropped it and turned
+    ``postgres://admin:pw@db/app`` into a URL with no host separator.
+    """
+    prefix, user, secret = match.group(1), match.group(2), match.group(3)
+    suffix = match.group(4) if match.re.groups >= 4 else ""
+    if secret.isdigit() or _is_placeholder(secret):
+        return match.group(0)
+    return f"{prefix}{user}:{REDACTED}{suffix}"
+
+
+# Ordered on purpose. Context rules (an auth header, a URL userinfo field, a
+# credential-ish name) run before the shape rules (vendor prefixes, JWTs) so
+# that a token inside a header is redacted *as* the header's value and the
+# surrounding words survive. Running them the other way round produced
+# `Authorization: [REDACTED] [REDACTED]`, because the shape rule replaced the
+# token and the context rule then redacted the scheme word left behind.
+_REDACTIONS: list[tuple[re.Pattern[str], object]] = [
+    # 1. PEM private key blobs, complete or truncated. `[^-]*` matches the
+    #    algorithm word ("RSA ", " OPENSSH ") without escaping the dashes.
+    (
+        re.compile(
+            r"-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?-----END[^-]*PRIVATE KEY-----"
+        ),
+        REDACTED,
+    ),
+    (re.compile(r"-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*"), REDACTED),
+    # 2. Authorization headers. The scheme word is optional and captured so it
+    #    is preserved: `Authorization: Bearer [REDACTED]` still tells a reader
+    #    which auth mechanism the command used.
+    (
+        re.compile(
+            r"(?i)(authorization\s*:\s*)((?:bearer|basic|token)\s+)?"
+            r"([^\"'\s]+)"
+        ),
+        _redact_tail,
+    ),
+    # 3. A bare `Bearer <token>` outside a named header.
+    (
+        re.compile(r"(?i)\b(bearer|basic)(\s+)([A-Za-z0-9._~+/=-]{8,})"),
+        _redact_tail,
+    ),
+    # 4. Credentials embedded in a URL: scheme://user:pass@host.
+    (re.compile(r"(://)([^/\s:@]+):([^/\s@]+)(@)"), _redact_userinfo),
+    # 5. `curl -u user:pass` / `--user user:pass`.
+    (re.compile(r"(?i)((?:^|\s)-u\s+|--user[= ])([^\s:]+):(\S+)"), _redact_userinfo),
+    # 6. NAME=value assignments — covers `PGPASSWORD=…`, `--token=…`,
+    #    `export STRIPE_SECRET_KEY=…` and every line of a leaked .env.
+    (
+        re.compile(rf"(?i)\b({_SECRET_NAME})(\s*=\s*)({_QUOTED_OR_BARE})"),
+        _redact_tail,
+    ),
+    # 7. `--password hunter2` — the space-separated long-flag form.
+    (
+        re.compile(rf"(?i)(--{_SECRET_NAME}\s+)({_QUOTED_OR_BARE_VALUE})"),
+        _redact_tail,
+    ),
+    # 8. `aws configure set aws_secret_access_key wJalr…` — a qualified name
+    #    followed by its value with no flag syntax at all. The weakest signal
+    #    in the table, so it is fenced in from three sides: the name must be
+    #    qualified (see _QUALIFIED_SECRET_NAME), it must not be a `$VAR`
+    #    reference (`curl -u $USER:$DEPLOY_TOKEN https://…` would otherwise
+    #    swallow the URL that follows), and the value must be neither a path
+    #    nor a URL, so `grep api_key ./src/config.py` survives intact.
+    (
+        re.compile(
+            rf"(?i)(?<![\w./$-])({_QUALIFIED_SECRET_NAME})(\s+)"
+            rf"(?!https?://)(\"[^\"]*\"|'[^']*'|[^-/~.\s]\S{{7,}})"
+        ),
+        _redact_tail,
+    ),
+    # 9. Vendor tokens with a documented prefix, anywhere they appear. The
+    #    prefix exists precisely so that scanners can recognise them.
+    (
+        re.compile(
+            r"\b(?:"
+            r"gh[pousr]_[A-Za-z0-9]{16,}"
+            r"|github_pat_[A-Za-z0-9_]{20,}"
+            r"|glpat-[A-Za-z0-9_-]{16,}"
+            r"|xox[abposr]-[A-Za-z0-9-]{10,}"
+            r"|sk-ant-[A-Za-z0-9_-]{16,}"
+            r"|sk-[A-Za-z0-9]{20,}"
+            r"|[sr]k_(?:live|test)_[A-Za-z0-9]{10,}"
+            r"|AIza[0-9A-Za-z_-]{35}"
+            r"|npm_[A-Za-z0-9]{36}"
+            r"|(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}"
+            r")\b"
+        ),
+        REDACTED,
+    ),
+    # 10. JWTs — three base64url segments, the first always starting `eyJ`
+    #     because that is a base64-encoded `{"`.
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}"),
+        REDACTED,
+    ),
+]
+
+
+def redact_secrets(text: str) -> str:
+    """Remove credential-shaped substrings from *text*.
+
+    This is the single choke point for anything mem hands to an AI agent.
+    It is idempotent — running it on already-redacted text is a no-op — so
+    callers may apply it defensively without mangling output.
+
+    Known gaps, stated rather than hidden:
+
+    - A bare positional secret with no context (``deploy.sh a1b2c3d4e5f6``)
+      is indistinguishable from an ordinary argument and is not redacted.
+    - Attached short flags (``mysql -phunter2``, ``redis-cli -a pw``) are not
+      redacted: ``-p`` collides with ``mkdir -p``, ``cp -p`` and ``docker -p``,
+      and mangling those was judged worse than missing a password that the
+      shell already exposes in ``ps``.
+    - Custom in-house token formats with no recognisable prefix are missed.
+
+    The honest summary: this removes the credential shapes that are known and
+    common. It is not a guarantee that no secret can pass, which is why agent
+    access is opt-in and audited rather than merely filtered.
+    """
+    for pattern, replacement in _REDACTIONS:
+        text = pattern.sub(replacement, text)  # type: ignore[arg-type]
+    return text
