@@ -893,12 +893,19 @@ class TestStdoutCarriesOnlyProtocol:
     def test_corrupted_history_warning_goes_to_stderr(
         self, home: Path, workdir: Path
     ) -> None:
-        """A corrupted JSONL line makes storage warn — on stderr, never stdout."""
+        """A corrupted JSONL line makes storage warn — on stderr, never stdout.
+
+        The corrupt line has to contain the query term. Search now tests the
+        raw line for the term before parsing it, so a line that could not have
+        matched anyway is skipped without ever being handed to the JSON
+        decoder — and therefore without producing a warning. The invariant
+        under test is unchanged: when storage does warn, it warns on stderr.
+        """
         enable(home, workdir)
         plant(home, [{"command": "kubectl get pods", "ts": NOW}])
         path = home / ".mem" / "repos" / "_global.jsonl"
         with path.open("a", encoding="utf-8") as f:
-            f.write("{ this line is corrupt\n")
+            f.write('{ "command": "kubectl this line is corrupt\n')
 
         result = serve(
             [INIT, call(2, "search_history", {"query": "kubectl"})], home, workdir
