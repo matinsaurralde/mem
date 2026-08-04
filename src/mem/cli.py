@@ -21,7 +21,8 @@ from rich.text import Text
 
 from mem import __version__
 from mem.capture import get_git_repo
-from mem.history import SUPPORTED_SHELLS, ImportPlan
+from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
+from mem.history import ImportPlan
 from mem.render import console, err_console, fit, plain, safe
 
 
@@ -161,6 +162,10 @@ def capture_cmd(command: str, dir: str, exit_code: int, duration_ms: int) -> Non
         pass
 
 
+# Shells mem can emit a capture hook for. Deliberately distinct from
+# `history.SUPPORTED_SHELLS` (imported above as IMPORTABLE_SHELLS), which is
+# the shells whose *history file* mem knows how to parse. The two sets happen
+# to match today and are different questions.
 SUPPORTED_SHELLS = ("zsh", "bash", "fish")
 
 
@@ -984,7 +989,7 @@ def _history_sources(
         if resolved is None:
             raise click.ClickException(
                 f"Cannot tell which shell wrote {path.name}. "
-                f"Add --shell {{{','.join(SUPPORTED_SHELLS)}}}."
+                f"Add --shell {{{','.join(IMPORTABLE_SHELLS)}}}."
             )
         return [(resolved, path)]
 
@@ -1096,7 +1101,7 @@ def _import_shell_history(
 @click.option(
     "--shell",
     "shell",
-    type=click.Choice(list(SUPPORTED_SHELLS)),
+    type=click.Choice(list(IMPORTABLE_SHELLS)),
     default=None,
     help="Limit the shell-history import to one shell",
 )

@@ -1139,10 +1139,12 @@ class TestBulkAppend:
             ]
         )
 
-        assert sorted(p.name for p in (storage.MEM_DIR / "repos").glob("*.jsonl")) == [
-            "w-one.jsonl",
-            "w-two.jsonl",
-        ]
+        # Derived, not spelled out: the repo-path-to-filename mapping now
+        # carries a hash suffix so two repos cannot collide, and a test that
+        # hard-codes the old names asserts the scheme instead of the split.
+        assert sorted(p.name for p in (storage.MEM_DIR / "repos").glob("*.jsonl")) == (
+            sorted(f"{storage.repo_key(r)}.jsonl" for r in ("/w/one", "/w/two"))
+        )
 
     def test_an_empty_batch_creates_no_file(self) -> None:
         """Importing nothing must not leave an empty _global.jsonl behind."""

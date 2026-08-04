@@ -472,8 +472,6 @@ def append_commands(cmds: list[CapturedCommand]) -> int:
     return len(cmds)
 
 
-
-
 # Characters that every JSON encoder emits verbatim inside a string. No
 # encoder escapes them, so a run made only of these appears byte-for-byte in
 # the raw line — which is what makes the prefilter below safe.
