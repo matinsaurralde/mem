@@ -80,6 +80,17 @@ mem kube▏  3/12417
 
 Results are ranked by the same formula `mem <query>` uses, so the two never disagree. Commands that failed are marked, because "the one that worked" is usually what you are looking for.
 
+**It learns from what you pick.** Choosing a result is the one moment you say, unambiguously, which command you meant — so mem counts it, and weighs it above everything it can only infer. One selection is enough to move a command past one you happen to have run twenty times:
+
+```bash
+mem "git commit"                  # 1. git commit --amend   (run 20 times)
+                                  # 3. git commit -v        (run once)
+# ...pick `git commit -v` in the finder, once...
+mem "git commit"                  # 1. git commit -v
+```
+
+Picks fade with a three-week half-life, so a command you chose constantly last quarter stops steering results once you stop choosing it. They live in `~/.mem/picks.json` — the one file here that cannot be rebuilt from your history, and the only one worth backing up. If you never open the finder, your ranking is exactly what it was.
+
 It never runs anything for you. A history search that executes behind your back is how people delete the wrong branch.
 
 Prefer your shell's own Ctrl+R? Set `MEM_NO_KEYBINDING=1` before loading the hook; capture still works.

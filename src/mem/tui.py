@@ -36,7 +36,7 @@ import tty
 import unicodedata
 from typing import IO, Iterator, NamedTuple, Sequence
 
-from mem import ranking
+from mem import picks, ranking
 
 # --- Terminal control --------------------------------------------------------
 
@@ -243,6 +243,9 @@ def rank(
     if not terms:
         return _most_recent(lines, limit)
 
+    # Read once for the whole page: it is one small file, and reading it per
+    # candidate would turn every keystroke into thousands of stat() calls.
+    pick_weights = picks.load(now)
     frequency: dict[str, int] = {}
     newest: dict[str, Entry] = {}
     for line in candidate_lines(lines, terms):
@@ -267,6 +270,7 @@ def rank(
                 current_repo=current_repo,
                 frequency=frequency[command],
                 now=now,
+                pick_weight=pick_weights.get(command, 0.0),
             ),
             frequency=frequency[command],
         )
@@ -686,6 +690,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if choice is None:
         return 1
+    # Recorded here and nowhere else: this is the one moment the user answers
+    # the exact question the ranking spends the rest of its life guessing at.
+    # After the terminal is restored, so a failure writing a ranking hint can
+    # never leave someone with a shell in raw mode.
+    picks.record(choice)
     print(choice)
     return 0
 
