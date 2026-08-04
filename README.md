@@ -25,6 +25,7 @@ mem silently captures every command you type, then lets you search, save, and re
 Ctrl+R                 # interactive finder, ranked
 mem deploy             # or search from the command line
 mem fix                # what fixed the last thing that broke
+mem promote            # sequences you repeat, ready to become runbooks
 mem save "cmd" -t ops  # save a command to a group
 mem run ops            # run the group interactively
 mem vars set API_KEY   # store a secret for saved commands
@@ -267,6 +268,68 @@ Two consequences worth knowing:
 - **Some real fixes are missed.** `git push` → `git pull --rebase` is not found, because the rule that would find it would also produce the false positives above. Missing a fix is invisible; inventing one is not.
 
 Credentials are removed from the output using the same redaction that guards the MCP server, so a `curl` with an auth header still shows you the fix without reprinting the token.
+
+---
+
+## Promote
+
+Groups are the most useful thing mem does and the least used, because building one means remembering to run `mem save` at the exact moment you're busy doing the thing. `mem promote` closes that gap: it reads the history you already have, finds sequences you repeat across separate work sessions, and works out which argument changed between runs.
+
+```bash
+mem promote              # what looks promotable
+mem promote 1            # save candidate 1 as a group (asks first)
+mem promote 1 --name ship
+mem promote --json
+```
+
+```
+$ mem promote
+
+   1.      kubectl-rollout
+           6 times · last 2d ago · strong
+           kubectl config use-context $CONFIG_ARG
+           kubectl apply -f deploy.yaml -n $CONFIG_ARG
+           kubectl rollout status deploy/api -n $CONFIG_ARG
+           $CONFIG_ARG was staging, prod, dev
+
+   2.      terraform-apply
+           4 times · last 6d ago · moderate
+           terraform fmt -recursive
+           terraform plan -out plan.tfplan
+           terraform apply plan.tfplan
+
+           mem promote <n> saves one as a group. It runs nothing.
+```
+
+```
+$ mem promote 1 --name deploy-staging
+
+  group    deploy-staging
+           kubectl config use-context $CONFIG_ARG
+           kubectl apply -f deploy.yaml -n $CONFIG_ARG
+           kubectl rollout status deploy/api -n $CONFIG_ARG
+           $CONFIG_ARG was staging, prod, dev
+
+Save these 3 commands as 'deploy-staging'? [y/N]: y
+Saved group deploy-staging with 3 commands.
+           mem run deploy-staging
+```
+
+The variable is the point. A sequence that recurs with a changing namespace or branch is worth *more* than an identical one, because that difference is precisely the parameter the runbook should take. `$CONFIG_ARG` above is a name mem derived, not a name it understood — rename it with `mem group edit`.
+
+### What it will and won't propose
+
+A sequence has to recur in **three separate sessions**. Repetitions inside one session don't count: a build loop run eight times in one afternoon is one episode of work, not eight.
+
+Commands that only *look* at things — `ls`, `cd`, `cat`, `git status` — are dropped before mining, so an inspection command between two steps doesn't break the sequence. Failed commands are dropped too: a command that exited non-zero isn't part of a working procedure.
+
+A token becomes a `$VAR` only in an argument position — never the program, never the subcommand after it, never a flag name. That's the rule that separates `git checkout main` / `git checkout staging` (a branch, so a variable) from `git push` / `git pull` (a different intent, so not the same sequence at all). Commands containing a pipe or a redirection are never generalised, because mem doesn't parse shell and won't guess inside one.
+
+**It will sometimes suggest `git add -A; git commit -m $MSG; git push`.** That really is a sequence you repeat, and it really is a poor runbook — the whole point is the message you type fresh each time. mem can't tell the difference from the outside. On the calibration corpus this was about one in eight suggestions. Skip it; it isn't a sign anything is broken.
+
+**Nothing is written without confirmation and nothing is ever executed.** A sequence containing something credential-shaped is shown with a warning and refused for promotion outright — there's no `--force`, because a secret in a saved runbook is a second copy of it on disk. Use `mem save --var` to save those steps with the secret as a variable instead.
+
+By default the five best candidates are shown. That number is calibrated, not cosmetic: ranking is what keeps the list trustworthy, and going deeper costs accuracy. See [ADR-012](docs/decisions/012-promote-mines-sequences-not-commands.md) for the corpus and the measurements.
 
 ---
 
@@ -520,6 +583,8 @@ Every request is appended to `~/.mem/agent-audit.jsonl`, redacted, and shown by
 ```bash
 mem fix                          # what fixed the last failure (see Fix)
 mem fix kubectl --json           # ...for a specific one, machine-readable
+mem promote                      # repeated sequences worth saving (see Promote)
+mem promote 1 --name deploy      # ...turn one into a group, after confirming
 mem stats                        # top commands, repos, totals
 mem stats --json                 # machine-readable stats
 mem forget "API_KEY=sk-..."      # permanently delete matching commands

@@ -491,6 +491,169 @@ def fix_cmd(query: tuple[str, ...], as_json: bool, limit: int) -> None:
     console.print()
 
 
+def _promote_scopes(global_flag: bool) -> tuple[Path, list[Path]]:
+    """Return the group file to write to, and every file to compare against.
+
+    Both scopes are always compared, even when only one is the target: a
+    sequence already promoted globally should stop being suggested inside a
+    repository too, or ``mem promote`` spends its first slot re-offering
+    something the user has already accepted.
+    """
+    from mem import groups, storage
+
+    target = groups.resolve_scope(global_flag)
+    scopes = [groups.resolve_scope(False), storage.GROUPS_GLOBAL_FILE]
+    return target, list(dict.fromkeys(scopes))
+
+
+def _existing_group_names(paths: list[Path]) -> set[str]:
+    """Every group name already in use, so a suggestion does not collide."""
+    from mem import storage
+
+    names: set[str] = set()
+    for path in paths:
+        try:
+            names |= set(storage.read_group_file(path).groups.keys())
+        except ValueError:
+            continue
+    return names
+
+
+def _promote_steps(entry: dict) -> None:
+    """Print one candidate's commands and the variables mem would extract."""
+    for step in entry["steps"]:
+        # Text, not markup: these are command lines the user typed, and a
+        # `sed 's/[a-z]//'` interpolated into a styled string loses its
+        # character class. Aligned under the label column of _fix_line.
+        console.print(Text(f"           {step}"))
+    for variable in entry["variables"]:
+        shown = ", ".join(variable["values"][:3])
+        more = " …" if len(variable["values"]) > 3 else ""
+        console.print(_fix_detail(f"${variable['name']} was {shown}{more}"))
+    if entry["has_credential"]:
+        console.print(
+            _fix_detail("contains something credential-shaped — cannot be saved")
+        )
+
+
+@cli.command(name="promote")
+@click.argument("index", required=False, type=int)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+# Five is load-bearing, not a display preference. Measured on the calibration
+# corpus (ADR-012): the top five candidates carried 0 false positives out of
+# 40, the top eight carried 12.5%, and the whole mined list — about twelve
+# candidates per history — carried 42%. Ranking, not filtering, is what makes
+# this output trustworthy, so raising the default trades directly against the
+# one property the feature cannot afford to lose.
+@click.option("--limit", "-n", default=5, help="Maximum candidates to show")
+@click.option(
+    "--global", "-g", "global_flag", is_flag=True, help="Save into the global scope"
+)
+@click.option("--name", "new_name", default=None, help="Name for the new group")
+def promote_cmd(
+    index: int | None,
+    as_json: bool,
+    limit: int,
+    global_flag: bool,
+    new_name: str | None,
+) -> None:
+    """Turn a sequence you keep repeating into a named group.
+
+    With no argument, lists the command sequences that recur across separate
+    work sessions, with the argument that changes between runs already turned
+    into a ``$VAR``. With INDEX, offers to save that one as a group.
+
+    Nothing is written without an explicit yes, and nothing is ever run.
+    """
+    from mem import groups, promote as mining
+
+    target, scopes = _promote_scopes(global_flag)
+    report = mining.build_report(
+        scopes=scopes, limit=limit, existing_names=_existing_group_names(scopes)
+    )
+    payload = mining.report_payload(report)
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    if not payload["candidates"]:
+        console.print(
+            "No repeated sequences yet — mem needs to see one three times "
+            "in three separate sessions."
+        )
+        return
+
+    if index is None:
+        console.print()
+        for entry in payload["candidates"]:
+            times = entry["occurrences"]
+            console.print(
+                _fix_line(f"{entry['index']:>2}.", "bold cyan", entry["name"])
+            )
+            console.print(
+                _fix_detail(
+                    f"{times} times · last {_relative_time(entry['last_seen'])} "
+                    f"· {entry['confidence']}"
+                )
+            )
+            _promote_steps(entry)
+            console.print()
+        console.print(
+            _fix_detail("mem promote <n> saves one as a group. It runs nothing.")
+        )
+        console.print()
+        return
+
+    if not 1 <= index <= len(payload["candidates"]):
+        raise click.ClickException(
+            f"No candidate {index}. Run `mem promote` to see what there is."
+        )
+
+    entry = payload["candidates"][index - 1]
+    candidate = report.candidates[index - 1]
+    name = new_name or entry["name"]
+
+    if candidate.has_credential:
+        # No --force. A secret written into a runbook is a second copy of the
+        # thing on disk, and the right answer is `mem save --var`, which turns
+        # it into a variable instead of storing it.
+        raise click.ClickException(
+            "This sequence contains something credential-shaped. mem will not "
+            "store it as a group — use `mem save --var` to save the steps with "
+            "the secret replaced by a variable."
+        )
+
+    groups.validate_group_name(name)
+    if name in _existing_group_names(scopes):
+        raise click.ClickException(
+            f"Group '{name}' already exists. Pass --name to choose another."
+        )
+
+    console.print()
+    console.print(_fix_line("group", "bold cyan", name))
+    _promote_steps(entry)
+    console.print()
+    if not click.confirm(f"Save these {len(candidate.steps)} commands as '{name}'?"):
+        console.print("Nothing saved.")
+        return
+
+    description = f"Promoted from {candidate.occurrences} repeated runs"
+    written = 0
+    for step in candidate.steps:
+        saved, _vars = groups.save_command(
+            target,
+            step,
+            comment=None,
+            group_name=name,
+            description_callback=lambda _n: description,
+        )
+        written += 1 if saved else 0
+
+    console.print(f"Saved group {safe(name)} with {written} commands.")
+    console.print(_fix_detail(f"mem run {name}"))
+
+
 @cli.command()
 @click.argument("query")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
