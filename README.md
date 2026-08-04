@@ -234,7 +234,7 @@ When `mem run` encounters variables, it resolves them in this order:
 
 1. **Inline arguments** — `mem run api API_TOKEN=abc123`
 2. **Shell environment** — `export API_TOKEN=abc123`
-3. **Persistent store** — `mem vars set API_TOKEN`
+3. **Persistent store** — `mem vars set API_TOKEN` (macOS Keychain)
 4. **Default value** — from `--var NAME=default` at save time
 5. **Interactive prompt** — asks you, only as a last resort
 
@@ -247,10 +247,37 @@ For values that persist across sessions but shouldn't be in `.zshrc`:
 ```bash
 mem vars set API_TOKEN           # hidden input (like sudo)
 mem vars set DB_HOST staging.db  # inline for non-sensitive values
-mem vars list                    # shows names only, never values
+mem vars list                    # shows names and backend, never values
 mem vars remove API_TOKEN
 mem vars clear
 ```
+
+**Values live in the macOS Keychain**, not in a file ([ADR-010](docs/decisions/010-keychain-for-variable-values.md)). They are encrypted at rest under your login password, and mem hands them to `/usr/bin/security` over a pipe — never on a command line, where `ps` would show them to every process on the machine.
+
+```bash
+# Everything mem stores is filed under one service, and it is yours:
+security find-generic-password -s mem-cli-vars -a API_TOKEN -w
+```
+
+They are also visible in **Keychain Access** under the service `mem-cli-vars`, listed as `mem-cli-vars:API_TOKEN`.
+
+If you used `mem vars` before this landed, your values are moved out of `~/.mem/vars.json` and into the Keychain the first time you run any `mem vars` command — one at a time, and each plaintext copy is deleted only after the Keychain has been read back and agrees. `vars.json` stays as the index of *which* variables exist:
+
+```json
+{"vars": {"API_TOKEN": {"value": null, "last_used": 0, "backend": "keychain"}}}
+```
+
+**When the Keychain is not available** — a locked keychain, a declined authorization prompt, a non-macOS machine — `mem vars set` fails and stores nothing. It does not fall back to writing your token in cleartext under a promise of encryption. Values that could not be migrated keep working and are listed as `plaintext`, with a warning, every time:
+
+```
+Stored variables (values hidden) — macOS Keychain, service 'mem-cli-vars'
+  API_TOKEN            keychain   last used 2h ago
+  LEGACY_TOKEN         plaintext  never used
+
+  ! 1 value(s) are still in plaintext in ~/.mem/vars.json.
+```
+
+Two limits worth knowing: a value is capped at roughly 2 KB (`security` truncates longer command lines instead of failing, so mem refuses them), and `mem forget` has to ask the Keychain for each stored value in order to match it — the only place mem reads them all.
 
 ### Variable status in listings
 
