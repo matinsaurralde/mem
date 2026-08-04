@@ -7,7 +7,7 @@
 
 mem's interactive finder replaces `Ctrl+R`. It is not a screen the user opens deliberately and waits for — it is a reflex, hit mid-thought, dozens of times a day, in the middle of typing. For that surface, **first-frame latency is the product**: past roughly 50 ms the widget stops feeling like part of the shell and starts feeling like an application that has to load, and a slow `Ctrl+R` is worse than no `Ctrl+R`, because the user goes back to `Ctrl+R` and never returns.
 
-The budget context is unforgiving. `mem --version` alone — the CLI doing nothing but starting Python and importing itself — measures **125 ms**. That is 2.5× the entire first-frame budget before a single pixel is drawn, which is why the finder cannot be a normal entry point into the existing CLI: it has to dispatch before Click, Rich, and Pydantic are imported at all.
+The budget context is unforgiving. `mem --version` alone — the CLI doing nothing but starting Python and importing itself — measures **125 ms**, of which 120 ms is imports (pydantic 63 ms, rich 23 ms, click 11 ms). That is 2.5× the entire first-frame budget before a single pixel is drawn, which is why the finder cannot be a normal entry point into the existing CLI: it has to dispatch before Click, Rich, and Pydantic are imported at all.
 
 Against that budget, the stacks were benchmarked with the same method in a clean temporary environment:
 
