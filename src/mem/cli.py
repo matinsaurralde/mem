@@ -196,8 +196,16 @@ def capture_cmd(command: str, dir: str, exit_code: int, duration_ms: int) -> Non
 
         capture_command(command, dir, exit_code, duration_ms)
     except Exception:
-        # Silent failure — never disrupt the user's shell
-        pass
+        # Silent toward the shell — this runs inside the prompt — but not
+        # invisible: with a logging handler configured (a test's caplog, or a
+        # basicConfig in a debugging session) the traceback is there, the
+        # same way `_sync` reports. What actually reaches here: OSError from
+        # the store (disk full, permissions, a lock that never came free), a
+        # pydantic ValueError when the hook hands over an argument the model
+        # rejects, and an OSError other than FileNotFoundError from the git
+        # subprocess. Session tracking and the sync trigger swallow their
+        # own failures inside capture_command.
+        logging.getLogger("mem.capture").debug("capture failed", exc_info=True)
 
 
 # Shells mem can emit a capture hook for. Deliberately distinct from

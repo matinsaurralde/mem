@@ -16,6 +16,7 @@ Two rules govern this file:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Iterator
 from unittest.mock import patch
@@ -545,6 +546,27 @@ class TestExitCodes:
 
         assert result.exit_code == 0
         assert result.stdout == ""
+
+    def test_capture_failure_is_logged_at_debug(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None, caplog
+    ) -> None:
+        """Silent toward the shell, but the traceback reaches the logger.
+
+        Before this, a capture failing on every prompt left no trace anywhere:
+        exit code zero, no output, and nothing to turn on to find out why.
+        """
+        with (
+            caplog.at_level(logging.DEBUG, logger="mem.capture"),
+            patch("mem.capture.capture_command", side_effect=OSError("disk full")),
+        ):
+            result = runner.invoke(cli, ["_capture", "git status", "/tmp", "0", "12"])
+
+        assert result.exit_code == 0
+        assert result.stdout == ""
+        [record] = [r for r in caplog.records if r.name == "mem.capture"]
+        assert record.levelno == logging.DEBUG
+        assert record.exc_info is not None
+        assert "disk full" in caplog.text
 
 
 # ---------------------------------------------------------------------------
