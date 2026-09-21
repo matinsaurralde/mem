@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import time
 from typing import Iterator
 from unittest.mock import patch
@@ -913,3 +914,91 @@ class TestCapturedCommandFidelity:
 
         assert result.exit_code == 0
         assert [entry["command"] for entry in json.loads(result.stdout)] == [command]
+
+
+# ---------------------------------------------------------------------------
+# Clipboard helpers
+# ---------------------------------------------------------------------------
+
+
+class TestClipboard:
+    """``pbcopy``/``pbpaste`` only: mem is a macOS tool by decision (ADR-010).
+
+    The helpers used to fall through to ``xclip`` and ``xsel``, twenty-odd
+    lines no test reached. What remains is small enough to pin completely.
+    """
+
+    def test_read_returns_pasteboard_text(self) -> None:
+        from mem.cli import _read_from_clipboard
+
+        completed = subprocess.CompletedProcess(["pbpaste"], 0, stdout="ls -la\n")
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbpaste"),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            assert _read_from_clipboard() == "ls -la\n"
+        assert run.call_args.args[0] == ["pbpaste"]
+
+    @pytest.mark.parametrize("stdout", ["", "   \n"])
+    def test_read_treats_blank_pasteboard_as_empty(self, stdout: str) -> None:
+        from mem.cli import _read_from_clipboard
+
+        completed = subprocess.CompletedProcess(["pbpaste"], 0, stdout=stdout)
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbpaste"),
+            patch("subprocess.run", return_value=completed),
+        ):
+            assert _read_from_clipboard() is None
+
+    def test_read_without_pbpaste_is_none_and_runs_nothing(self) -> None:
+        from mem.cli import _read_from_clipboard
+
+        with (
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run") as run,
+        ):
+            assert _read_from_clipboard() is None
+        run.assert_not_called()
+
+    def test_read_survives_a_hung_pbpaste(self) -> None:
+        from mem.cli import _read_from_clipboard
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbpaste"),
+            patch(
+                "subprocess.run", side_effect=subprocess.TimeoutExpired("pbpaste", 5)
+            ),
+        ):
+            assert _read_from_clipboard() is None
+
+    def test_copy_feeds_pbcopy_the_bytes(self) -> None:
+        from mem.cli import _copy_to_clipboard
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbcopy"),
+            patch("subprocess.run") as run,
+        ):
+            assert _copy_to_clipboard("héllo") is True
+        assert run.call_args.args[0] == ["pbcopy"]
+        assert run.call_args.kwargs["input"] == "héllo".encode()
+
+    def test_copy_without_pbcopy_is_false_and_runs_nothing(self) -> None:
+        from mem.cli import _copy_to_clipboard
+
+        with (
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run") as run,
+        ):
+            assert _copy_to_clipboard("x") is False
+        run.assert_not_called()
+
+    def test_copy_reports_a_failed_pbcopy(self) -> None:
+        from mem.cli import _copy_to_clipboard
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbcopy"),
+            patch(
+                "subprocess.run", side_effect=subprocess.CalledProcessError(1, "pbcopy")
+            ),
+        ):
+            assert _copy_to_clipboard("x") is False

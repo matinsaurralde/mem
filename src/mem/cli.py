@@ -1264,64 +1264,43 @@ def run(
 
 
 def _read_from_clipboard() -> str | None:
-    """Read text from system clipboard. Returns None if unavailable or empty."""
+    """Read text from the macOS pasteboard. None if unavailable or empty.
+
+    ``pbpaste`` only: mem is a macOS tool by decision (ADR-010), and the
+    ``xclip``/``xsel`` branches that used to follow were never exercised by
+    any test or any user.
+    """
     import shutil
     import subprocess as sp
 
+    if not shutil.which("pbpaste"):
+        return None
     try:
-        # macOS
-        if shutil.which("pbpaste"):
-            # 5 s: chosen by eye, not measured. pbpaste answers at once or
-            # hangs; the bound only decides how long a hang holds the prompt.
-            result = sp.run(["pbpaste"], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
-        # Linux (X11)
-        if shutil.which("xclip"):
-            result = sp.run(
-                ["xclip", "-selection", "clipboard", "-o"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
-        if shutil.which("xsel"):
-            result = sp.run(
-                ["xsel", "--clipboard", "--output"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
+        # 5 s: chosen by eye, not measured. pbpaste answers at once or hangs;
+        # the bound only decides how long a hang holds the prompt.
+        result = sp.run(["pbpaste"], capture_output=True, text=True, timeout=5)
     except (sp.CalledProcessError, sp.TimeoutExpired):
         return None
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout
     return None
 
 
 def _copy_to_clipboard(text: str) -> bool:
-    """Copy text to system clipboard. Returns True on success."""
+    """Copy text to the macOS pasteboard. True on success.
+
+    ``pbcopy`` only, for the same reason as :func:`_read_from_clipboard`.
+    """
     import shutil
     import subprocess as sp
 
+    if not shutil.which("pbcopy"):
+        return False
     try:
-        # macOS
-        if shutil.which("pbcopy"):
-            sp.run(["pbcopy"], input=text.encode(), check=True)
-            return True
-        # Linux (X11)
-        if shutil.which("xclip"):
-            sp.run(
-                ["xclip", "-selection", "clipboard"], input=text.encode(), check=True
-            )
-            return True
-        if shutil.which("xsel"):
-            sp.run(["xsel", "--clipboard", "--input"], input=text.encode(), check=True)
-            return True
+        sp.run(["pbcopy"], input=text.encode(), check=True)
     except sp.CalledProcessError:
         return False
-    return False
+    return True
 
 
 @cli.command()
