@@ -8,6 +8,7 @@ The capture pipeline: shell hook -> mem _capture -> this module -> storage.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import uuid
@@ -45,13 +46,41 @@ def get_git_repo(directory: str) -> str | None:
         return None
 
 
+# One or more SGR mouse reports (`CSI < button ; column ; row M`, `m` on release)
+# with nothing else on the line, the CSI prefix optional because the line editor
+# has usually already consumed it. This is what a shell prompt receives when a
+# full-screen program dies without turning mouse tracking back off.
+_TERMINAL_NOISE = re.compile(r"(?:(?:\x1b\[<|\[<)?\d+;\d+;\d+[Mm])+")
+
+
+def looks_like_terminal_noise(command: str) -> bool:
+    """True when *command* is terminal mouse-report garbage, not something typed.
+
+    Real case: `claude` segfaulted (exit 139) with mouse tracking enabled, so
+    every later mouse move at the prompt fed zsh `ESC [ < 35;165;16 M`. zle
+    dropped the unbound prefix and inserted the payload; Enter then ran
+    `35;165;16M...`, which failed with 127 and was captured as a command. It
+    surfaced as "the last command that failed" in `mem fix`.
+
+    Deliberately narrow: the whole line must be mouse reports. `echo 65;50;35M`
+    or `sleep 1;ls` are commands someone chose to run and are kept.
+    """
+    return _TERMINAL_NOISE.fullmatch(command.strip()) is not None
+
+
 def capture_command(raw: str, directory: str, exit_code: int, duration_ms: int) -> None:
     """Capture a shell command with full context and persist it.
 
     Called by the shell hook after every command execution.
     Builds a CapturedCommand with the current timestamp and git repo,
     then appends it to the appropriate JSONL file.
+
+    Terminal noise is dropped before anything runs — no repo lookup, no
+    session update, no sync counter — and silently, like every other skip in
+    the capture path (`mem _capture` never prints and always exits 0).
     """
+    if looks_like_terminal_noise(raw):
+        return
     repo = get_git_repo(directory)
     cmd = CapturedCommand(
         command=raw,
