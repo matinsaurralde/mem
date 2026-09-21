@@ -113,7 +113,8 @@ MAX_LIMIT = 50
 # How deep `search_history` over-fetches when a `repo` filter is given, since
 # the ranking engine scores every repository and the filter is applied to its
 # output afterwards. Deep enough that a repo with a modest share of the history
-# still fills MAX_LIMIT; never returned to the client as such.
+# still fills MAX_LIMIT; never returned to the client as such. 500 is chosen
+# by eye, not measured.
 MAX_SCAN = 500
 
 DISABLED_MESSAGE = (
@@ -409,6 +410,9 @@ def _tool_recent_failures(args: dict[str, Any]) -> dict[str, Any]:
             if cmd.exit_code == 0:
                 succeeded_later.setdefault(cmd.command, index)
 
+        # Two lines of "what was run next", where `mem fix` reads three: this
+        # tool reports context rather than mining a correction, and an agent
+        # reading a list needs less of it. Chosen by eye, not measured.
         for failure in iter_failures(commands, lookahead=2):
             retry = succeeded_later.get(failure.command.command)
             failures.append(
@@ -556,6 +560,8 @@ def _audit(tool: str, args: dict[str, Any], results: int, error: str | None) -> 
     already computed and refusing to return it helps nobody. The write itself
     goes through the storage layer's lock and 0600 permissions.
     """
+    # No tool takes more than three arguments; ten caps what a hostile client
+    # can make the audit log store per call. Chosen by eye.
     safe_args = {
         str(k): redact_secrets(v if isinstance(v, str) else json.dumps(v))
         for k, v in list(args.items())[:10]

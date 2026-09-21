@@ -172,7 +172,9 @@ SESSION_IDLE_SECONDS = 300
 #: Longest think-time gap between two consecutive steps of one procedure.
 MAX_STEP_GAP_SECONDS = 900
 
-#: Shortest and longest sequence that may be proposed as a group.
+#: Shortest and longest sequence that may be proposed as a group. The
+#: reasoning is in the module docstring; the exact upper bound is chosen by
+#: eye, not measured.
 MIN_SEQUENCE_LENGTH = 2
 MAX_SEQUENCE_LENGTH = 8
 
@@ -186,6 +188,8 @@ MAX_VARIABLES = 2
 #: three-word ladder as ``mem fix`` (strong / moderate / weak) but higher
 #: rungs: 6/3 here against fix's 3/2, because an occurrence here is a whole
 #: session, not a single pair, and the sequences worth a runbook recur often.
+#: Not measured: ADR-012 measured MIN_OCCURRENCES and the display limit, not
+#: where the wording changes.
 STRONG_EVIDENCE = 6
 MODERATE_EVIDENCE = 3
 
@@ -963,6 +967,9 @@ def mine_all() -> list[Candidate]:
 
 # --- naming ----------------------------------------------------------------
 
+# The same six-character ceiling on an extension as ``_FILENAME`` above,
+# without its leading-letter rule: this one strips, it does not classify, so
+# ``run.v2`` should lose its suffix too. Six is chosen by eye, not measured.
 _TRAILING_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 
 

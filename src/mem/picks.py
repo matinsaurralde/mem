@@ -51,11 +51,13 @@ from mem import _fsutil
 HALF_LIFE_DAYS = 21.0
 
 # Below this decayed weight an entry no longer affects any ranking, so keeping
-# it only grows the file. Roughly six months of not being chosen.
+# it only grows the file. A single pick reaches it after 21 * log2(50), about
+# 118 days; a command picked ten times takes about 188. Chosen by eye.
 _PRUNE_BELOW = 0.02
 
 # A hard cap so a script hammering the finder cannot grow this file without
-# bound. Far above any human's working set of commands.
+# bound. Far above any human's working set of commands; the exact figure is
+# chosen by eye, not measured.
 MAX_ENTRIES = 5_000
 
 _SECONDS_PER_DAY = 86400.0
@@ -150,6 +152,8 @@ def record(command: str, now: float | None = None) -> None:
             ):
                 count, stamp = 0.0, moment
             entries[command] = {
+                # Six decimals keeps a hand-readable file; a difference below
+                # that never moves a ranking. Chosen by eye.
                 "count": round(_decay(float(count), moment - float(stamp)) + 1.0, 6),
                 "ts": int(moment),
             }

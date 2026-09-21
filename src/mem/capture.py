@@ -37,6 +37,8 @@ def get_git_repo(directory: str) -> str | None:
             ["git", "-C", directory, "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            # rev-parse answers in milliseconds; the timeout only guards a
+            # hung filesystem (a dead network mount). Chosen by eye.
             timeout=5,
         )
         if result.returncode == 0:
@@ -156,10 +158,10 @@ class SessionTracker:
 
     Why 300 seconds: Five minutes is long enough that brief interruptions
     (reading docs, bathroom breaks) don't split a session, but short
-    enough that genuine context switches are detected. This threshold
-    was chosen by observing that most developers maintain focus on a
-    single task for at least 5 minutes, and breaks longer than that
-    typically indicate a task switch.
+    enough that genuine context switches are detected. Chosen by eye, not
+    measured. ADR-012 keeps the same number for re-deriving sessions in
+    ``mem promote`` — it found that what matters is measuring think time
+    against it, not the value itself — so changing it here changes both.
 
     State is persisted in ~/.mem/.session_state.json so sessions
     survive shell restarts.
@@ -239,8 +241,10 @@ class SessionTracker:
         session = WorkSession(
             id=state.session_id,
             summary=summary,
-            started_at=state.last_command_ts
-            - (len(state.commands) * 10),  # approximate
+            # The state keeps no per-command timestamps, so the start is
+            # fabricated at ten seconds a command: a placeholder chosen by
+            # eye, not measured, which is why ADR-012 refuses to read it.
+            started_at=state.last_command_ts - (len(state.commands) * 10),
             ended_at=state.last_command_ts,
             dir="",  # not tracked in state for simplicity
             repo=state.last_repo,

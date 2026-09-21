@@ -292,6 +292,8 @@ def search(
     """Search command history for commands matching a query.
 
     Returns a list of (command, score) tuples, ranked by score descending.
+    Ten by default because it fits a terminal without scrolling; chosen by
+    eye, not measured.
 
     **The matching rule.** A command matches when every word of the query
     appears in it. If nothing does, and only then, the query is re-read

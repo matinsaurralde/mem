@@ -228,6 +228,9 @@ def iter_failures(
 # --- textual comparison ----------------------------------------------------
 
 
+# 4096 entries is chosen by eye, not measured: comfortably above the distinct
+# command lines one mining pass compares, and small enough that the cache is
+# never what a `mem fix` run's memory is made of.
 @lru_cache(maxsize=4096)
 def normalized_tokens(command: str) -> tuple[str, ...]:
     """Split a command line into comparison tokens.
@@ -721,7 +724,11 @@ class FixReport:
 def build_report(
     query: str | None = None, current_repo: str | None = None, limit: int = 3
 ) -> FixReport:
-    """Mine the store and answer one ``mem fix`` invocation."""
+    """Mine the store and answer one ``mem fix`` invocation.
+
+    Three fixes by default: the answer to "what fixed this" is usually one
+    command, and a fourth candidate is noise. Chosen by eye, not measured.
+    """
     corrections, failures = mine_all()
     failure = select_failure(failures, query=query, current_repo=current_repo)
     if failure is None:

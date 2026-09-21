@@ -53,6 +53,11 @@ logger = logging.getLogger(__name__)
 # what keeps enabling it from being an incident; the next run continues.
 SYNC_BUDGET = 50
 
+# Fewer commands than this and a tool gets no pattern file: with one or two
+# examples there is no repetition to abstract over. Chosen by eye, not
+# measured.
+MIN_COMMANDS_PER_TOOL = 5
+
 # Per-command generalization prompt.
 # Why this design:
 # - One command at a time avoids dedup/counting errors from the LLM
@@ -346,6 +351,8 @@ def _heuristic_patterns(tool: str, commands: list[str]) -> PatternExtractionResu
     for cmd in commands:
         freq[cmd] += 1
 
+    # The ten most repeated commands stand in for patterns. Ten is chosen by
+    # eye, not measured; it is what fits in a `mem patterns` listing.
     patterns = [
         CommandPattern(pattern=cmd, example=cmd, frequency=count)
         for cmd, count in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -406,7 +413,7 @@ def run_pattern_extraction(
             if cmd.command.split()[:1] == [tool]
         ]
 
-    if len(commands) < 5:
+    if len(commands) < MIN_COMMANDS_PER_TOOL:
         return 0  # Not enough data for meaningful patterns
 
     cache = _load_cache(tool)
@@ -461,7 +468,7 @@ def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
     for tool, commands in sorted(
         tool_commands.items(), key=lambda kv: len(kv[1]), reverse=True
     ):
-        if len(commands) < 5:
+        if len(commands) < MIN_COMMANDS_PER_TOOL:
             continue  # Skip tools with too few commands
         if remaining <= 0:
             break  # Out of budget; the next sync picks up where this stopped

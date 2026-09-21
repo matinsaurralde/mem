@@ -59,7 +59,8 @@ RECENCY_HALF_LIFE_DAYS = 7
 # not the mechanism that protects literal matches. It is deliberately mild:
 # make it severe and a command matching only a vague literal word ("fix")
 # outranks the one that matched a precise concept ("certificate" -> openssl),
-# which is the opposite of what the map is for.
+# which is the opposite of what the map is for. 0.8 is chosen by eye, not
+# measured; only "mild" is a considered choice.
 LITERAL_CREDIT = 1.0
 EXPANDED_CREDIT = 0.8
 
