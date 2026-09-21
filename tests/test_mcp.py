@@ -635,6 +635,48 @@ class TestRecentFailuresTool:
         # The same command succeeded afterwards: that is the proof it was fixed.
         assert failure["retried_successfully"] is True
 
+    def test_a_success_before_the_failure_does_not_hide_the_one_after(
+        self, home: Path, workdir: Path
+    ) -> None:
+        """`retried_successfully` means "succeeded *later*", as the tool promises.
+
+        The index of the first success per command was being kept, so for
+        success -> failure -> success the retry was found *before* the
+        failure and reported as no retry at all — for the most ordinary
+        shape a flaky test run has.
+        """
+        enable(home, workdir)
+        plant(
+            home,
+            [
+                {"command": "pytest -q", "ts": NOW - 300},
+                {"command": "pytest -q", "ts": NOW - 200, "exit_code": 1},
+                {"command": "pytest -q", "ts": NOW - 100},
+            ],
+        )
+
+        result = serve([INIT, call(2, "recent_failures")], home, workdir)
+
+        failure = tool_payload(by_id(result, 2))["failures"][0]
+        assert failure["retried_successfully"] is True
+
+    def test_a_success_only_before_the_failure_is_not_a_retry(
+        self, home: Path, workdir: Path
+    ) -> None:
+        enable(home, workdir)
+        plant(
+            home,
+            [
+                {"command": "pytest -q", "ts": NOW - 300},
+                {"command": "pytest -q", "ts": NOW - 200, "exit_code": 1},
+            ],
+        )
+
+        result = serve([INIT, call(2, "recent_failures")], home, workdir)
+
+        failure = tool_payload(by_id(result, 2))["failures"][0]
+        assert failure["retried_successfully"] is False
+
     def test_successful_commands_are_not_reported(
         self, home: Path, workdir: Path
     ) -> None:

@@ -375,16 +375,20 @@ def _tool_recent_failures(args: dict[str, Any]) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
 
     for _key, commands in iter_histories(include):
-        succeeded_later: dict[str, int] = {}
+        # The *last* success per command, so "did it succeed after this
+        # failure" is one comparison. Keeping the first (as `setdefault` did)
+        # answered no for success -> failure -> success, the ordinary shape of
+        # a flaky run, because the recorded success preceded the failure.
+        last_success: dict[str, int] = {}
         for index, cmd in enumerate(commands):
             if cmd.exit_code == 0:
-                succeeded_later.setdefault(cmd.command, index)
+                last_success[cmd.command] = index
 
         # Two lines of "what was run next", where `mem fix` reads three: this
         # tool reports context rather than mining a correction, and an agent
         # reading a list needs less of it. Chosen by eye, not measured.
         for failure in iter_failures(commands, lookahead=2):
-            retry = succeeded_later.get(failure.command.command)
+            retry = last_success.get(failure.command.command)
             failures.append(
                 {
                     "command": failure.command.command,
