@@ -119,6 +119,32 @@ def context_score(repo: str | None, current_repo: str | None) -> float:
     return 0.0
 
 
+# --- matching ----------------------------------------------------------------
+#
+# The literal matching rule lives beside the formula for the same reason the
+# formula lives here: `mem <query>`, the Ctrl+R finder and `mem fix <query>`
+# all filter before they rank, and three copies of "every word must appear"
+# had already been written before this one replaced them.
+
+
+def terms(query: str) -> list[str]:
+    """Split a query into the terms a command must all contain.
+
+    Multi-word queries used to keep only the first word, so `mem docker
+    compose` silently answered for `docker` alone — and ranked an unrelated
+    `docker ps` above the one line that actually matched both words. Matching
+    every term independently also makes word order irrelevant, which is how
+    people remember commands.
+    """
+    return [t for t in query.lower().split() if t]
+
+
+def matches(command: str, query_terms: Sequence[str]) -> bool:
+    """True if every term appears somewhere in the command, case-insensitively."""
+    lowered = command.lower()
+    return all(term in lowered for term in query_terms)
+
+
 def score(
     command: str,
     ts: int | float,

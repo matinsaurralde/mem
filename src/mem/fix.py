@@ -123,7 +123,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
-from mem import storage
+from mem import ranking, storage
 from mem.models import CapturedCommand
 from mem.variables import redact_secrets
 
@@ -682,17 +682,6 @@ def mine_all(
 # --- selection -------------------------------------------------------------
 
 
-def matches(command: str, terms: Sequence[str]) -> bool:
-    """True if *command* contains every term, case-insensitively.
-
-    Same all-terms-must-appear contract as ``mem`` search, so that
-    ``mem fix npm build`` narrows to what the user expects rather than
-    matching anything mentioning either word.
-    """
-    lowered = command.lower()
-    return all(term in lowered for term in terms)
-
-
 def select_failure(
     failures: Sequence[CapturedCommand],
     query: str | None = None,
@@ -708,8 +697,11 @@ def select_failure(
     """
     candidates = list(failures)
     if query:
-        terms = [t for t in query.lower().split() if t]
-        candidates = [c for c in candidates if matches(c.command, terms)]
+        # The same all-terms-must-appear rule as `mem <query>`, so that
+        # `mem fix npm build` narrows to what the user expects rather than
+        # matching anything mentioning either word.
+        terms = ranking.terms(query)
+        candidates = [c for c in candidates if ranking.matches(c.command, terms)]
     if not candidates:
         return None
 

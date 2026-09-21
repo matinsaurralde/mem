@@ -181,19 +181,11 @@ def parse_entry(line: str) -> Entry | None:
 # --- Filtering and ranking ---------------------------------------------------
 
 
-def terms_of(query: str) -> list[str]:
-    """Split a query into the terms a command must all contain.
-
-    Matched independently so word order does not matter, which is how people
-    remember commands. Identical to what ``mem <query>`` does.
-    """
-    return [t for t in query.lower().split() if t]
-
-
-def matches(command: str, terms: Sequence[str]) -> bool:
-    """True when every term appears somewhere in the command."""
-    lowered = command.lower()
-    return all(term in lowered for term in terms)
+# The matching rule is the one `mem <query>` uses, by construction: both call
+# into the standard-library-only ranking module rather than each keeping a
+# copy that would drift.
+terms_of = ranking.terms
+matches = ranking.matches
 
 
 def candidate_lines(lines: Sequence[str], terms: Sequence[str]) -> Iterator[str]:

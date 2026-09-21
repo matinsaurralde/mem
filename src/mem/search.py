@@ -58,24 +58,6 @@ def score_command(
     )
 
 
-def _terms(query: str) -> list[str]:
-    """Split a query into the terms a command must all contain.
-
-    Multi-word queries used to keep only the first word, so `mem docker
-    compose` silently answered for `docker` alone — and ranked an unrelated
-    `docker ps` above the one line that actually matched both words. Matching
-    every term independently also makes word order irrelevant, which is how
-    people remember commands.
-    """
-    return [t for t in query.lower().split() if t]
-
-
-def _matches(command: str, terms: list[str]) -> bool:
-    """True if every term appears somewhere in the command."""
-    lowered = command.lower()
-    return all(term in lowered for term in terms)
-
-
 def _read_history(
     current_repo: str | None,
     needles: Sequence[str] | None = None,
@@ -152,12 +134,12 @@ def _literal_search(
     """Rank the commands containing every word the user typed."""
     # Cheap substring test on the raw JSONL line, so the expensive parse only
     # runs for lines that could match. The needles are a *necessary* condition,
-    # never a sufficient one — `_matches` below is still the real filter.
+    # never a sufficient one — `ranking.matches` below is still the real filter.
     needles = storage.prefilter_needles(terms)
     matched = [
         cmd
         for cmd in _read_history(current_repo, needles)
-        if _matches(cmd.command, terms)
+        if ranking.matches(cmd.command, terms)
     ]
     return _rank(matched, query, current_repo)
 
@@ -327,7 +309,7 @@ def search(
     exists so the recall benchmark in ``tests/test_concepts.py`` can measure
     both halves against one history.
     """
-    terms = _terms(query)
+    terms = ranking.terms(query)
     if not terms:
         return []
 
