@@ -551,7 +551,10 @@ def read_commands(
                     continue
             try:
                 yield CapturedCommand.from_jsonl(line)
-            except Exception:
+            # Pydantic's ValidationError subclasses ValueError, so this covers
+            # both a line that is not JSON and one that is JSON of the wrong
+            # shape — and nothing else, which is the point.
+            except ValueError:
                 print(
                     f"warning: skipping corrupted line {line_num} in {path.name}",
                     file=sys.stderr,
@@ -590,7 +593,7 @@ def read_patterns(tool: str) -> PatternFile | None:
         return None
     try:
         return PatternFile.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         print(f"warning: corrupted pattern file {path.name}", file=sys.stderr)
         return None
 
@@ -617,7 +620,7 @@ def read_sessions(date: str) -> Iterator[WorkSession]:
                 continue
             try:
                 yield WorkSession.from_jsonl(line)
-            except Exception:
+            except ValueError:
                 print(
                     f"warning: skipping corrupted session line {line_num} in {path.name}",
                     file=sys.stderr,
@@ -1150,14 +1153,16 @@ def read_group_file(path: Path) -> GroupFile:
     """Read and parse a group file. Return empty GroupFile if missing.
 
     Raises ValueError on malformed JSON so callers can present
-    a user-friendly error without losing the corrupt file on disk.
+    a user-friendly error without losing the corrupt file on disk. It does
+    not print: every caller either reports the error itself or skips the
+    scope on purpose, and a second message here made the user read the same
+    failure twice.
     """
     if not path.exists():
         return GroupFile()
     try:
         return GroupFile.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"error: cannot read {path}: {e}", file=sys.stderr)
+    except (OSError, ValueError) as e:
         raise ValueError(f"Malformed data in {path}") from e
 
 
@@ -1196,7 +1201,7 @@ def read_vars_file() -> VarsFile:
         return VarsFile()
     try:
         return VarsFile.model_validate_json(VARS_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         print(
             f"warning: corrupted vars file {VARS_FILE}, treating as empty",
             file=sys.stderr,
@@ -1249,7 +1254,7 @@ def read_agent_access() -> AgentAccess:
         return AgentAccess()
     try:
         return AgentAccess.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         print(
             f"warning: corrupted agent file {path.name}, treating as disabled",
             file=sys.stderr,
@@ -1289,7 +1294,7 @@ def read_agent_audit() -> Iterator[AgentAuditEntry]:
                 continue
             try:
                 yield AgentAuditEntry.from_jsonl(line)
-            except Exception:
+            except ValueError:
                 print(
                     f"warning: skipping corrupted line {line_num} in {path.name}",
                     file=sys.stderr,

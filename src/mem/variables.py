@@ -537,6 +537,18 @@ def detect_credentials(cmd: str) -> list[tuple[str, str, str]]:
         raw = asyncio.run(_detect_credentials_async(cmd))
         return _deduplicate_detections(raw, cmd)
     except Exception:
+        # Broad on purpose: this is a best-effort suggestion, and the failures
+        # it absorbs have no common base class. Concretely: whatever the SDK's
+        # @generable decorator raises while `mem._generable` is first imported
+        # (that module swallows only ImportError, so a TypeError from schema
+        # inspection propagates out of the import); any apple_fm_sdk
+        # FoundationModelsError from LanguageModelSession() or respond() —
+        # GuardrailViolationError, RefusalError, AssetsUnavailableError,
+        # RateLimitedError, ConcurrentRequestsError, DecodingFailureError,
+        # ExceededContextWindowSizeError, UnsupportedLanguageOrLocaleError,
+        # InvalidGenerationSchemaError, all GenerationError subclasses; the
+        # SDK's own ValueError for a bad `generating` argument; and RuntimeError
+        # from asyncio.run() when a loop is already running on this thread.
         return []
 
 

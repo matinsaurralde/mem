@@ -98,6 +98,8 @@ def atomic_write(path: Path, data: str, mode: int = FILE_MODE) -> None:
         os.replace(tmp, path)
         fsync_dir(path.parent)
     except BaseException:
+        # Cleanup only: the temp file must not outlive a KeyboardInterrupt
+        # either, and the re-raise below lets every exception keep propagating.
         tmp.unlink(missing_ok=True)
         raise
 
