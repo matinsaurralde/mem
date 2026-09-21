@@ -118,13 +118,40 @@ SESSION_SUMMARY_PROMPT = (
 
 
 def _apple_fm_available() -> bool:
-    """Check if Apple Foundation Models SDK is available."""
-    try:
-        import apple_fm_sdk  # noqa: F401
+    """True when the SDK imports *and* the on-device model can answer.
 
-        return True
+    Importing ``apple_fm_sdk`` only proves the extra is installed. With Apple
+    Intelligence switched off, or the model not yet downloaded, the import
+    succeeds and every request raises — which ``_generalize_commands``
+    swallows per command, storing an identity mapping with exit 0. The
+    heuristic fallback, the designed answer for "no model", never ran on such
+    a machine. So the probe also asks the model, and says why when it is
+    turned down.
+
+    ``getattr`` rather than an attribute access: the test suite stands in a
+    bare module when the SDK is absent, and an SDK without this API is
+    assumed usable, which is what the probe meant before it asked.
+    """
+    try:
+        import apple_fm_sdk as fm
     except ImportError:
         return False
+    model_cls = getattr(fm, "SystemLanguageModel", None)
+    if model_cls is None:
+        return True
+    try:
+        available, reason = model_cls().is_available()
+    except Exception:  # noqa: BLE001 - the SDK's own errors, or a native library
+        # that will not load; either way a prompt would fail the same way.
+        logger.debug("apple-fm-sdk availability probe failed", exc_info=True)
+        return False
+    if not available:
+        logger.debug(
+            "on-device model unavailable (%s); using heuristic patterns",
+            getattr(reason, "name", reason),
+        )
+        return False
+    return True
 
 
 def _get_generable_types() -> type:
