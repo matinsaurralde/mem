@@ -140,11 +140,6 @@ def unavailable_reason() -> str | None:
     return None
 
 
-def is_available() -> bool:
-    """Whether the Keychain backend can be attempted at all."""
-    return unavailable_reason() is None
-
-
 def label_for(name: str) -> str:
     """Keychain Access display name for a variable.
 

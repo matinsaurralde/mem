@@ -1374,21 +1374,6 @@ def set_var(name: str, value: str, last_used: int = 0) -> None:
         write_vars_file(data)
 
 
-def get_var_value(name: str) -> str | None:
-    """Value of one stored variable, from whichever backend holds it.
-
-    None means "mem has no such variable". A Keychain that exists but cannot
-    be read raises instead — see :func:`mem.keychain.get_secret` for why that
-    distinction is worth keeping.
-    """
-    entry = read_vars_file().vars.get(name)
-    if entry is None:
-        return None
-    if entry.value is not None:
-        return entry.value  # not migrated yet
-    return keychain.get_secret(name)
-
-
 def load_var_values(
     names: Iterable[str],
 ) -> tuple[dict[str, StoredVariable], list[str]]:
