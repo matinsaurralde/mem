@@ -553,7 +553,9 @@ def build_plan(sources: list[tuple[str, Path]]) -> ImportPlan:
             file_plan.commands.append(
                 CapturedCommand(
                     command=entry.command,
-                    ts=entry.ts or 0,
+                    # Always an int here: resolve_timestamps() above dated
+                    # every entry, so there is no None left to default.
+                    ts=entry.ts,
                     # A history file records no directory, so there is no repo
                     # to attribute the command to. Guessing the current one
                     # would be a lie that the ranking's context term then acts

@@ -175,11 +175,6 @@ class SessionTracker:
         storage.ensure_dirs()
         self._state_path.write_text(state.model_dump_json(), encoding="utf-8")
 
-    def _clear_state(self) -> None:
-        """Remove session state file."""
-        if self._state_path.exists():
-            self._state_path.unlink()
-
     def update(self, cmd: CapturedCommand) -> None:
         """Process a new command and update session state.
 
@@ -227,7 +222,7 @@ class SessionTracker:
             return
 
         # Generate summary — use first command as fallback when AI unavailable
-        summary = self._generate_summary(state.commands, state.last_repo)
+        summary = self._generate_summary(state.commands)
 
         session = WorkSession(
             id=state.session_id,
@@ -241,7 +236,7 @@ class SessionTracker:
         )
         storage.append_session(session)
 
-    def _generate_summary(self, commands: list[str], repo: str | None) -> str:
+    def _generate_summary(self, commands: list[str]) -> str:
         """Generate a session summary.
 
         Uses Apple FM SDK if available, otherwise falls back to

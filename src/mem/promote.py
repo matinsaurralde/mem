@@ -287,7 +287,7 @@ def command_shape(command: str) -> tuple[str, ...]:
     protected = _protected_prefix_length(tokens)
     shape: list[str] = []
     for index, token in enumerate(tokens):
-        if index < protected or not token.text:
+        if index < protected:
             shape.append(token.text)
         elif _is_flag(token.text):
             name, sep, _value = token.text.partition("=")

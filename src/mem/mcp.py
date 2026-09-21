@@ -733,8 +733,7 @@ def handle_message(message: Any) -> dict[str, Any] | None:
 
     handler = _METHODS.get(method)
     if handler is None:
-        if is_notification:
-            return None
+        # Not a notification: the line above already returned for those.
         return _error(request_id, METHOD_NOT_FOUND, f"unknown method: {method}")
 
     try:
