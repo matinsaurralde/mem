@@ -146,6 +146,43 @@ class TestItNeverRaises:
 
         assert list(picks.load(now=NOW)) == ["good"]
 
+    def test_recording_survives_a_hand_edited_entry(self, tmp_mem_dir):
+        """`record` must tolerate exactly what `load` tolerates.
+
+        It used to validate only the entry being recorded and then cast every
+        *other* entry with float() while pruning, so one `"count": "many"`
+        anywhere in the file raised ValueError out of the finder — after the
+        user had pressed Enter and before the command reached the shell.
+        """
+        storage.ensure_dirs()
+        picks.picks_file().write_text(
+            json.dumps(
+                {
+                    "picks": {
+                        "good": {"count": 2, "ts": NOW},
+                        "text-count": {"count": "many", "ts": NOW},
+                        "no-ts": {"count": 1},
+                        "not-a-dict": 7,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        picks.record("git push", now=NOW)
+        picks.record("text-count", now=NOW)  # re-picking the broken entry
+        picks.record("not-a-dict", now=NOW)
+
+        loaded = picks.load(now=NOW)
+        assert loaded["good"] == pytest.approx(2.0)
+        assert loaded["git push"] == pytest.approx(1.0)
+        # A broken entry is not inherited: the new pick starts the count over.
+        assert loaded["text-count"] == pytest.approx(1.0)
+        assert loaded["not-a-dict"] == pytest.approx(1.0)
+        # And a broken entry that was not re-picked is dropped by the rewrite.
+        assert "no-ts" not in loaded
+        assert "no-ts" not in json.loads(picks.picks_file().read_text())["picks"]
+
     def test_a_missing_file_is_not_an_error(self, tmp_mem_dir):
         assert picks.load(now=NOW) == {}
 
