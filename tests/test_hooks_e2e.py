@@ -1063,6 +1063,11 @@ class TestCommandTextFidelity:
 # --- 7. The hook must not block the prompt -----------------------------------
 
 
+# no_cover: the default addopts keep `--cov` on under `-m perf`, and the
+# coverage tracer slows a per-line Python loop far more than the C-level
+# `json.loads` it is raced against. Instrumented, the prefilter measured
+# 1.1-1.3x instead of 3.4-7.3x and this class failed 5 runs out of 5.
+@pytest.mark.no_cover
 @pytest.mark.perf
 class TestHookPerformance:
     """Capture is fire-and-forget: it must not add latency to the prompt.
