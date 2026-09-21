@@ -27,16 +27,33 @@ from mem.history import ImportPlan
 from mem.render import console, err_console, fit, plain, safe
 
 
+def _protected_args(ctx: click.Context) -> list[str]:
+    """The subcommand slot Click parsed, on every Click inside our pin.
+
+    Click 8.2 renamed the public ``protected_args`` list to ``_protected_args``
+    and turned the old name into a property that emits a DeprecationWarning on
+    every access. That one attribute read was the entire 268-warning noise
+    floor of the test suite. Click 8.1 (still inside our pin) has only the
+    public name, so fall back to it there; on anything newer the private list
+    is the real storage and the one ``Group.invoke`` reads.
+    """
+    protected = getattr(ctx, "_protected_args", None)
+    if protected is None:
+        protected = ctx.protected_args  # Click 8.1
+    return protected
+
+
 class MemGroup(click.Group):
     """Custom group that treats unknown commands as search queries."""
 
     def invoke(self, ctx):
         # If the first arg isn't a known subcommand, treat it as a search query
-        args = list(ctx.protected_args) + list(ctx.args)
+        protected = _protected_args(ctx)
+        args = list(protected) + list(ctx.args)
         if args and args[0] not in self.commands:
             ctx.ensure_object(dict)
             ctx.obj["query_args"] = args
-            ctx.protected_args.clear()
+            protected.clear()
             ctx.args.clear()
         return super().invoke(ctx)
 
