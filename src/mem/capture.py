@@ -8,12 +8,19 @@ The capture pipeline: shell hook -> mem _capture -> this module -> storage.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import uuid
 
 from mem.models import CapturedCommand, SessionState, WorkSession
 from mem import storage
+
+# Idle seconds that end a work session. The one definition: `mem promote`
+# re-derives sessions from the command files (ADR-012) and imports this rather
+# than restating it, so "a session" cannot mean two things. The value is
+# chosen by eye, not measured — see SessionTracker.
+SESSION_IDLE_SECONDS = 300
 
 
 def get_git_repo(directory: str) -> str | None:
@@ -36,6 +43,8 @@ def get_git_repo(directory: str) -> str | None:
             ["git", "-C", directory, "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            # rev-parse answers in milliseconds; the timeout only guards a
+            # hung filesystem (a dead network mount). Chosen by eye.
             timeout=5,
         )
         if result.returncode == 0:
@@ -45,13 +54,41 @@ def get_git_repo(directory: str) -> str | None:
         return None
 
 
+# One or more SGR mouse reports (`CSI < button ; column ; row M`, `m` on release)
+# with nothing else on the line, the CSI prefix optional because the line editor
+# has usually already consumed it. This is what a shell prompt receives when a
+# full-screen program dies without turning mouse tracking back off.
+_TERMINAL_NOISE = re.compile(r"(?:(?:\x1b\[<|\[<)?\d+;\d+;\d+[Mm])+")
+
+
+def looks_like_terminal_noise(command: str) -> bool:
+    """True when *command* is terminal mouse-report garbage, not something typed.
+
+    Real case: `claude` segfaulted (exit 139) with mouse tracking enabled, so
+    every later mouse move at the prompt fed zsh `ESC [ < 35;165;16 M`. zle
+    dropped the unbound prefix and inserted the payload; Enter then ran
+    `35;165;16M...`, which failed with 127 and was captured as a command. It
+    surfaced as "the last command that failed" in `mem fix`.
+
+    Deliberately narrow: the whole line must be mouse reports. `echo 65;50;35M`
+    or `sleep 1;ls` are commands someone chose to run and are kept.
+    """
+    return _TERMINAL_NOISE.fullmatch(command.strip()) is not None
+
+
 def capture_command(raw: str, directory: str, exit_code: int, duration_ms: int) -> None:
     """Capture a shell command with full context and persist it.
 
     Called by the shell hook after every command execution.
     Builds a CapturedCommand with the current timestamp and git repo,
     then appends it to the appropriate JSONL file.
+
+    Terminal noise is dropped before anything runs — no repo lookup, no
+    session update, no sync counter — and silently, like every other skip in
+    the capture path (`mem _capture` never prints and always exits 0).
     """
+    if looks_like_terminal_noise(raw):
+        return
     repo = get_git_repo(directory)
     cmd = CapturedCommand(
         command=raw,
@@ -63,14 +100,22 @@ def capture_command(raw: str, directory: str, exit_code: int, duration_ms: int) 
     )
     storage.append_command(cmd)
 
-    # Update session tracking
+    # Update session tracking. What can fail here: OSError from the lock, the
+    # state file or the sessions file; ValueError (Pydantic's ValidationError)
+    # building a WorkSession from a state that was hand-edited into an
+    # impossible shape. Deliberately broader than that list: this runs from a
+    # shell precmd hook, and an uncaught anything prints a traceback after
+    # every command the user types.
     try:
         tracker = SessionTracker()
         tracker.update(cmd)
     except Exception:
         pass  # Session tracking failure should never block capture
 
-    # Auto-sync: trigger background pattern extraction every N captures
+    # Auto-sync: trigger background pattern extraction every N captures. What
+    # can fail here: OSError from the lock or the counter file, and OSError
+    # from Popen when the `mem` executable found by `which` is no longer
+    # runnable. Broad for the same reason as above — a hook must not print.
     try:
         count = storage.increment_sync_counter()
         if count >= storage.SYNC_THRESHOLD:
@@ -114,15 +159,16 @@ class SessionTracker:
     proximity and repository context. Session boundaries are detected
     when:
 
-    1. More than 300 seconds (5 minutes) of idle time between commands
+    1. More than ``SESSION_IDLE_SECONDS`` (300, five minutes) of idle time
+       between commands
     2. The user switches to a different git repository
 
     Why 300 seconds: Five minutes is long enough that brief interruptions
     (reading docs, bathroom breaks) don't split a session, but short
-    enough that genuine context switches are detected. This threshold
-    was chosen by observing that most developers maintain focus on a
-    single task for at least 5 minutes, and breaks longer than that
-    typically indicate a task switch.
+    enough that genuine context switches are detected. Chosen by eye, not
+    measured. ADR-012 keeps the same number for re-deriving sessions in
+    ``mem promote`` — it found that what matters is measuring think time
+    against it, not the value itself — so changing it here changes both.
 
     State is persisted in ~/.mem/.session_state.json so sessions
     survive shell restarts.
@@ -137,25 +183,35 @@ class SessionTracker:
             return None
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
-            return SessionState(**data)
-        except Exception:
+            # model_validate, not **data: a file hand-edited into a JSON list
+            # is a ValidationError (a ValueError) instead of a TypeError.
+            return SessionState.model_validate(data)
+        except (OSError, ValueError):
+            # Unreadable, not JSON, not UTF-8, or not a SessionState. A lost
+            # session boundary is the whole cost; the next command starts one.
             return None
 
     def _save_state(self, state: SessionState) -> None:
-        """Persist session state to disk."""
-        storage.ensure_dirs()
-        self._state_path.write_text(state.model_dump_json(), encoding="utf-8")
+        """Persist session state to disk: atomically, owner-only, under the lock.
 
-    def _clear_state(self) -> None:
-        """Remove session state file."""
-        if self._state_path.exists():
-            self._state_path.unlink()
+        The same write path as every other file under ~/.mem. This used to
+        be a bare ``write_text``: created with the umask (0644 on a default
+        macOS account) while everything else is 0600, replaced in place
+        rather than renamed, and taken with no lock — while
+        ``storage._scrub_session_state`` rewrites the same file atomically
+        under the lock for ``mem forget``. One file, two writers, one of
+        them unguarded: a scrub and a capture landing together could leave
+        the forgotten command in the state the next boundary flushes.
+        """
+        storage.ensure_dirs()
+        with storage.exclusive_lock():
+            storage.atomic_write(self._state_path, state.model_dump_json())
 
     def update(self, cmd: CapturedCommand) -> None:
         """Process a new command and update session state.
 
         Detects session boundaries and closes sessions when:
-        - More than 300 seconds have passed since the last command
+        - More than ``SESSION_IDLE_SECONDS`` have passed since the last command
         - The git repo has changed
         """
         state = self._load_state()
@@ -171,11 +227,21 @@ class SessionTracker:
             self._save_state(new_state)
             return
 
+        # Think time, not the raw gap. mem stamps a command when it *finishes*,
+        # so `cmd.ts - last_ts` includes cmd's own runtime, and a build that
+        # ran longer than the threshold ended its own session when it
+        # completed (ADR-012 records this as the tracker being wrong). The
+        # same arithmetic as `mem.fix.think_seconds`, inlined: that helper
+        # takes two commands and the state keeps only a timestamp, and the
+        # capture hook cannot afford fix.py's imports on every prompt.
         idle_time = cmd.ts - state.last_command_ts
+        if cmd.duration_ms:
+            idle_time -= cmd.duration_ms // 1000
+        idle_time = max(idle_time, 0)
         repo_changed = cmd.repo != state.last_repo
 
-        # Session boundary: >300s idle OR repo change
-        if idle_time > 300 or repo_changed:
+        # Session boundary: idle past the threshold OR repo change
+        if idle_time > SESSION_IDLE_SECONDS or repo_changed:
             self._close_session(state)
             # Start new session
             new_state = SessionState(
@@ -198,13 +264,15 @@ class SessionTracker:
             return
 
         # Generate summary — use first command as fallback when AI unavailable
-        summary = self._generate_summary(state.commands, state.last_repo)
+        summary = self._generate_summary(state.commands)
 
         session = WorkSession(
             id=state.session_id,
             summary=summary,
-            started_at=state.last_command_ts
-            - (len(state.commands) * 10),  # approximate
+            # The state keeps no per-command timestamps, so the start is
+            # fabricated at ten seconds a command: a placeholder chosen by
+            # eye, not measured, which is why ADR-012 refuses to read it.
+            started_at=state.last_command_ts - (len(state.commands) * 10),
             ended_at=state.last_command_ts,
             dir="",  # not tracked in state for simplicity
             repo=state.last_repo,
@@ -212,7 +280,7 @@ class SessionTracker:
         )
         storage.append_session(session)
 
-    def _generate_summary(self, commands: list[str], repo: str | None) -> str:
+    def _generate_summary(self, commands: list[str]) -> str:
         """Generate a session summary.
 
         Uses Apple FM SDK if available, otherwise falls back to
@@ -226,6 +294,11 @@ class SessionTracker:
             if result:
                 return result
         except Exception:
+            # RuntimeError from asyncio.run when a loop is already running in
+            # this thread; the SDK's FoundationModelsError tree and its own
+            # ValueError/TypeError if generate_session_summary's catch ever
+            # narrows. Broad because this runs inside the capture hook, where
+            # a traceback costs more than a plain summary does.
             pass
 
         # Fallback: first command + count

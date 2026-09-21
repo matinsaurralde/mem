@@ -16,6 +16,7 @@ from mem.capture import (
     _spawn_background_sync,
     capture_command,
     get_git_repo,
+    looks_like_terminal_noise,
 )
 
 
@@ -211,6 +212,89 @@ class TestCaptureCommand:
         assert len(cmds) == 1
 
 
+class TestTerminalNoise:
+    """Mouse-report garbage must never become a captured command.
+
+    The two strings below were found verbatim in a real store. A `claude`
+    process had died with SIGSEGV (exit 139) while mouse tracking was on, so
+    every later mouse movement at the prompt reached zsh as an SGR mouse
+    report `ESC [ < Cb ; Cx ; Cy M`. zle swallowed the unbound `ESC [ <`
+    prefix and inserted the rest; Enter ran it, the shell said 127, and the
+    hook captured it — which made it "the last command that failed" in
+    `mem fix`.
+    """
+
+    # The 3-group real prefix of the 1689-character line, then the same shape
+    # repeated to the length that was actually stored.
+    REAL_PREFIX = "35;165;16M35;160;16M35;153;17M"
+    LONG_LINE = REAL_PREFIX + "".join(
+        f"{button};{column};{row}M"
+        for button, column, row in (
+            (35, 144 - i % 140, 17 + i // 8) if i % 5 else (65, 71, 26)
+            for i in range(160)
+        )
+    )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("65;50;35M", id="real-short-line"),
+            pytest.param(REAL_PREFIX, id="real-long-line-prefix"),
+            pytest.param(LONG_LINE, id="real-long-line-shape"),
+            pytest.param("35;165;16m", id="button-release"),
+            pytest.param("[<65;50;35M", id="csi-prefix-minus-esc"),
+            pytest.param("\x1b[<65;50;35M", id="raw-sequence-intact"),
+            pytest.param("[<35;165;16M[<35;160;16M", id="prefix-on-every-group"),
+            pytest.param("65;50;35M ", id="trailing-space"),
+        ],
+    )
+    def test_matches_mouse_reports(self, command: str):
+        assert looks_like_terminal_noise(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo 65;50;35M",
+            "awk '{print $1;$2}'",
+            "sleep 1;ls",
+            "65;50;35M echo",
+            "65;50",  # two fields is not a report
+            "65;50;35",  # no final byte
+            "1;2;3M;",  # a stray separator is something else
+            "ls",
+            "",
+            "[200~ls[201~",  # bracketed paste, deliberately left out
+        ],
+    )
+    def test_leaves_real_commands_alone(self, command: str):
+        assert looks_like_terminal_noise(command) is False
+
+    def test_the_real_short_line_is_not_captured(self, tmp_mem_dir):
+        """The exact line from the store: nothing written, nothing tracked."""
+        with patch("mem.capture.get_git_repo") as repo_lookup:
+            capture_command("65;50;35M", "/Users/test/myapp", 127, 22)
+
+        assert list(storage.read_all_commands()) == []
+        assert not (tmp_mem_dir / ".session_state.json").exists()
+        assert storage.read_sync_counter() == 0
+        # Dropped before the git subprocess, not after it.
+        repo_lookup.assert_not_called()
+
+    def test_the_real_long_line_is_not_captured(self, tmp_mem_dir):
+        assert len(self.LONG_LINE) > 1000
+        with patch("mem.capture.get_git_repo", return_value=None):
+            capture_command(self.LONG_LINE, "/Users/test/myapp", 127, 703)
+
+        assert list(storage.read_all_commands()) == []
+
+    def test_a_command_that_merely_contains_a_report_is_captured(self, tmp_mem_dir):
+        """The filter is about the whole line, so `echo 65;50;35M` survives."""
+        with patch("mem.capture.get_git_repo", return_value=None):
+            capture_command("echo 65;50;35M", "/Users/test/myapp", 0, 3)
+
+        assert [c.command for c in storage.read_all_commands()] == ["echo 65;50;35M"]
+
+
 class TestSessionTracker:
     """Tests for session boundary detection and lifecycle."""
 
@@ -344,6 +428,36 @@ class TestSessionTracker:
             assert sessions == []
             assert state.commands == ["cmd1", "cmd2"]
 
+    @pytest.mark.parametrize(
+        ("duration_ms", "expect_closed"),
+        [(200_000, False), (0, True)],
+    )
+    def test_idle_is_think_time_not_the_raw_gap(
+        self, tmp_mem_dir, duration_ms: int, expect_closed: bool
+    ):
+        """A command that ran longer than the threshold must not end its own session.
+
+        Timestamps are completion times. Last command at t=1000, next one
+        finishing at t=1400: if it *ran* for 200 s the user paused 200 s and
+        the session continues; if it ran for 0 s they paused 400 s and it
+        splits. `mem fix` and `mem promote` both subtract `duration_ms`; the
+        tracker did not, which ADR-012 records as the tracker being wrong.
+        """
+        tracker = SessionTracker()
+        tracker.update(make_command(command="cmd1", ts=1000, duration_ms=0))
+        tracker.update(
+            make_command(command="docker build .", ts=1400, duration_ms=duration_ms)
+        )
+
+        sessions = list(storage.read_all_sessions())
+        state = tracker._load_state()
+        if expect_closed:
+            assert [s.commands for s in sessions] == [["cmd1"]]
+            assert state.commands == ["docker build ."]
+        else:
+            assert sessions == []
+            assert state.commands == ["cmd1", "docker build ."]
+
     def test_session_summary_fallback(self, tmp_mem_dir):
         """Session summary falls back to first command when AI unavailable."""
         tracker = SessionTracker()
@@ -423,6 +537,31 @@ class TestSessionTracker:
 
         sessions = list(storage.read_all_sessions())
         assert len(sessions) == 0
+
+    def test_state_file_is_owner_only_and_written_atomically(self, tmp_mem_dir):
+        """The one file mem wrote with `write_text` and the umask.
+
+        Every other file under ~/.mem is 0600 via `atomic_write`, and
+        `storage._scrub_session_state` rewrites this same file atomically
+        under the lock — so the tracker was the one unlocked, non-atomic,
+        world-readable writer of a file holding the user's last commands.
+        """
+        import os
+        import stat
+
+        old_umask = os.umask(0o022)
+        try:
+            tracker = SessionTracker()
+            tracker.update(make_command(command="export TOKEN=hunter2", ts=1000))
+        finally:
+            os.umask(old_umask)
+
+        mode = stat.S_IMODE(tracker._state_path.stat().st_mode)
+        assert mode == 0o600, f"session state is readable by others: {oct(mode)}"
+        leftovers = [
+            p.name for p in tracker._state_path.parent.iterdir() if ".tmp" in p.name
+        ]
+        assert leftovers == []
 
     def test_state_survives_reload(self, tmp_mem_dir):
         """State persisted to disk can be loaded by a new tracker instance."""

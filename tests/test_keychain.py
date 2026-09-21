@@ -81,6 +81,18 @@ def _raw_vars_json() -> str:
     return storage.VARS_FILE.read_text(encoding="utf-8")
 
 
+def _stored_value(name: str) -> str | None:
+    """A variable's value as ``mem run`` would see it, from whichever backend.
+
+    Goes through :func:`storage.load_var_values`, the production read path,
+    so the test asserts what a runbook actually resolves. None means the
+    store has no usable value for the name.
+    """
+    entries, _unreadable = storage.load_var_values([name])
+    entry = entries.get(name)
+    return None if entry is None else entry.value
+
+
 # ---------------------------------------------------------------------------
 # 1. The secret must never appear in argv
 # ---------------------------------------------------------------------------
@@ -146,7 +158,7 @@ class TestRoundTrip:
         self, tmp_mem_dir: Path, label: str, value: str
     ) -> None:
         storage.set_var("API_TOKEN", value)
-        assert storage.get_var_value("API_TOKEN") == value
+        assert _stored_value("API_TOKEN") == value
         assert value not in _raw_vars_json() or value == ""
 
     def test_overwriting_replaces_the_value(self) -> None:
@@ -329,21 +341,22 @@ class TestAvailability:
 
     def test_available_on_macos_with_the_binary(self) -> None:
         if sys.platform == "darwin" and os.access(keychain.SECURITY_BIN, os.X_OK):
-            assert keychain.is_available()
             assert keychain.unavailable_reason() is None
 
     def test_unavailable_off_macos(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(keychain.sys, "platform", "linux")
-        assert not keychain.is_available()
-        assert "linux" in (keychain.unavailable_reason() or "")
+        reason = keychain.unavailable_reason()
+        assert reason is not None
+        assert "linux" in reason
 
     def test_unavailable_without_the_binary(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(keychain.sys, "platform", "darwin")
         monkeypatch.setattr(keychain.os, "access", lambda *a, **kw: False)
-        assert not keychain.is_available()
-        assert keychain.SECURITY_BIN in (keychain.unavailable_reason() or "")
+        reason = keychain.unavailable_reason()
+        assert reason is not None
+        assert keychain.SECURITY_BIN in reason
 
     def test_a_locked_keychain_raises_with_the_os_message(
         self, fake_keychain: FakeKeychain
@@ -446,7 +459,7 @@ class TestMigration:
         assert len(fake_keychain.calls) == calls, (
             "a clean store must cost no subprocess"
         )
-        assert storage.get_var_value("API_TOKEN") == "sk-live-TESTONLY"
+        assert _stored_value("API_TOKEN") == "sk-live-TESTONLY"
 
     def test_a_failed_write_leaves_the_plaintext_value_alone(
         self, tmp_mem_dir: Path, fake_keychain: FakeKeychain
@@ -463,7 +476,7 @@ class TestMigration:
         assert result.failed == ["API_TOKEN"]
         assert "not correct" in (result.reason or "")
         assert storage.read_vars_file().vars["API_TOKEN"].value == "sk-live-TESTONLY"
-        assert storage.get_var_value("API_TOKEN") == "sk-live-TESTONLY"
+        assert _stored_value("API_TOKEN") == "sk-live-TESTONLY"
 
     def test_a_write_that_cannot_be_read_back_is_not_trusted(
         self, tmp_mem_dir: Path, fake_keychain: FakeKeychain, monkeypatch
@@ -501,7 +514,7 @@ class TestMigration:
         assert result.migrated == 0
         assert result.failed == ["API_TOKEN"]
         assert "linux" in (result.reason or "")
-        assert storage.get_var_value("API_TOKEN") == "sk-live-TESTONLY"
+        assert _stored_value("API_TOKEN") == "sk-live-TESTONLY"
 
 
 # ---------------------------------------------------------------------------
@@ -786,7 +799,7 @@ class TestAgainstTheRealSecurityBinary:
 
         assert storage.migrate_vars_to_keychain().migrated == 1
         assert "sk-live-TESTONLY" not in _raw_vars_json()
-        assert storage.get_var_value("MEM_TEST_VAR") == "sk-live-TESTONLY"
+        assert _stored_value("MEM_TEST_VAR") == "sk-live-TESTONLY"
 
         storage.remove_var("MEM_TEST_VAR")
 

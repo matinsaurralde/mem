@@ -100,16 +100,13 @@ def merge_var_declarations(
     Returns:
         Merged list of VarDeclaration objects.
     """
-    # Build a dict preserving detection order, then overlay explicit defaults
+    # Build a dict preserving detection order, then overlay explicit defaults.
+    # A declaration for a detected name enriches it with the default; one for
+    # a name absent from the command text appends it. Both are the same store.
     var_map: dict[str, str | None] = {name: None for name in detected}
 
     for name, default in explicit:
-        if name in var_map:
-            # Enrich existing detection with default value
-            var_map[name] = default
-        else:
-            # Add explicitly declared variable not found in command text
-            var_map[name] = default
+        var_map[name] = default
 
     return [
         VarDeclaration(name=name, default=default) for name, default in var_map.items()
@@ -303,6 +300,12 @@ def _command_may_contain_credentials(cmd: str) -> bool:
 # an option. Each entry is a shape that is a credential essentially whenever it
 # appears — a keyword assigned a non-trivial value, a bearer token, a vendor
 # key with its documented prefix, or a password embedded in a connection URL.
+#
+# The length floors — {6,} for an assigned value, {4,} for a URL password,
+# {10,}/{20,} after a vendor prefix — are chosen by eye, not measured: low
+# enough to catch `hunter2`, high enough that `--token yes` and `:8080@` are
+# not credentials. Exact counts ({16} after AKIA) are the vendor's published
+# fixed length.
 _CREDENTIAL_SHAPES: tuple[re.Pattern[str], ...] = (
     # KEY=value / key: value where the key names a secret.
     re.compile(
@@ -420,7 +423,9 @@ def _deduplicate_detections(
     Removes:
     - Values not actually present in the command (AI hallucinations)
     - URLs and hostnames (not credentials)
-    - Very short values (< 8 chars, not plausible secrets)
+    - Very short values (< 8 chars, not plausible secrets — the 8 is chosen
+      by eye, not measured; it is what rejects `no` and `prod` while letting
+      `hunter2`-length passwords through)
     - Duplicate original_value entries
     - Values that are substrings of other detected values
 
@@ -540,6 +545,18 @@ def detect_credentials(cmd: str) -> list[tuple[str, str, str]]:
         raw = asyncio.run(_detect_credentials_async(cmd))
         return _deduplicate_detections(raw, cmd)
     except Exception:
+        # Broad on purpose: this is a best-effort suggestion, and the failures
+        # it absorbs have no common base class. Concretely: whatever the SDK's
+        # @generable decorator raises while `mem._generable` is first imported
+        # (that module swallows only ImportError, so a TypeError from schema
+        # inspection propagates out of the import); any apple_fm_sdk
+        # FoundationModelsError from LanguageModelSession() or respond() —
+        # GuardrailViolationError, RefusalError, AssetsUnavailableError,
+        # RateLimitedError, ConcurrentRequestsError, DecodingFailureError,
+        # ExceededContextWindowSizeError, UnsupportedLanguageOrLocaleError,
+        # InvalidGenerationSchemaError, all GenerationError subclasses; the
+        # SDK's own ValueError for a bad `generating` argument; and RuntimeError
+        # from asyncio.run() when a loop is already running on this thread.
         return []
 
 
@@ -691,7 +708,9 @@ _REDACTIONS: list[tuple[re.Pattern[str], object]] = [
     #    qualified (see _QUALIFIED_SECRET_NAME), it must not be a `$VAR`
     #    reference (`curl -u $USER:$DEPLOY_TOKEN https://…` would otherwise
     #    swallow the URL that follows), and the value must be neither a path
-    #    nor a URL, so `grep api_key ./src/config.py` survives intact.
+    #    nor a URL, so `grep api_key ./src/config.py` survives intact. The
+    #    eight-character floor (one char plus \S{7,}) is chosen by eye, not
+    #    measured — enough to keep a bare `yes`/`true` from being redacted.
     (
         re.compile(
             rf"(?i)(?<![\w./$-])({_QUALIFIED_SECRET_NAME})(\s+)"
@@ -700,7 +719,10 @@ _REDACTIONS: list[tuple[re.Pattern[str], object]] = [
         _redact_tail,
     ),
     # 9. Vendor tokens with a documented prefix, anywhere they appear. The
-    #    prefix exists precisely so that scanners can recognise them.
+    #    prefix exists precisely so that scanners can recognise them. Exact
+    #    counts ({35} after AIza, {36} after npm_, {16} after AKIA) are the
+    #    vendor's published fixed length; the open-ended floors ({10,},
+    #    {16,}, {20,}) are chosen by eye, not measured.
     (
         re.compile(
             r"\b(?:"

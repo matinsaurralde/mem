@@ -39,20 +39,22 @@ from pathlib import Path
 # resolution that works identically for an editable checkout, a wheel and a
 # zipimport. A previous version of the hook loader walked ``__file__`` upwards
 # instead, and shipped a stale copy to every pip user for four months.
+#
+# The user's own map has the same name under ``~/.mem``. Not a *replacement*
+# for the shipped file — a layer over it, so an upgrade still delivers new
+# concepts to someone who added one.
 CONCEPTS_FILENAME = "concepts.json"
-
-# A user map lives here. Not a *replacement* for the shipped file — a layer
-# over it, so an upgrade still delivers new concepts to someone who added one.
-USER_CONCEPTS_FILENAME = "concepts.json"
 
 # Keys starting with an underscore are metadata, not concepts. JSON has no
 # comment syntax, and a map meant to be read and edited by hand needs one.
 _RESERVED_PREFIX = "_"
 _STOPWORDS_KEY = "_stopwords"
 
-# The longest concept key, in words. Multi-word keys ("disk space", "pull
-# request") are matched against consecutive query words, longest first, so
-# "disk space" never decays into "disk" AND "space".
+# The longest concept key accepted at parse time, in words. Multi-word keys
+# ("disk space", "pull request") are matched against consecutive query words,
+# longest first, so "disk space" never decays into "disk" AND "space". The
+# phrase scan itself uses the loaded map's real maximum (``ConceptData.
+# max_words``), which this cap bounds from above.
 MAX_CONCEPT_WORDS = 3
 
 
@@ -174,9 +176,11 @@ def _load_shipped() -> ConceptData:
             .read_text(encoding="utf-8")
         )
         parsed = _parse(json.loads(raw))
-    except Exception as exc:  # noqa: BLE001 - a packaging fault, not a user one
-        # Unreachable through any supported install; a broken shipped map must
-        # still degrade to plain literal search rather than break `mem <query>`.
+    except (OSError, ValueError) as exc:
+        # OSError: the file is missing from the package; ValueError: not UTF-8
+        # or not JSON. `_parse` returns None rather than raising. Unreachable
+        # through any supported install; a broken shipped map must still
+        # degrade to plain literal search rather than break `mem <query>`.
         _warn(f"built-in concept map could not be read ({exc}); expansion is off")
         return ConceptData(concepts={}, stopwords=frozenset())
     if parsed is None:
@@ -303,7 +307,7 @@ def expand(terms: list[str], data: ConceptData) -> list[QueryGroup]:
     """
     groups: list[QueryGroup] = []
     index = 0
-    span = min(MAX_CONCEPT_WORDS, data.max_words)
+    span = data.max_words
     while index < len(terms):
         for width in range(min(span, len(terms) - index), 0, -1):
             phrase = " ".join(terms[index : index + width])

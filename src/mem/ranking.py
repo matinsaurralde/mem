@@ -32,7 +32,10 @@ FREQUENCY_CEILING = 50
 # `picks` takes the largest share because it is the only feature that is not
 # an inference: it is the user having already answered, for this command, the
 # question the rest of the formula is guessing at. Measured over 1,200
-# retrieval episodes, adding it moves MRR@10 from 0.039 to 0.575.
+# retrieval episodes, adding it moves MRR@10 from 0.039 to 0.575. The
+# measurement, the alternatives rejected and the cost of this choice are in
+# ADR-009 (docs/decisions/009-ranking-learns-from-selections.md); the numbers
+# here are restated from it, not a second source.
 #
 # The remaining 0.60 is split in exactly the proportions the four original
 # features had among themselves (35/35/15/15). That is deliberate: with no
@@ -56,7 +59,8 @@ RECENCY_HALF_LIFE_DAYS = 7
 # not the mechanism that protects literal matches. It is deliberately mild:
 # make it severe and a command matching only a vague literal word ("fix")
 # outranks the one that matched a precise concept ("certificate" -> openssl),
-# which is the opposite of what the map is for.
+# which is the opposite of what the map is for. 0.8 is chosen by eye, not
+# measured; only "mild" is a considered choice.
 LITERAL_CREDIT = 1.0
 EXPANDED_CREDIT = 0.8
 
@@ -113,6 +117,32 @@ def context_score(repo: str | None, current_repo: str | None) -> float:
     ):
         return 0.5
     return 0.0
+
+
+# --- matching ----------------------------------------------------------------
+#
+# The literal matching rule lives beside the formula for the same reason the
+# formula lives here: `mem <query>`, the Ctrl+R finder and `mem fix <query>`
+# all filter before they rank, and three copies of "every word must appear"
+# had already been written before this one replaced them.
+
+
+def terms(query: str) -> list[str]:
+    """Split a query into the terms a command must all contain.
+
+    Multi-word queries used to keep only the first word, so `mem docker
+    compose` silently answered for `docker` alone — and ranked an unrelated
+    `docker ps` above the one line that actually matched both words. Matching
+    every term independently also makes word order irrelevant, which is how
+    people remember commands.
+    """
+    return [t for t in query.lower().split() if t]
+
+
+def matches(command: str, query_terms: Sequence[str]) -> bool:
+    """True if every term appears somewhere in the command, case-insensitively."""
+    lowered = command.lower()
+    return all(term in lowered for term in query_terms)
 
 
 def score(

@@ -11,10 +11,12 @@ intents, the difference is not marginal: MRR@10 goes from **0.039 to 0.575**
 and top-1 from 0.025 to 0.477. The learned weights are more startling than
 the score — they converge to picks ≈ +3.0 while frequency and recency land at
 roughly *minus* 0.05. Once you have selection feedback, the two signals mem's
-entire scoring was built on are worth approximately nothing.
+entire scoring was built on are worth approximately nothing. The measurement
+is ADR-009's (docs/decisions/009-ranking-learns-from-selections.md), which
+also records what it does *not* show: it is a simulation, not a field study.
 
 Three findings from that work are encoded here, each of which is easy to get
-backwards:
+backwards (all three are decided in ADR-009):
 
 - **The counter belongs to the command, not to the (query, command) pair.**
   Keying by pair measured 3.3% *worse*: it fragments the evidence across every
@@ -49,11 +51,13 @@ from mem import _fsutil
 HALF_LIFE_DAYS = 21.0
 
 # Below this decayed weight an entry no longer affects any ranking, so keeping
-# it only grows the file. Roughly six months of not being chosen.
+# it only grows the file. A single pick reaches it after 21 * log2(50), about
+# 118 days; a command picked ten times takes about 188. Chosen by eye.
 _PRUNE_BELOW = 0.02
 
 # A hard cap so a script hammering the finder cannot grow this file without
-# bound. Far above any human's working set of commands.
+# bound. Far above any human's working set of commands; the exact figure is
+# chosen by eye, not measured.
 MAX_ENTRIES = 5_000
 
 _SECONDS_PER_DAY = 86400.0
@@ -85,6 +89,25 @@ def _decay(count: float, age_seconds: float) -> float:
     return count * math.pow(0.5, days / HALF_LIFE_DAYS)
 
 
+def _entry_weight(entry: object, now: float) -> float | None:
+    """Decayed weight of one stored entry, or None if it is not one.
+
+    The single place that decides what a well-formed entry is. ``load``,
+    ``record`` and ``_pruned`` all read the same hand-editable file, and the
+    finder crashed once because two of them agreed on the shape and the third
+    cast with ``float()`` — one ``"count": "many"`` anywhere in the file
+    raised out of ``record`` after Enter and before the command reached the
+    shell.
+    """
+    if not isinstance(entry, dict):
+        return None
+    count = entry.get("count")
+    stamp = entry.get("ts")
+    if not isinstance(count, (int, float)) or not isinstance(stamp, (int, float)):
+        return None
+    return _decay(float(count), now - float(stamp))
+
+
 def load(now: float | None = None) -> dict[str, float]:
     """Return ``{command: decayed pick weight}``.
 
@@ -107,14 +130,10 @@ def load(now: float | None = None) -> dict[str, float]:
 
     scores: dict[str, float] = {}
     for command, entry in entries.items():
-        if not isinstance(command, str) or not isinstance(entry, dict):
+        if not isinstance(command, str):
             continue
-        count = entry.get("count")
-        stamp = entry.get("ts")
-        if not isinstance(count, (int, float)) or not isinstance(stamp, (int, float)):
-            continue
-        weight = _decay(float(count), moment - float(stamp))
-        if weight > 0:
+        weight = _entry_weight(entry, moment)
+        if weight is not None and weight > 0:
             scores[command] = weight
     return scores
 
@@ -140,15 +159,13 @@ def record(command: str, now: float | None = None) -> None:
         # lock that serializes nothing against the other writers is theatre.
         with _fsutil.exclusive_lock(mem_dir() / ".lock"):
             entries = _read_entries(path)
-            previous = entries.get(command, {})
-            count = previous.get("count", 0.0)
-            stamp = previous.get("ts", moment)
-            if not isinstance(count, (int, float)) or not isinstance(
-                stamp, (int, float)
-            ):
-                count, stamp = 0.0, moment
+            # A malformed previous entry counts as none: the new pick starts
+            # over rather than inheriting whatever a hand edit left behind.
+            previous = _entry_weight(entries.get(command), moment) or 0.0
             entries[command] = {
-                "count": round(_decay(float(count), moment - float(stamp)) + 1.0, 6),
+                # Six decimals keeps a hand-readable file; a difference below
+                # that never moves a ranking. Chosen by eye.
+                "count": round(previous + 1.0, 6),
                 "ts": int(moment),
             }
             _fsutil.atomic_write(
@@ -176,24 +193,19 @@ def _pruned(entries: dict[str, dict], now: float) -> dict[str, dict]:
 
     Without this the file only ever grows: every command ever chosen stays
     forever, long after its weight has decayed past the point of changing any
-    ordering.
+    ordering. Malformed entries are dropped here too: they were invisible to
+    ``load`` already, so rewriting the file without them loses nothing.
     """
-    alive = {
-        command: entry
+    weights = {
+        command: weight
         for command, entry in entries.items()
-        if _decay(float(entry.get("count", 0)), now - float(entry.get("ts", now)))
-        >= _PRUNE_BELOW
+        if (weight := _entry_weight(entry, now)) is not None and weight >= _PRUNE_BELOW
     }
+    alive = {command: entries[command] for command in weights}
     if len(alive) <= MAX_ENTRIES:
         return alive
-    ranked = sorted(
-        alive.items(),
-        key=lambda item: _decay(
-            float(item[1].get("count", 0)), now - float(item[1].get("ts", now))
-        ),
-        reverse=True,
-    )
-    return dict(ranked[:MAX_ENTRIES])
+    ranked = sorted(alive, key=lambda command: weights[command], reverse=True)
+    return {command: entries[command] for command in ranked[:MAX_ENTRIES]}
 
 
 def normalize(weight: float) -> float:

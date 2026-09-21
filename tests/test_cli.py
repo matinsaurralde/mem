@@ -16,6 +16,8 @@ Two rules govern this file:
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
 import time
 from typing import Iterator
 from unittest.mock import patch
@@ -370,10 +372,15 @@ class TestImplicitSearchRouting:
         assert "Usage:" in result.stdout
         assert "Commands:" in result.stdout
 
-    def test_query_with_no_matches_is_silent_and_succeeds(
+    def test_query_with_no_matches_says_so_on_stderr_only(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
-        """No matches is a valid answer: exit 0, no output, no traceback."""
+        """No matches is a valid answer: exit 0, empty stdout, one stderr line.
+
+        stdout stays empty so ``mem foo | head`` pipes nothing; the line on
+        stderr is what tells a human the query ran and found nothing, which
+        pure silence could not distinguish from a broken hook.
+        """
         _add_history("git status")
 
         result = runner.invoke(cli, ["zzzz-nothing-matches-this"])
@@ -381,6 +388,24 @@ class TestImplicitSearchRouting:
         assert result.exception is None
         assert result.exit_code == 0
         assert result.stdout == ""
+        assert result.stderr == 'no matches for "zzzz-nothing-matches-this"\n'
+
+    def test_concept_fallback_finding_nothing_gives_the_same_line(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """A question the concept map understands but history cannot answer.
+
+        "certificate" expands to openssl, x509, certbot...; none of them was
+        ever run, so the expanded pass finds nothing too. The user gets the
+        one line, worded for the query they typed, not for the expansion.
+        """
+        _add_history("git status")
+
+        result = runner.invoke(cli, ["certificate"])
+
+        assert result.exit_code == 0
+        assert result.stdout == ""
+        assert result.stderr == 'no matches for "certificate"\n'
 
     def test_query_against_empty_history_succeeds(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
@@ -402,6 +427,54 @@ class TestImplicitSearchRouting:
 
         assert result.exit_code == 0
         assert len(json.loads(result.stdout)) == 2
+
+    def test_options_after_the_query_are_options(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """``mem git --json -n 1`` means the same as ``mem --json -n 1 git``.
+
+        It used to search for the literal text "git --json -n 1": every
+        subcommand accepts its options after its arguments, and a script that
+        wrote ``mem "$q" --json`` got human output (or nothing) instead of
+        JSON, with exit code 0.
+        """
+        _add_history("git status")
+        _add_history("git push")
+
+        result = runner.invoke(cli, ["git", "--json", "-n", "1"])
+
+        assert result.exit_code == 0
+        assert len(json.loads(result.stdout)) == 1
+
+    def test_json_after_a_query_with_no_matches_is_an_empty_list(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """The measured failure: ``mem zzz --json`` printed nothing at all."""
+        _add_history("git status")
+
+        result = runner.invoke(cli, ["zzzz-nothing-matches-this", "--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == []
+        assert result.stderr == ""
+
+    def test_a_flag_mem_does_not_own_stays_a_query_word(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """``mem git commit -m`` searches for exactly that.
+
+        Shell fragments are full of flags; only mem's own options are lifted
+        out of the query, everything else is text to match.
+        """
+        _add_history("git commit -m fix")
+        _add_history("git commit --amend")
+
+        result = runner.invoke(cli, ["--json", "git", "commit", "-m"])
+
+        assert result.exit_code == 0
+        assert [e["command"] for e in json.loads(result.stdout)] == [
+            "git commit -m fix"
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +547,27 @@ class TestExitCodes:
 
         assert result.exit_code == 0
         assert result.stdout == ""
+
+    def test_capture_failure_is_logged_at_debug(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None, caplog
+    ) -> None:
+        """Silent toward the shell, but the traceback reaches the logger.
+
+        Before this, a capture failing on every prompt left no trace anywhere:
+        exit code zero, no output, and nothing to turn on to find out why.
+        """
+        with (
+            caplog.at_level(logging.DEBUG, logger="mem.capture"),
+            patch("mem.capture.capture_command", side_effect=OSError("disk full")),
+        ):
+            result = runner.invoke(cli, ["_capture", "git status", "/tmp", "0", "12"])
+
+        assert result.exit_code == 0
+        assert result.stdout == ""
+        [record] = [r for r in caplog.records if r.name == "mem.capture"]
+        assert record.levelno == logging.DEBUG
+        assert record.exc_info is not None
+        assert "disk full" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +801,42 @@ class TestForget:
 # ---------------------------------------------------------------------------
 
 
+class TestRelativeTime:
+    """Every threshold of ``_relative_time`` at a fixed instant.
+
+    The function read the wall clock itself, so nothing could assert on its
+    output beyond "contains 'ago'". Values, not orderings: each boundary is
+    pinned one second either side.
+    """
+
+    NOW = 1_800_000_000
+
+    @pytest.mark.parametrize(
+        ("age", "expected"),
+        [
+            (0, "just now"),
+            (59, "just now"),
+            (60, "1m ago"),
+            (3599, "59m ago"),
+            (3600, "1h ago"),
+            (86399, "23h ago"),
+            (86400, "1d ago"),
+            (6 * 86400, "6d ago"),
+            (7 * 86400, "1w ago"),
+            (400 * 86400, "57w ago"),
+        ],
+    )
+    def test_each_threshold(self, age: int, expected: str) -> None:
+        from mem.cli import _relative_time
+
+        assert _relative_time(self.NOW - age, now=self.NOW) == expected
+
+    def test_defaults_to_the_wall_clock(self) -> None:
+        from mem.cli import _relative_time
+
+        assert _relative_time(int(time.time())) == "just now"
+
+
 class TestStats:
     """Stats must degrade gracefully on a brand-new install."""
 
@@ -820,3 +950,91 @@ class TestCapturedCommandFidelity:
 
         assert result.exit_code == 0
         assert [entry["command"] for entry in json.loads(result.stdout)] == [command]
+
+
+# ---------------------------------------------------------------------------
+# Clipboard helpers
+# ---------------------------------------------------------------------------
+
+
+class TestClipboard:
+    """``pbcopy``/``pbpaste`` only: mem is a macOS tool by decision (ADR-010).
+
+    The helpers used to fall through to ``xclip`` and ``xsel``, twenty-odd
+    lines no test reached. What remains is small enough to pin completely.
+    """
+
+    def test_read_returns_pasteboard_text(self) -> None:
+        from mem.cli import _read_from_clipboard
+
+        completed = subprocess.CompletedProcess(["pbpaste"], 0, stdout="ls -la\n")
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbpaste"),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            assert _read_from_clipboard() == "ls -la\n"
+        assert run.call_args.args[0] == ["pbpaste"]
+
+    @pytest.mark.parametrize("stdout", ["", "   \n"])
+    def test_read_treats_blank_pasteboard_as_empty(self, stdout: str) -> None:
+        from mem.cli import _read_from_clipboard
+
+        completed = subprocess.CompletedProcess(["pbpaste"], 0, stdout=stdout)
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbpaste"),
+            patch("subprocess.run", return_value=completed),
+        ):
+            assert _read_from_clipboard() is None
+
+    def test_read_without_pbpaste_is_none_and_runs_nothing(self) -> None:
+        from mem.cli import _read_from_clipboard
+
+        with (
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run") as run,
+        ):
+            assert _read_from_clipboard() is None
+        run.assert_not_called()
+
+    def test_read_survives_a_hung_pbpaste(self) -> None:
+        from mem.cli import _read_from_clipboard
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbpaste"),
+            patch(
+                "subprocess.run", side_effect=subprocess.TimeoutExpired("pbpaste", 5)
+            ),
+        ):
+            assert _read_from_clipboard() is None
+
+    def test_copy_feeds_pbcopy_the_bytes(self) -> None:
+        from mem.cli import _copy_to_clipboard
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbcopy"),
+            patch("subprocess.run") as run,
+        ):
+            assert _copy_to_clipboard("héllo") is True
+        assert run.call_args.args[0] == ["pbcopy"]
+        assert run.call_args.kwargs["input"] == "héllo".encode()
+
+    def test_copy_without_pbcopy_is_false_and_runs_nothing(self) -> None:
+        from mem.cli import _copy_to_clipboard
+
+        with (
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run") as run,
+        ):
+            assert _copy_to_clipboard("x") is False
+        run.assert_not_called()
+
+    def test_copy_reports_a_failed_pbcopy(self) -> None:
+        from mem.cli import _copy_to_clipboard
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/pbcopy"),
+            patch(
+                "subprocess.run", side_effect=subprocess.CalledProcessError(1, "pbcopy")
+            ),
+        ):
+            assert _copy_to_clipboard("x") is False

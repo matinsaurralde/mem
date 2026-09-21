@@ -1,8 +1,12 @@
 """
 Storage layer for mem — pure file I/O with JSONL and JSON.
 
-All mem data lives in ~/.mem/ as plain text files. This module is the
-only place in the codebase that touches the filesystem for data storage.
+All mem data lives in ~/.mem/ as plain text files. This module owns the
+history, session, pattern, group, variable and agent files. It is not the
+only module that touches ~/.mem: picks.py writes picks.json through the
+same :mod:`mem._fsutil` primitives and lock, capture.py writes
+.session_state.json with a plain unlocked write, and tui.py and groups.py
+read the history JSONL directly.
 
 Why JSONL over SQLite: append-only writes are trivially safe (no write
 conflicts, no transactions). Files are human-readable and composable
@@ -107,27 +111,14 @@ def try_sync_lock() -> bool:
     return True
 
 
-def _append_line(path: Path, line: str) -> None:
-    """Append one line to a JSONL file, creating it owner-only."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _harden_dir(path.parent)
-    existed = path.exists()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)
-    try:
-        os.write(fd, (line + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    if existed:
-        _harden_file(path)
-
-
 def _append_lines(path: Path, lines: list[str]) -> None:
-    """Append many lines to a JSONL file in a single write.
+    """Append lines to a JSONL file in a single write, creating it owner-only.
 
-    Separate from :func:`_append_line` because a shell history import writes
-    tens of thousands of entries at once: opening, writing and closing the
-    file per entry turns a sub-second operation into a visible pause, and
-    leaves a partially written import if the process dies halfway.
+    One write for the whole batch, never one per line: a shell history import
+    writes tens of thousands of entries at once, and opening, writing and
+    closing the file per entry turns a sub-second operation into a visible
+    pause — and leaves a partially written import if the process dies
+    halfway. A capture is simply a batch of one.
     """
     if not lines:
         return
@@ -141,6 +132,34 @@ def _append_lines(path: Path, lines: list[str]) -> None:
         os.close(fd)
     if existed:
         _harden_file(path)
+
+
+def iter_jsonl_objects(lines: Iterable[str]) -> Iterator[tuple[str, dict | None]]:
+    """Walk JSONL text as ``(stripped_line, obj)`` pairs, skipping blank lines.
+
+    ``obj`` is the decoded object, or None when the line is not JSON *or* is
+    JSON that is not an object — ``42``, ``"x"``, ``[]``, ``null``. That second
+    case is the reason this exists: the readers already skipped such a line,
+    but every rewriter (``rotate``, ``forget``, the audit scrub) caught only
+    JSONDecodeError and then called ``.get`` on an int. ``rotate`` runs inside
+    the silent background sync, so one such line stopped retention with exit
+    code 0 and no message.
+
+    What a None means is the caller's decision — the rewriters keep the line
+    verbatim, because a line they cannot interpret is not theirs to delete.
+    The Pydantic readers do not go through here: they parse with the model's
+    own JSON parser, and decoding every line twice would double the cost of
+    the one path this module measures in milliseconds.
+    """
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            data = None
+        yield line, data if isinstance(data, dict) else None
 
 
 def repo_file(repo: str) -> Path:
@@ -280,11 +299,8 @@ def _migrate_legacy_repo_file_locked(legacy: Path, fallback_key: str) -> None:
     # Seeded with the requesting repo so an empty legacy file still migrates
     # (and keeps existing) instead of being silently deleted.
     buckets: dict[str, list[str]] = {fallback_key: []}
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        buckets.setdefault(_owner_key_of_line(line, fallback_key), []).append(line)
+    for line, entry in iter_jsonl_objects(raw.splitlines()):
+        buckets.setdefault(_owner_key_of_entry(entry, fallback_key), []).append(line)
 
     destination = repo_file(fallback_key)
     if list(buckets) == [fallback_key] and not destination.exists():
@@ -303,13 +319,11 @@ def _migrate_legacy_repo_file_locked(legacy: Path, fallback_key: str) -> None:
     _fsync_dir(legacy.parent)
 
 
-def _owner_key_of_line(line: str, fallback_key: str) -> str:
-    """Storage key of the repo that produced one legacy JSONL line."""
-    try:
-        entry = json.loads(line)
-        owner = entry.get("repo")
-    except (ValueError, AttributeError):
+def _owner_key_of_entry(entry: dict | None, fallback_key: str) -> str:
+    """Storage key of the repo that produced one decoded legacy JSONL line."""
+    if entry is None:
         return fallback_key
+    owner = entry.get("repo")
     return repo_key(owner) if isinstance(owner, str) and owner else fallback_key
 
 
@@ -349,7 +363,7 @@ def append_command(cmd: CapturedCommand) -> None:
     # acquisition in the migration is free.
     with exclusive_lock():
         path = repo_file(resolve_repo_key(cmd.repo))
-        _append_line(path, cmd.to_jsonl())
+        _append_lines(path, [cmd.to_jsonl()])
 
 
 def append_commands(cmds: list[CapturedCommand]) -> int:
@@ -547,7 +561,10 @@ def read_commands(
                     continue
             try:
                 yield CapturedCommand.from_jsonl(line)
-            except Exception:
+            # Pydantic's ValidationError subclasses ValueError, so this covers
+            # both a line that is not JSON and one that is JSON of the wrong
+            # shape — and nothing else, which is the point.
+            except ValueError:
                 print(
                     f"warning: skipping corrupted line {line_num} in {path.name}",
                     file=sys.stderr,
@@ -586,7 +603,7 @@ def read_patterns(tool: str) -> PatternFile | None:
         return None
     try:
         return PatternFile.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         print(f"warning: corrupted pattern file {path.name}", file=sys.stderr)
         return None
 
@@ -598,7 +615,7 @@ def append_session(session: WorkSession) -> None:
     date = dt.strftime("%Y-%m-%d")
     path = session_file(date)
     with exclusive_lock():
-        _append_line(path, session.to_jsonl())
+        _append_lines(path, [session.to_jsonl()])
 
 
 def read_sessions(date: str) -> Iterator[WorkSession]:
@@ -613,7 +630,7 @@ def read_sessions(date: str) -> Iterator[WorkSession]:
                 continue
             try:
                 yield WorkSession.from_jsonl(line)
-            except Exception:
+            except ValueError:
                 print(
                     f"warning: skipping corrupted session line {line_num} in {path.name}",
                     file=sys.stderr,
@@ -643,6 +660,10 @@ def rotate(
     """
     import time
 
+    # The 90/30-day defaults are the retention the README has promised since
+    # v1 (commit f0164c5); there is no measurement behind either number —
+    # chosen by eye, not measured. 86400 is seconds per day: retention is
+    # whole days, and a leap second's worth of drift does not matter here.
     now = int(time.time())
     cmd_cutoff = now - (keep_commands_days * 86400)
     session_cutoff = now - (keep_sessions_days * 86400)
@@ -657,14 +678,9 @@ def rotate(
                 lines_kept = []
                 lines_total = 0
                 with path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_stripped = line.strip()
-                        if not line_stripped:
-                            continue
+                    for line_stripped, data in iter_jsonl_objects(f):
                         lines_total += 1
-                        try:
-                            data = json.loads(line_stripped)
-                        except json.JSONDecodeError:
+                        if data is None:
                             lines_kept.append(line_stripped)  # keep corrupted lines
                             continue
                         ts = data.get("ts")
@@ -711,11 +727,16 @@ def rotate(
 def forget_commands(query: str) -> int:
     """Remove all commands matching query from ALL storage files.
 
-    Scrubs from both repo JSONL files AND session files (rewrites
-    sessions to remove matching command text). Privacy-first means
-    no traces left anywhere.
+    Scrubs seven places: repo JSONL files, session files (rewritten to drop
+    the matching commands and any summary quoting them), extracted patterns,
+    saved commands and runbooks, stored variables, the in-flight session
+    state and the agent audit log. Privacy-first means no traces left
+    anywhere.
 
-    Returns total number of removed entries.
+    Returns the number of repo history lines removed — only those. A forget
+    that hit nothing but a runbook or a variable returns 0 even though it
+    scrubbed something, which is why the CLI previews with
+    :func:`forget_targets` instead of trusting this count.
     """
     removed = 0
 
@@ -727,13 +748,8 @@ def forget_commands(query: str) -> int:
                 lines_kept = []
                 matched = 0
                 with path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_stripped = line.strip()
-                        if not line_stripped:
-                            continue
-                        try:
-                            data = json.loads(line_stripped)
-                        except json.JSONDecodeError:
+                    for line_stripped, data in iter_jsonl_objects(f):
+                        if data is None:
                             lines_kept.append(line_stripped)
                             continue
                         if query in data.get("command", ""):
@@ -758,13 +774,8 @@ def forget_commands(query: str) -> int:
                 sessions_kept = []
                 matched = False
                 with path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_stripped = line.strip()
-                        if not line_stripped:
-                            continue
-                        try:
-                            data = json.loads(line_stripped)
-                        except json.JSONDecodeError:
+                    for line_stripped, data in iter_jsonl_objects(f):
+                        if data is None:
                             sessions_kept.append(line_stripped)
                             continue
                         cmds = [c for c in data.get("commands", []) if query not in c]
@@ -848,7 +859,6 @@ def _scrub_groups(query: str) -> None:
             if query in (group.get("description") or ""):
                 group["description"] = None
                 changed = True
-            data["groups"][name] = group
 
         if changed:
             atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
@@ -970,13 +980,8 @@ def _scrub_agent_audit(query: str) -> None:
     kept: list[str] = []
     matched = 0
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                data = json.loads(stripped)
-            except json.JSONDecodeError:
+        for stripped, data in iter_jsonl_objects(f):
+            if data is None:
                 kept.append(stripped)
                 continue
             args = data.get("arguments") or {}
@@ -1041,7 +1046,7 @@ def _file_holds(path: Path, query: str, jsonl: bool = False) -> bool:
 def forget_targets(query: str) -> list[str]:
     """Human-readable names of the places still holding *query*.
 
-    ``forget_commands`` scrubs six destinations, but the CLI only ever
+    ``forget_commands`` scrubs seven destinations, but the CLI only ever
     previewed the first one — so ``mem forget`` on text that lives *only* in a
     saved runbook, a stored variable, an extracted pattern or the agent audit
     log reported "no matching commands found" and returned without scrubbing
@@ -1090,6 +1095,10 @@ def forget_targets(query: str) -> list[str]:
 # --- Sync counter ---
 
 SYNC_COUNTER_FILE = MEM_DIR / ".sync_counter"
+# Captures between background syncs. ADR-003 ("Why 20 captures?"): often
+# enough that patterns stay fresh, rare enough that the detached process is
+# not spawned constantly; the pattern cache makes each sync cheaper than the
+# last, so the number was not tuned further.
 SYNC_THRESHOLD = 20
 
 
@@ -1142,22 +1151,25 @@ def read_group_file(path: Path) -> GroupFile:
     """Read and parse a group file. Return empty GroupFile if missing.
 
     Raises ValueError on malformed JSON so callers can present
-    a user-friendly error without losing the corrupt file on disk.
+    a user-friendly error without losing the corrupt file on disk. It does
+    not print: every caller either reports the error itself or skips the
+    scope on purpose, and a second message here made the user read the same
+    failure twice.
     """
     if not path.exists():
         return GroupFile()
     try:
         return GroupFile.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"error: cannot read {path}: {e}", file=sys.stderr)
+    except (OSError, ValueError) as e:
         raise ValueError(f"Malformed data in {path}") from e
 
 
 def write_group_file(path: Path, data: GroupFile) -> None:
-    """Write group data atomically (tmp + rename pattern).
+    """Write a scope's group file under the storage lock.
 
-    Creates parent directories if needed. Uses the same atomic
-    write strategy as write_patterns to prevent corruption.
+    Serialization and atomicity are :func:`atomic_write`'s job; this adds the
+    lock so a save cannot interleave with ``forget``'s rewrite of the same
+    file.
     """
     with exclusive_lock():
         atomic_write(path, data.model_dump_json(indent=2))
@@ -1169,10 +1181,17 @@ def write_group_file(path: Path, data: GroupFile) -> None:
 def read_vars_file() -> VarsFile:
     """Read the persistent variable *index*. Returns empty if missing/corrupted.
 
+    "Treating as empty" has a consequence worth knowing: every writer here is
+    read-modify-write, so the next ``mem vars set`` (or ``touch_vars`` from a
+    ``mem run``) replaces a corrupt file with an index holding only the entry
+    it just wrote. Keychain-backed values survive that — the items are still
+    in the Keychain — but their names vanish from ``mem vars list`` until set
+    again, and a not-yet-migrated plaintext value goes with the file.
+
     The vars file is global (not repo-scoped) because credentials and
     environment values typically apply across projects.
 
-    Since ADR-009 this file records which variables exist, not what they are:
+    Since ADR-010 this file records which variables exist, not what they are:
     values live in the macOS Keychain. Entries written by an older mem still
     carry their value here until :func:`migrate_vars_to_keychain` moves it.
     """
@@ -1180,7 +1199,7 @@ def read_vars_file() -> VarsFile:
         return VarsFile()
     try:
         return VarsFile.model_validate_json(VARS_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         print(
             f"warning: corrupted vars file {VARS_FILE}, treating as empty",
             file=sys.stderr,
@@ -1233,7 +1252,7 @@ def read_agent_access() -> AgentAccess:
         return AgentAccess()
     try:
         return AgentAccess.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         print(
             f"warning: corrupted agent file {path.name}, treating as disabled",
             file=sys.stderr,
@@ -1258,7 +1277,7 @@ def append_agent_audit(entry: AgentAuditEntry) -> None:
     """
     ensure_dirs()
     with exclusive_lock():
-        _append_line(agent_audit_file(), entry.to_jsonl())
+        _append_lines(agent_audit_file(), [entry.to_jsonl()])
 
 
 def read_agent_audit() -> Iterator[AgentAuditEntry]:
@@ -1273,7 +1292,7 @@ def read_agent_audit() -> Iterator[AgentAuditEntry]:
                 continue
             try:
                 yield AgentAuditEntry.from_jsonl(line)
-            except Exception:
+            except ValueError:
                 print(
                     f"warning: skipping corrupted line {line_num} in {path.name}",
                     file=sys.stderr,
@@ -1373,21 +1392,6 @@ def set_var(name: str, value: str, last_used: int = 0) -> None:
         data = read_vars_file()
         data.vars[name] = StoredVariable(value=None, last_used=last_used)
         write_vars_file(data)
-
-
-def get_var_value(name: str) -> str | None:
-    """Value of one stored variable, from whichever backend holds it.
-
-    None means "mem has no such variable". A Keychain that exists but cannot
-    be read raises instead — see :func:`mem.keychain.get_secret` for why that
-    distinction is worth keeping.
-    """
-    entry = read_vars_file().vars.get(name)
-    if entry is None:
-        return None
-    if entry.value is not None:
-        return entry.value  # not migrated yet
-    return keychain.get_secret(name)
 
 
 def load_var_values(

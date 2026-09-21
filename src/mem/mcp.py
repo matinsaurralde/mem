@@ -82,10 +82,10 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
 from typing import Any, Callable, TextIO
 
 from mem import __version__, storage
+from mem.fix import iso_utc, redact_payload
 from mem.models import AgentAuditEntry
 from mem.variables import redact_secrets
 
@@ -105,10 +105,16 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
-# Upper bound on how many stored commands a single tool call may consider.
-# Not a performance guard — a guard against a `limit: 100000` turning one
-# request into a full dump of the user's shell history.
+# Upper bound on how many results a single tool call may return. Not a
+# performance guard — a guard against a `limit: 100000` turning one request
+# into a full dump of the user's shell history.
 MAX_LIMIT = 50
+
+# How deep `search_history` over-fetches when a `repo` filter is given, since
+# the ranking engine scores every repository and the filter is applied to its
+# output afterwards. Deep enough that a repo with a modest share of the history
+# still fills MAX_LIMIT; never returned to the client as such. 500 is chosen
+# by eye, not measured.
 MAX_SCAN = 500
 
 DISABLED_MESSAGE = (
@@ -150,20 +156,6 @@ class RpcError(Exception):
 # --- helpers ---------------------------------------------------------------
 
 
-def _iso(ts: int) -> str:
-    """Format an epoch timestamp as UTC ISO-8601.
-
-    Alongside the raw epoch, never instead of it: a model reads dates far
-    more reliably than it does integers, and a caller that wants to sort
-    still gets the number.
-    """
-    return (
-        datetime.fromtimestamp(ts, tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
-
-
 _repo_cache: list[str | None] = []
 
 
@@ -179,22 +171,6 @@ def _current_repo() -> str | None:
 
         _repo_cache.append(get_git_repo(os.getcwd()))
     return _repo_cache[0]
-
-
-def _redact(value: Any) -> Any:
-    """Recursively redact every string in a JSON-shaped structure.
-
-    Applied once to a whole tool payload rather than field by field: a
-    per-field call is a rule a future tool can forget, and the failure mode
-    of forgetting is a leaked credential.
-    """
-    if isinstance(value, str):
-        return redact_secrets(value)
-    if isinstance(value, dict):
-        return {k: _redact(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact(v) for v in value]
-    return value
 
 
 def _require_str(args: dict[str, Any], name: str) -> str:
@@ -237,11 +213,11 @@ def _optional_limit(args: dict[str, Any], default: int) -> int:
 def _tool_search_history(args: dict[str, Any]) -> dict[str, Any]:
     """Rank the user's captured commands against a query.
 
-    ``repo`` is applied here as a filter rather than passed to
-    ``search.search``, which treats the repo as a *ranking* signal and always
-    scans every history file. Over-fetching and filtering keeps the tool's
-    contract honest ("only commands from this repo") without changing the
-    ranking engine.
+    ``repo`` is passed to ``search.search`` as ``current_repo`` — where it is
+    only a *ranking* signal; the engine always scans every history file — and
+    then applied here as a filter on the result. Over-fetching ``MAX_SCAN``
+    and filtering keeps the tool's contract honest ("only commands from this
+    repo") without changing the ranking engine.
     """
     from mem.search import search
 
@@ -271,7 +247,7 @@ def _tool_search_history(args: dict[str, Any]) -> dict[str, Any]:
                 "command": cmd.command,
                 "repo": cmd.repo,
                 "ts": cmd.ts,
-                "when": _iso(cmd.ts),
+                "when": iso_utc(cmd.ts),
                 "exit_code": cmd.exit_code,
                 "duration_ms": cmd.duration_ms,
                 "score": round(score, 4),
@@ -399,19 +375,26 @@ def _tool_recent_failures(args: dict[str, Any]) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
 
     for _key, commands in iter_histories(include):
-        succeeded_later: dict[str, int] = {}
+        # The *last* success per command, so "did it succeed after this
+        # failure" is one comparison. Keeping the first (as `setdefault` did)
+        # answered no for success -> failure -> success, the ordinary shape of
+        # a flaky run, because the recorded success preceded the failure.
+        last_success: dict[str, int] = {}
         for index, cmd in enumerate(commands):
             if cmd.exit_code == 0:
-                succeeded_later.setdefault(cmd.command, index)
+                last_success[cmd.command] = index
 
+        # Two lines of "what was run next", where `mem fix` reads three: this
+        # tool reports context rather than mining a correction, and an agent
+        # reading a list needs less of it. Chosen by eye, not measured.
         for failure in iter_failures(commands, lookahead=2):
-            retry = succeeded_later.get(failure.command.command)
+            retry = last_success.get(failure.command.command)
             failures.append(
                 {
                     "command": failure.command.command,
                     "repo": failure.command.repo,
                     "ts": failure.command.ts,
-                    "when": _iso(failure.command.ts),
+                    "when": iso_utc(failure.command.ts),
                     "exit_code": failure.command.exit_code,
                     "followed_by": [
                         {"command": nxt.command, "exit_code": nxt.exit_code}
@@ -551,6 +534,8 @@ def _audit(tool: str, args: dict[str, Any], results: int, error: str | None) -> 
     already computed and refusing to return it helps nobody. The write itself
     goes through the storage layer's lock and 0600 permissions.
     """
+    # No tool takes more than three arguments; ten caps what a hostile client
+    # can make the audit log store per call. Chosen by eye.
     safe_args = {
         str(k): redact_secrets(v if isinstance(v, str) else json.dumps(v))
         for k, v in list(args.items())[:10]
@@ -567,6 +552,9 @@ def _audit(tool: str, args: dict[str, Any], results: int, error: str | None) -> 
             )
         )
     except Exception:  # pragma: no cover - defensive, see docstring
+        # OSError from the lock or the audit file; ValueError if a future
+        # entry field does not serialise. Broad because the docstring's
+        # promise is "never raising", and a new failure mode must keep it.
         pass
 
 
@@ -655,6 +643,9 @@ def _handle_tools_call(params: dict[str, Any]) -> dict[str, Any]:
         _audit(name, args, 0, exc.message)
         raise
     except Exception as exc:  # noqa: BLE001 - a tool bug must not kill the server
+        # OSError reading a history or group file, ValueError from a corrupt
+        # JSON line that got past the storage layer's per-line skip, and any
+        # genuine bug in a tool. Only the type name reaches the client.
         _audit(name, args, 0, type(exc).__name__)
         raise RpcError(
             INTERNAL_ERROR, f"mem failed to read its store: {type(exc).__name__}"
@@ -662,7 +653,7 @@ def _handle_tools_call(params: dict[str, Any]) -> dict[str, Any]:
 
     _audit(name, args, int(payload.get("count", 0)), None)
     # The single choke point: nothing reaches the client without passing here.
-    return _text_content(json.dumps(_redact(payload), indent=2))
+    return _text_content(json.dumps(redact_payload(payload), indent=2))
 
 
 def _text_content(text: str, is_error: bool = False) -> dict[str, Any]:
@@ -733,8 +724,7 @@ def handle_message(message: Any) -> dict[str, Any] | None:
 
     handler = _METHODS.get(method)
     if handler is None:
-        if is_notification:
-            return None
+        # Not a notification: the line above already returned for those.
         return _error(request_id, METHOD_NOT_FOUND, f"unknown method: {method}")
 
     try:
@@ -742,6 +732,10 @@ def handle_message(message: Any) -> dict[str, Any] | None:
     except RpcError as exc:
         return _error(request_id, exc.code, exc.message, exc.data)
     except Exception as exc:  # noqa: BLE001 - see class docstring for RpcError
+        # Anything a handler raised that is not already an RpcError: a bug in
+        # initialize/tools handling, or a storage OSError/ValueError that
+        # _handle_tools_call did not see. The reply is an error frame, not a dead
+        # server, and only the type name is disclosed.
         return _error(
             request_id, INTERNAL_ERROR, f"internal error: {type(exc).__name__}"
         )
