@@ -1,8 +1,12 @@
 """
 Storage layer for mem — pure file I/O with JSONL and JSON.
 
-All mem data lives in ~/.mem/ as plain text files. This module is the
-only place in the codebase that touches the filesystem for data storage.
+All mem data lives in ~/.mem/ as plain text files. This module owns the
+history, session, pattern, group, variable and agent files. It is not the
+only module that touches ~/.mem: picks.py writes picks.json through the
+same :mod:`mem._fsutil` primitives and lock, capture.py writes
+.session_state.json with a plain unlocked write, and tui.py and groups.py
+read the history JSONL directly.
 
 Why JSONL over SQLite: append-only writes are trivially safe (no write
 conflicts, no transactions). Files are human-readable and composable
@@ -711,11 +715,16 @@ def rotate(
 def forget_commands(query: str) -> int:
     """Remove all commands matching query from ALL storage files.
 
-    Scrubs from both repo JSONL files AND session files (rewrites
-    sessions to remove matching command text). Privacy-first means
-    no traces left anywhere.
+    Scrubs seven places: repo JSONL files, session files (rewritten to drop
+    the matching commands and any summary quoting them), extracted patterns,
+    saved commands and runbooks, stored variables, the in-flight session
+    state and the agent audit log. Privacy-first means no traces left
+    anywhere.
 
-    Returns total number of removed entries.
+    Returns the number of repo history lines removed — only those. A forget
+    that hit nothing but a runbook or a variable returns 0 even though it
+    scrubbed something, which is why the CLI previews with
+    :func:`forget_targets` instead of trusting this count.
     """
     removed = 0
 
@@ -1040,7 +1049,7 @@ def _file_holds(path: Path, query: str, jsonl: bool = False) -> bool:
 def forget_targets(query: str) -> list[str]:
     """Human-readable names of the places still holding *query*.
 
-    ``forget_commands`` scrubs six destinations, but the CLI only ever
+    ``forget_commands`` scrubs seven destinations, but the CLI only ever
     previewed the first one — so ``mem forget`` on text that lives *only* in a
     saved runbook, a stored variable, an extracted pattern or the agent audit
     log reported "no matching commands found" and returned without scrubbing
@@ -1153,10 +1162,11 @@ def read_group_file(path: Path) -> GroupFile:
 
 
 def write_group_file(path: Path, data: GroupFile) -> None:
-    """Write group data atomically (tmp + rename pattern).
+    """Write a scope's group file under the storage lock.
 
-    Creates parent directories if needed. Uses the same atomic
-    write strategy as write_patterns to prevent corruption.
+    Serialization and atomicity are :func:`atomic_write`'s job; this adds the
+    lock so a save cannot interleave with ``forget``'s rewrite of the same
+    file.
     """
     with exclusive_lock():
         atomic_write(path, data.model_dump_json(indent=2))
@@ -1168,10 +1178,17 @@ def write_group_file(path: Path, data: GroupFile) -> None:
 def read_vars_file() -> VarsFile:
     """Read the persistent variable *index*. Returns empty if missing/corrupted.
 
+    "Treating as empty" has a consequence worth knowing: every writer here is
+    read-modify-write, so the next ``mem vars set`` (or ``touch_vars`` from a
+    ``mem run``) replaces a corrupt file with an index holding only the entry
+    it just wrote. Keychain-backed values survive that — the items are still
+    in the Keychain — but their names vanish from ``mem vars list`` until set
+    again, and a not-yet-migrated plaintext value goes with the file.
+
     The vars file is global (not repo-scoped) because credentials and
     environment values typically apply across projects.
 
-    Since ADR-009 this file records which variables exist, not what they are:
+    Since ADR-010 this file records which variables exist, not what they are:
     values live in the macOS Keychain. Entries written by an older mem still
     carry their value here until :func:`migrate_vars_to_keychain` moves it.
     """

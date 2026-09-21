@@ -138,7 +138,7 @@ class StoredVariable(BaseModel):
 
     - ``value is None`` — the value lives in the macOS Keychain, under the
       service :data:`mem.keychain.SERVICE` and the variable's name as the
-      account. This is what every entry written since ADR-009 looks like.
+      account. This is what every entry written since ADR-010 looks like.
     - ``value`` is a string — a plaintext value from before the Keychain
       backend existed, or one whose migration has not succeeded yet. Still
       readable so nobody's setup breaks, never written by mem today.
@@ -170,7 +170,7 @@ class VarsFile(BaseModel):
     """On-disk representation of the persistent variable store.
 
     An index, not a vault: it records which variables exist and when they were
-    last used. Since ADR-009 the values themselves are in the Keychain.
+    last used. Since ADR-010 the values themselves are in the Keychain.
     """
 
     vars: dict[str, StoredVariable] = {}

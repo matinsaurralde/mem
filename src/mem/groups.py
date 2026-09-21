@@ -81,7 +81,10 @@ def save_command(
 ) -> tuple[bool, list[VarDeclaration]]:
     """Save a command to the saved list or a named group.
 
-    Returns True if saved, False if duplicate (same cmd string).
+    Returns ``(saved, vars)``: ``saved`` is False when the same cmd string is
+    already there, in which case ``vars`` is empty; otherwise ``vars`` is the
+    merged list of variable declarations recorded with the command, so the
+    caller can tell the user which placeholders it will prompt for.
     Creates the group if it doesn't exist, using description_callback
     to prompt the user for an optional group description.
     """
