@@ -49,7 +49,7 @@ the following hold:
     Sixty seconds. A correction written while the error message is still on
     screen is typed in seconds; past a minute the user has read docs, opened
     a browser or switched task, and any causal link is a guess. The gap is
-    measured as *think time* — see :func:`_think_seconds` — because mem
+    measured as *think time* — see :func:`think_seconds` — because mem
     timestamps a command when it *completes*, so a fix that itself takes two
     minutes to run would otherwise fall out of a window it never left.
 
@@ -123,7 +123,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
-from mem import storage
+from mem import ranking, storage
 from mem.models import CapturedCommand
 from mem.variables import redact_secrets
 
@@ -161,7 +161,8 @@ STRONG_EVIDENCE = 3
 MODERATE_EVIDENCE = 2
 
 #: Program names that are a modifier rather than the command being run.
-_PRIVILEGE_PREFIXES = frozenset({"sudo", "doas"})
+#: Shared with :mod:`mem.promote`, whose protected prefix slides past them.
+PRIVILEGE_PREFIXES = frozenset({"sudo", "doas"})
 
 
 # --- shared history scanning ----------------------------------------------
@@ -228,6 +229,9 @@ def iter_failures(
 # --- textual comparison ----------------------------------------------------
 
 
+# 4096 entries is chosen by eye, not measured: comfortably above the distinct
+# command lines one mining pass compares, and small enough that the cache is
+# never what a `mem fix` run's memory is made of.
 @lru_cache(maxsize=4096)
 def normalized_tokens(command: str) -> tuple[str, ...]:
     """Split a command line into comparison tokens.
@@ -256,16 +260,17 @@ def normalized_tokens(command: str) -> tuple[str, ...]:
     except ValueError:
         tokens = command.split()
     start = 0
-    while start < len(tokens) and tokens[start] in _PRIVILEGE_PREFIXES:
+    while start < len(tokens) and tokens[start] in PRIVILEGE_PREFIXES:
         start += 1
     return tuple(tokens[start:])
 
 
-def _is_flag(token: str) -> bool:
+def is_flag(token: str) -> bool:
     """True if a token is an option rather than a thing being operated on.
 
     A bare ``-`` is not a flag: it means stdin, and dropping it changes what
-    the command reads.
+    the command reads. Applied to ``shlex`` tokens here and to raw quoted
+    spans in :mod:`mem.promote`; a leading dash means the same in both.
     """
     return len(token) > 1 and token.startswith("-")
 
@@ -362,7 +367,7 @@ def is_near_variant(failed: Sequence[str], fix: Sequence[str]) -> bool:
         if tag == "equal" or tag == "insert":
             continue
         if tag == "delete":
-            if not all(_is_flag(token) for token in failed[i1:i2]):
+            if not all(is_flag(token) for token in failed[i1:i2]):
                 return False
             continue
         # tag == "replace"
@@ -400,7 +405,7 @@ def _replacement_is_admissible(
         substitutions += 1
 
     for leftover in removed[len(added) :]:
-        if not _is_flag(leftover):
+        if not is_flag(leftover):
             return None
 
     return substitutions
@@ -436,23 +441,36 @@ def is_plausible_correction(failed: str, fix: str, exit_code: int | None) -> boo
     return is_near_variant(failed_tokens, fix_tokens)
 
 
-def _think_seconds(failed: CapturedCommand, candidate: CapturedCommand) -> int:
-    """Seconds between *failed* finishing and *candidate* being typed.
+def think_seconds(previous: CapturedCommand, command: CapturedCommand) -> int:
+    """Seconds the user paused between *previous* finishing and typing *command*.
 
     mem timestamps a command when the shell hook fires, i.e. when it
     *completes*. Naively subtracting timestamps therefore charges the
-    candidate's own runtime to the user's thinking time, and a correction that
+    command's own runtime to the user's thinking time, and a correction that
     happens to be a four-minute ``docker build`` would be discarded for being
     slow rather than for being unrelated. Subtracting the known duration
-    measures what the window is actually about: how long the human paused.
+    measures what a window is actually about: how long the human paused.
+
+    **Read this before writing anything else that reasons about elapsed
+    time.** A bare ``b.ts - a.ts`` is not think time — it includes however
+    long ``b`` took to run. This has bitten three times: the shell hooks, the
+    correction window here, and session splitting in :mod:`mem.promote`,
+    where it silently cut every deploy sequence in half at its slowest step.
+    Any new comparison against a duration threshold has to go through this.
+
+    Clamped at zero. A command whose recorded duration exceeds the gap (clock
+    adjustment, or a duration measured by a different clock than the
+    timestamp) is a pause of nothing, not a negative one. Imported commands
+    carry no duration, so for them the gap is the raw one — the best
+    available answer, not a guess dressed up as one.
 
     Integer seconds against millisecond durations, so the result can land one
     second low; that slack is harmless against a 60-second window.
     """
-    gap = candidate.ts - failed.ts
-    if candidate.duration_ms:
-        gap -= candidate.duration_ms // 1000
-    return gap
+    gap = command.ts - previous.ts
+    if command.duration_ms:
+        gap -= command.duration_ms // 1000
+    return max(gap, 0)
 
 
 def _same_terminal(failed: CapturedCommand, candidate: CapturedCommand) -> bool:
@@ -526,7 +544,7 @@ def _find_fix(failure: Failure) -> CapturedCommand | None:
     for candidate in failure.following:
         if candidate.ts < failure.command.ts:
             continue  # out-of-order line; a fix cannot precede its failure
-        if _think_seconds(failure.command, candidate) > WINDOW_SECONDS:
+        if think_seconds(failure.command, candidate) > WINDOW_SECONDS:
             break  # the window only widens from here
         if not _same_terminal(failure.command, candidate):
             continue
@@ -664,17 +682,6 @@ def mine_all(
 # --- selection -------------------------------------------------------------
 
 
-def matches(command: str, terms: Sequence[str]) -> bool:
-    """True if *command* contains every term, case-insensitively.
-
-    Same all-terms-must-appear contract as ``mem`` search, so that
-    ``mem fix npm build`` narrows to what the user expects rather than
-    matching anything mentioning either word.
-    """
-    lowered = command.lower()
-    return all(term in lowered for term in terms)
-
-
 def select_failure(
     failures: Sequence[CapturedCommand],
     query: str | None = None,
@@ -690,8 +697,11 @@ def select_failure(
     """
     candidates = list(failures)
     if query:
-        terms = [t for t in query.lower().split() if t]
-        candidates = [c for c in candidates if matches(c.command, terms)]
+        # The same all-terms-must-appear rule as `mem <query>`, so that
+        # `mem fix npm build` narrows to what the user expects rather than
+        # matching anything mentioning either word.
+        terms = ranking.terms(query)
+        candidates = [c for c in candidates if ranking.matches(c.command, terms)]
     if not candidates:
         return None
 
@@ -721,7 +731,11 @@ class FixReport:
 def build_report(
     query: str | None = None, current_repo: str | None = None, limit: int = 3
 ) -> FixReport:
-    """Mine the store and answer one ``mem fix`` invocation."""
+    """Mine the store and answer one ``mem fix`` invocation.
+
+    Three fixes by default: the answer to "what fixed this" is usually one
+    command, and a fourth candidate is noise. Chosen by eye, not measured.
+    """
     corrections, failures = mine_all()
     failure = select_failure(failures, query=query, current_repo=current_repo)
     if failure is None:
@@ -733,8 +747,14 @@ def build_report(
     )
 
 
-def _iso(ts: int) -> str:
-    """Format an epoch timestamp as UTC ISO-8601, for machine consumers."""
+def iso_utc(ts: int) -> str:
+    """Format an epoch timestamp as UTC ISO-8601, for machine consumers.
+
+    Alongside the raw epoch, never instead of it: a model reads dates far
+    more reliably than it does integers, and a caller that wants to sort
+    still gets the number. Shared by ``mem fix``, ``mem promote`` and the
+    MCP server so that all three emit the same shape.
+    """
     return (
         datetime.fromtimestamp(ts, tz=timezone.utc)
         .isoformat(timespec="seconds")
@@ -742,21 +762,22 @@ def _iso(ts: int) -> str:
     )
 
 
-def _redact(value: Any) -> Any:
+def redact_payload(value: Any) -> Any:
     """Recursively redact every string in a JSON-shaped structure.
 
     Applied to the whole payload at one choke point rather than field by
-    field, for the same reason ``mem.mcp`` does it: a per-field call is a rule
-    a future field can forget, and the cost of forgetting is a printed
-    credential. ``mem fix`` in particular quotes commands the user has
-    forgotten they ran.
+    field: a per-field call is a rule a future field can forget, and the cost
+    of forgetting is a printed credential. ``mem fix`` and ``mem promote``
+    quote commands the user has forgotten they ran; the MCP server hands them
+    to a model. One implementation for all three, so a fix to it reaches
+    every exit at once.
     """
     if isinstance(value, str):
         return redact_secrets(value)
     if isinstance(value, dict):
-        return {k: _redact(v) for k, v in value.items()}
+        return {k: redact_payload(v) for k, v in value.items()}
     if isinstance(value, list):
-        return [_redact(v) for v in value]
+        return [redact_payload(v) for v in value]
     return value
 
 
@@ -776,7 +797,7 @@ def report_payload(report: FixReport) -> dict[str, Any]:
             "command": failure.command,
             "exit_code": failure.exit_code,
             "ts": failure.ts,
-            "when": _iso(failure.ts),
+            "when": iso_utc(failure.ts),
             "repo": failure.repo,
             "dir": failure.dir,
         },
@@ -788,11 +809,11 @@ def report_payload(report: FixReport) -> dict[str, Any]:
                 "confidence": c.confidence,
                 "first_seen": c.first_seen,
                 "last_seen": c.last_seen,
-                "last_seen_iso": _iso(c.last_seen),
+                "last_seen_iso": iso_utc(c.last_seen),
                 "failed_since": c.fix_failures,
                 "repo": c.repo,
             }
             for c in report.fixes
         ],
     }
-    return _redact(payload)
+    return redact_payload(payload)

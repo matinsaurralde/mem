@@ -26,6 +26,7 @@ watches the list, and it makes the finder pipeable.
 from __future__ import annotations
 
 import codecs
+import heapq
 import json
 import os
 import select
@@ -102,8 +103,9 @@ class Result(NamedTuple):
 def history_files(mem_dir: str) -> list[str]:
     """Every history file, newest-modified first.
 
-    Ordering by mtime means the repo the user is actually working in tends to
-    be read first, which matters for the empty-query view.
+    The order only breaks ties: ``_most_recent`` merges every file by
+    timestamp, and two commands captured in the same second in different
+    repos are shown with the more recently written file first.
     """
     repos = os.path.join(mem_dir, "repos")
     try:
@@ -121,20 +123,30 @@ def _mtime(path: str) -> float:
         return 0.0
 
 
-def read_raw_lines(paths: Sequence[str]) -> list[str]:
-    """Read every history line as text, without parsing any of it.
+def read_history(paths: Sequence[str]) -> tuple[list[str], list[int]]:
+    """Every history line as text, and the index at which each file begins.
 
-    ``errors="replace"`` because a history file is whatever the user typed,
-    and a single undecodable byte must not take down the finder.
+    Nothing is parsed here. ``errors="replace"`` because a history file is
+    whatever the user typed, and a single undecodable byte must not take down
+    the finder. The starts are what let :func:`_most_recent` walk the files
+    separately without the list being copied per file.
     """
     lines: list[str] = []
+    starts: list[int] = []
     for path in paths:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                lines.extend(handle.read().splitlines())
+                text = handle.read()
         except OSError:
             continue
-    return lines
+        starts.append(len(lines))
+        lines.extend(text.splitlines())
+    return lines, starts
+
+
+def read_raw_lines(paths: Sequence[str]) -> list[str]:
+    """Every history line as text, files concatenated in the order given."""
+    return read_history(paths)[0]
 
 
 def parse_entry(line: str) -> Entry | None:
@@ -169,19 +181,11 @@ def parse_entry(line: str) -> Entry | None:
 # --- Filtering and ranking ---------------------------------------------------
 
 
-def terms_of(query: str) -> list[str]:
-    """Split a query into the terms a command must all contain.
-
-    Matched independently so word order does not matter, which is how people
-    remember commands. Identical to what ``mem <query>`` does.
-    """
-    return [t for t in query.lower().split() if t]
-
-
-def matches(command: str, terms: Sequence[str]) -> bool:
-    """True when every term appears somewhere in the command."""
-    lowered = command.lower()
-    return all(term in lowered for term in terms)
+# The matching rule is the one `mem <query>` uses, by construction: both call
+# into the standard-library-only ranking module rather than each keeping a
+# copy that would drift.
+terms_of = ranking.terms
+matches = ranking.matches
 
 
 def candidate_lines(lines: Sequence[str], terms: Sequence[str]) -> Iterator[str]:
@@ -203,6 +207,9 @@ def candidate_lines(lines: Sequence[str], terms: Sequence[str]) -> Iterator[str]
 
 
 _STABLE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+# Below this length a needle matches almost every line, so the scan costs more
+# than it saves. Mirrors ``storage._MIN_NEEDLE_LEN`` (this module cannot
+# import storage); a test pins the two implementations against each other.
 _MIN_NEEDLE_LEN = 3
 
 
@@ -233,15 +240,18 @@ def rank(
     current_repo: str | None,
     now: float,
     limit: int = MAX_RESULTS,
+    starts: Sequence[int] = (0,),
 ) -> list[Result]:
     """Rank history against a query, deduplicated by command text.
 
     With an empty query there is nothing to rank, so the most recent commands
     are returned instead — which is what Ctrl+R means before you type.
+    *starts* is where each history file begins in *lines*, as
+    :func:`read_history` reports it; only the empty query needs it.
     """
     terms = terms_of(query)
     if not terms:
-        return _most_recent(lines, limit)
+        return _most_recent(lines, limit, starts)
 
     # Read once for the whole page: it is one small file, and reading it per
     # candidate would turn every keystroke into thousands of stat() calls.
@@ -280,22 +290,52 @@ def rank(
     return results[:limit]
 
 
-def _most_recent(lines: Sequence[str], limit: int) -> list[Result]:
-    """The newest distinct commands, without scoring anything.
+def _most_recent(
+    lines: Sequence[str], limit: int, starts: Sequence[int] = (0,)
+) -> list[Result]:
+    """The newest distinct commands across every file, without scoring anything.
 
-    Walks backwards so the scan stops as soon as ``limit`` distinct commands
-    have been seen — the whole point of not ranking an empty query.
+    Each history file is append-only, so its newest line is its last. The
+    files are walked backwards *together*, always taking the newest of their
+    heads — a k-way merge — so the scan stops after about ``limit`` parses
+    plus one per file, which is the whole point of not ranking an empty
+    query. It used to walk the concatenation from its end, which on a
+    multi-repo store meant the end of whichever file was read last, and the
+    ``limit`` distinct commands were found before the other files were
+    reached: a stale repo with 300 commands hid a fresh one with 5.
+
+    *starts* is where each file begins in *lines*; ``(0,)`` is one file.
+    Ties on the timestamp go to the earlier file, which :func:`history_files`
+    makes the more recently written one.
     """
+    ends = [*starts[1:], len(lines)]
+    # Next index to read in each file, walking backwards.
+    cursors = [end - 1 for end in ends]
+    # (-ts, file, -index, entry): the newest line is the smallest tuple, and
+    # (file, index) is unique so the entry itself is never compared.
+    heap: list[tuple[int, int, int, Entry]] = []
+
+    def push_head(file: int) -> None:
+        index = cursors[file]
+        while index >= starts[file]:
+            entry = parse_entry(lines[index])
+            if entry is not None:
+                heapq.heappush(heap, (-entry.ts, file, -index, entry))
+                index -= 1
+                break
+            index -= 1
+        cursors[file] = index
+
+    for file in range(len(starts)):
+        push_head(file)
+
     seen: dict[str, Entry] = {}
-    for line in reversed(lines):
-        entry = parse_entry(line)
-        if entry is None or entry.command in seen:
-            continue
-        seen[entry.command] = entry
-        if len(seen) >= limit:
-            break
-    ordered = sorted(seen.values(), key=lambda e: e.ts, reverse=True)
-    return [Result(entry=entry, score=0.0, frequency=1) for entry in ordered]
+    while heap and len(seen) < limit:
+        _, file, _, entry = heapq.heappop(heap)
+        if entry.command not in seen:
+            seen[entry.command] = entry
+        push_head(file)
+    return [Result(entry=entry, score=0.0, frequency=1) for entry in seen.values()]
 
 
 # --- Rendering ---------------------------------------------------------------
@@ -382,9 +422,15 @@ def render(
     window = results[first : first + height]
 
     out = [_CLEAR]
+    counter = f"{len(results)}/{total}"
+    # The query is untrusted too: the hook passes the live $BUFFER, and a
+    # pasted OSC title sequence in it retitled the window from the header
+    # while every result row scrubbed it. Clamped as well — "mem " before it,
+    # "▏  " and the counter after — because a header that wraps pushes the
+    # last result row off the alternate screen.
+    shown = _visible(query, columns - 4 - 3 - len(counter))
     out.append(
-        f"{_BOLD}mem{_RESET} {query}"
-        f"{_DIM}▏{_RESET}  {_DIM}{len(results)}/{total}{_RESET}\r\n"
+        f"{_BOLD}mem{_RESET} {shown}{_DIM}▏{_RESET}  {_DIM}{counter}{_RESET}\r\n"
     )
     out.append(f"{_DIM}{'─' * max(columns, 1)}{_RESET}\r\n")
 
@@ -419,11 +465,14 @@ def _render_row(result: Result, is_selected: bool, columns: int, now: float) -> 
     age = relative_time(entry.ts, now)
     repo = os.path.basename(entry.repo) if entry.repo else ""
 
+    # 22 columns for the metadata, or a third of the row when that is less:
+    # chosen by eye, not measured.
     meta = _visible(f"{repo} {age}".strip(), min(22, max(columns // 3, 0)))
     meta_width = display_width(meta)
     # The -1 reserves the single-column gap below. Without it a maximally long
     # command leaves no room for the gap, the `max(..., 1)` adds one anyway,
-    # and the row runs one column past the edge and wraps.
+    # and the row runs one column past the edge and wraps. The floor of 8
+    # command columns is chosen by eye, not measured.
     command = _visible(entry.command, max(columns - _PREFIX_WIDTH - meta_width - 1, 8))
     gap = max(columns - _PREFIX_WIDTH - display_width(command) - meta_width, 1)
 
@@ -504,10 +553,14 @@ class KeyReader:
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def read_key(self) -> str:
-        """Read one keypress, collapsing escape sequences into a single token.
+        """Read one keypress, collapsing a short escape sequence into one token.
 
         Arrow keys arrive as three bytes. Reading them one at a time would
-        move the selection and then insert ``[A`` into the query.
+        move the selection and then insert ``[A`` into the query. Only up to
+        three bytes are collapsed (ESC, ``[`` or ``O``, one final): longer
+        sequences such as ``ESC [ 1 ; 5 C`` (Ctrl+Right) or ``ESC [ 3 ~``
+        (Delete) come back as their first three bytes, and the remainder is
+        read as ordinary keypresses.
         """
         first = self._read_char()
         if first != _ESC:
@@ -533,6 +586,10 @@ class KeyReader:
 
     def _read_char_if_ready(self) -> str:
         """Read another character only if the terminal already sent it."""
+        # 50 ms: chosen by eye, not measured. A local terminal delivers the
+        # rest of a sequence in the same write, so anything above a few ms
+        # works there; the margin is for a slow ssh hop. Too short and an
+        # arrow key over ssh becomes Escape plus "[A" typed into the query.
         ready, _, _ = select.select([self.fd], [], [], 0.05)
         if not ready:
             return ""
@@ -562,13 +619,20 @@ class Finder:
         current_repo: str | None,
         query: str = "",
         now: float | None = None,
+        starts: Sequence[int] = (0,),
     ) -> None:
         self.lines = lines
+        self.starts = starts
         self.current_repo = current_repo
         self.query = query
         self.selected = 0
         self.now = time.time() if now is None else now
-        self.results = rank(self.lines, self.query, self.current_repo, self.now)
+        self.results = self._rank()
+
+    def _rank(self) -> list[Result]:
+        return rank(
+            self.lines, self.query, self.current_repo, self.now, starts=self.starts
+        )
 
     def apply(self, action: Action) -> str | None:
         """Apply an action. Returns "accept"/"cancel" when the session ends."""
@@ -594,7 +658,7 @@ class Finder:
             return None
 
         if self.query != previous:
-            self.results = rank(self.lines, self.query, self.current_repo, self.now)
+            self.results = self._rank()
             # Any edit to the query invalidates the position: keeping index 7
             # over a completely different result set selects an unrelated
             # command, which is how a finder makes you run the wrong thing.
@@ -641,8 +705,12 @@ def _terminal_size(stream: IO[str]) -> tuple[int, int]:
     """Rows and columns, with a usable fallback when there is no terminal."""
     try:
         size = os.get_terminal_size(stream.fileno())
+        # The floor of 20 columns is chosen by eye, not measured; the
+        # prototype crashed at narrow widths until every computed width
+        # was clamped (ADR-008).
         return max(size.lines, _CHROME_ROWS + 1), max(size.columns, 20)
     except (OSError, ValueError):
+        # The VT100 default, and what shutil.get_terminal_size falls back to.
         return 24, 80
 
 
@@ -665,8 +733,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         query = " ".join(a for a in args if not a.startswith("-"))
     mem_dir = os.environ.get("MEM_DIR") or os.path.join(os.path.expanduser("~"), ".mem")
-    lines = read_raw_lines(history_files(mem_dir))
-    finder = Finder(lines, _current_repo(), query=query)
+    lines, starts = read_history(history_files(mem_dir))
+    finder = Finder(lines, _current_repo(), query=query, starts=starts)
 
     try:
         tty_in = open("/dev/tty", "rb", buffering=0)

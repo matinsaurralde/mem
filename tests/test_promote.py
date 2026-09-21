@@ -606,7 +606,10 @@ class TestEmptyHistory:
 
     def test_unbalanced_quotes_do_not_crash_the_tokenizer(self) -> None:
         assert promote.command_shape("echo 'unterminated")
-        assert promote.tokenize('git commit -m "wip') is not None
+        # The unbalanced quote is kept as literal text, not raised on and not
+        # silently dropped from the middle of the line.
+        tokens = [t.text for t in promote.tokenize('git commit -m "wip')]
+        assert tokens == ["git", "commit", "-m", '"wip']
 
 
 class TestCredentials:

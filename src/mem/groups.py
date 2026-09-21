@@ -44,8 +44,7 @@ def resolve_scope(global_flag: bool) -> Path:
     repo = get_git_repo(os.getcwd())
     if repo is None:
         return storage.GROUPS_GLOBAL_FILE
-    sanitized = storage.sanitize_repo_name(repo)
-    return storage.group_file_path(sanitized)
+    return storage.group_file_path(repo)
 
 
 def validate_group_name(name: str) -> None:
@@ -81,7 +80,10 @@ def save_command(
 ) -> tuple[bool, list[VarDeclaration]]:
     """Save a command to the saved list or a named group.
 
-    Returns True if saved, False if duplicate (same cmd string).
+    Returns ``(saved, vars)``: ``saved`` is False when the same cmd string is
+    already there, in which case ``vars`` is empty; otherwise ``vars`` is the
+    merged list of variable declarations recorded with the command, so the
+    caller can tell the user which placeholders it will prompt for.
     Creates the group if it doesn't exist, using description_callback
     to prompt the user for an optional group description.
     """
@@ -142,23 +144,20 @@ def get_last_captured_command(repo: str | None) -> str:
             "No captured history found. Run some commands first."
         )
 
-    last_line = None
+    last: tuple[str, dict | None] | None = None
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped:
-                last_line = stripped
+        for last in storage.iter_jsonl_objects(f):
+            pass
 
-    if last_line is None:
+    if last is None:
         raise click.ClickException(
             "No captured history found. Run some commands first."
         )
 
-    try:
-        data = json.loads(last_line)
-        return data["command"]
-    except (json.JSONDecodeError, KeyError):
+    _line, data = last
+    if data is None or "command" not in data:
         raise click.ClickException("Could not read last command from history.")
+    return data["command"]
 
 
 def list_all(repo_path: Path | None, global_path: Path) -> dict:
@@ -346,17 +345,16 @@ def import_from_markdown_str(content: str) -> tuple[str | None, list[GroupComman
             in_table = True
             continue
 
-        # Skip header row (| Command | Description |)
+        # Skip everything before the separator, including the header row
+        # (| Command | Description |): a row only counts once the table is open.
         if not in_table:
-            if "Command" in stripped and "Description" in stripped:
-                continue
             continue
 
         # Parse table row
         cells = [c.strip() for c in stripped.split("|")[1:-1]]
         if len(cells) >= 2:
             cmd_cell = cells[0]
-            comment_cell = cells[1] if len(cells) > 1 else ""
+            comment_cell = cells[1]
 
             match = re.search(r"`(.+?)`", cmd_cell)
             if match:

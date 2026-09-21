@@ -168,7 +168,7 @@ class TestFiltering:
             inlined = tui._stable_run(term)
             official = storage.prefilter_needles([term])
 
-            assert [inlined] if inlined else [] == official, f"disagree on {term!r}"
+            assert ([inlined] if inlined else []) == official, f"disagree on {term!r}"
 
     def test_every_term_must_match(self):
         lines = [line_of("docker compose up"), line_of("docker build .")]
@@ -254,6 +254,71 @@ class TestRanking:
         lines = [line_of("ls", ts=now - i) for i in range(5)]
 
         assert len(tui.rank(lines, "", None, now=now)) == 1
+
+    def test_the_empty_query_view_is_the_newest_across_every_repo(self, tmp_path: Path):
+        """Ctrl+R with nothing typed must show what you ran last, in any repo.
+
+        The walk used to start at the end of the concatenated files and stop
+        after ``MAX_RESULTS`` distinct commands — which, with several repos,
+        meant the end of whichever file was read last. A stale repo with 300
+        commands hid a fresh one with 5 completely: every user with more than
+        one repo saw the wrong list without typing a character.
+        """
+        now = int(time.time())
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        stale = repos / "stale.jsonl"
+        stale.write_text(
+            "".join(
+                line_of(f"stale-{i}", ts=now - 100_000 + i, repo="/w/stale") + "\n"
+                for i in range(300)
+            ),
+            encoding="utf-8",
+        )
+        fresh = repos / "fresh.jsonl"
+        fresh.write_text(
+            "".join(
+                line_of(f"fresh-{i}", ts=now - 5 + i, repo="/w/fresh") + "\n"
+                for i in range(5)
+            ),
+            encoding="utf-8",
+        )
+        os.utime(stale, (now - 100_000, now - 100_000))
+        os.utime(fresh, (now, now))
+
+        lines, starts = tui.read_history(tui.history_files(str(tmp_path)))
+        results = tui.rank(lines, "", None, now=now, starts=starts)
+        shown = [r.entry.command for r in results]
+
+        assert shown[:5] == ["fresh-4", "fresh-3", "fresh-2", "fresh-1", "fresh-0"]
+        assert shown[5] == "stale-299"
+        assert len(shown) == tui.MAX_RESULTS
+        assert shown == sorted(shown, key=lambda c: -results[shown.index(c)].entry.ts)
+
+    def test_the_empty_query_view_interleaves_repos_by_time(self):
+        """Two repos worked in turn: the list is by time, not file by file.
+
+        Exact at any depth, not only for the first ``MAX_RESULTS`` lines: the
+        duplicates here force the merge past the first head of each file.
+        """
+        now = int(time.time())
+        # The file read first is the one modified last, as history_files orders
+        # them; the old walk started at the end of the *second* one.
+        first = [
+            line_of("b", ts=now - 30, repo="/b"),
+            line_of("c", ts=now - 10, repo="/b"),
+        ]
+        second = [
+            line_of("d", ts=now - 50, repo="/d"),
+            line_of("a", ts=now - 40, repo="/d"),
+            line_of("d", ts=now - 20, repo="/d"),
+        ]
+        lines = first + second
+
+        results = tui.rank(lines, "", None, now=now, limit=3, starts=[0, len(first)])
+
+        assert [r.entry.command for r in results] == ["c", "d", "b"]
+        assert [r.entry.ts for r in results] == [now - 10, now - 20, now - 30]
 
     def test_results_are_capped(self):
         lines = [line_of(f"cmd-{i}", ts=i) for i in range(tui.MAX_RESULTS + 50)]
@@ -459,6 +524,32 @@ class TestRendering:
         assert "\x1b[2J" not in body
         assert "\x1b]0;" not in body
         assert "gotcha" in body
+
+    @pytest.mark.parametrize("columns", [20, 40, 80, 120])
+    def test_the_query_cannot_repaint_the_terminal_or_wrap_the_header(
+        self, columns: int
+    ):
+        """The initial query is the live ``$BUFFER`` — as untrusted as history.
+
+        Every result row was scrubbed and clamped; the header wrote the query
+        raw. A pasted OSC title sequence in the buffer retitled the window on
+        Ctrl+R, and a long buffer wrapped the header, pushing the last result
+        row off the alternate screen.
+        """
+        hostile = "echo \x1b]0;pwned\x07\x1b[2J" + "y" * 300
+        finder = tui.Finder([line_of("ls")], None, query=hostile)
+
+        header = finder.frame(rows=24, columns=columns).split("\r\n")[0]
+        # Every frame opens with the finder's own clear-screen sequence; what
+        # follows it is the header and must contain no sequence of its own.
+        assert header.startswith(tui._CLEAR)
+        header = header[len(tui._CLEAR) :]
+
+        assert "\x1b]0;" not in header
+        assert "\x07" not in header
+        assert "\x1b[2J" not in header
+        assert "echo" in header
+        assert tui.display_width(strip_ansi(header)) <= columns, repr(header)
 
     @pytest.mark.parametrize("columns", [20, 40, 80, 120])
     def test_long_commands_are_truncated_to_the_terminal_width(self, columns: int):

@@ -33,43 +33,18 @@ def score_command(
 ) -> float:
     """Score a command for search relevance.
 
-    A linear combination of four features, each normalised to [0, 1]:
+    The formula is :func:`mem.ranking.score` — one implementation, over plain
+    strings and ints, because the interactive finder has to rank without
+    paying Pydantic's import and two copies of a ranking formula drift until
+    the same history sorts differently depending on how you asked. The
+    weights, the features and the measurement behind them are in
+    ``docs/decisions/009-ranking-learns-from-selections.md``; this function
+    only unwraps the model and passes the fields through.
 
-        score = 0.35*frequency + 0.35*recency + 0.15*prefix + 0.15*context
-
-    Why the normalisation matters more than the weights: the previous formula
-    was ``0.4*frequency + 0.4*recency + 0.2*context`` with ``frequency`` as a
-    *raw count*. Recency and context are bounded by 1, so a command run ten
-    times scored 4.0 against a ceiling of 0.6 for everything else — the two
-    signals the docstring described as equally weighted could not move the
-    ranking at all. mem was sorting by frequency and calling it a formula. The
-    weights are a design choice; that was a bug.
-
-    - **Frequency** (35%): ``log1p(n) / log1p(50)``, capped at 1. Logarithmic
-      because the jump from 1 run to 5 says much more than 100 to 105, and
-      capped so one pathologically repeated command cannot own every result.
-    - **Recency** (35%): exponential decay with a 7-day half-life,
-      ``exp(-days * ln(2) / 7)``. Today scores 1.0, a week ago 0.5, two weeks
-      0.25. Human memory fades the same way: older commands need a stronger
-      signal to surface.
-    - **Prefix** (15%): 1.0 when the command starts with the query. Someone
-      typing ``mem git push`` wants ``git push origin main``, not the
-      ``echo "remember to git push"`` they ran more often. Nothing else in the
-      formula could express "this is what you meant", because every result
-      already contains every term.
-    - **Context** (15%): 1.0 for the current repo, 0.5 for a sibling sharing a
-      parent directory. A refinement, not a driver.
-
-    Why exit code is NOT included: a failed command is often deliberate —
+    Why exit code is NOT a feature: a failed command is often deliberate —
     checking whether a service is down, or probing until something works. The
-    useful version of this signal is the *pair* (what failed, what fixed it),
-    which is a different feature, not a penalty term here.
-
-    The arithmetic itself lives in :mod:`mem.ranking`, which imports nothing
-    but the standard library. The interactive finder has to rank without
-    paying Pydantic's ~58ms import, and two implementations of a ranking
-    formula would drift until the same history sorted differently depending
-    on how you asked for it.
+    useful version of that signal is the *pair* (what failed, what fixed it),
+    which is ``mem fix``, not a penalty term here.
     """
     return ranking.score(
         command=cmd.command,
@@ -81,24 +56,6 @@ def score_command(
         now=time.time(),
         pick_weight=pick_weight,
     )
-
-
-def _terms(query: str) -> list[str]:
-    """Split a query into the terms a command must all contain.
-
-    Multi-word queries used to keep only the first word, so `mem docker
-    compose` silently answered for `docker` alone — and ranked an unrelated
-    `docker ps` above the one line that actually matched both words. Matching
-    every term independently also makes word order irrelevant, which is how
-    people remember commands.
-    """
-    return [t for t in query.lower().split() if t]
-
-
-def _matches(command: str, terms: list[str]) -> bool:
-    """True if every term appears somewhere in the command."""
-    lowered = command.lower()
-    return all(term in lowered for term in terms)
 
 
 def _read_history(
@@ -177,12 +134,12 @@ def _literal_search(
     """Rank the commands containing every word the user typed."""
     # Cheap substring test on the raw JSONL line, so the expensive parse only
     # runs for lines that could match. The needles are a *necessary* condition,
-    # never a sufficient one — `_matches` below is still the real filter.
+    # never a sufficient one — `ranking.matches` below is still the real filter.
     needles = storage.prefilter_needles(terms)
     matched = [
         cmd
         for cmd in _read_history(current_repo, needles)
-        if _matches(cmd.command, terms)
+        if ranking.matches(cmd.command, terms)
     ]
     return _rank(matched, query, current_repo)
 
@@ -218,7 +175,7 @@ def _expanded_search(
     on these questions, because the words a person uses to describe a command
     are usually not in the command.
     """
-    data = concepts.load(storage.MEM_DIR / concepts.USER_CONCEPTS_FILENAME)
+    data = concepts.load(storage.MEM_DIR / concepts.CONCEPTS_FILENAME)
     groups = concepts.expand(terms, data)
 
     admitted = list(_read_history(current_repo, line_filter=_any_variant(groups)))
@@ -317,6 +274,8 @@ def search(
     """Search command history for commands matching a query.
 
     Returns a list of (command, score) tuples, ranked by score descending.
+    Ten by default because it fits a terminal without scrolling; chosen by
+    eye, not measured.
 
     **The matching rule.** A command matches when every word of the query
     appears in it. If nothing does, and only then, the query is re-read
@@ -350,7 +309,7 @@ def search(
     exists so the recall benchmark in ``tests/test_concepts.py`` can measure
     both halves against one history.
     """
-    terms = _terms(query)
+    terms = ranking.terms(query)
     if not terms:
         return []
 

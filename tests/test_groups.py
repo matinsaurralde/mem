@@ -158,7 +158,11 @@ class TestReadWriteGroupFile:
 class TestValidateGroupName:
     @pytest.mark.parametrize("name", ["deploy", "my-group", "a1", "test-123-abc"])
     def test_valid_names(self, name: str):
-        groups.validate_group_name(name)  # should not raise
+        # A valid name is accepted silently: no exception and no value. The
+        # invalid-name test below proves rejection raises, so a mutation that
+        # returned a flag instead of raising would slip past both without
+        # this assertion.
+        assert groups.validate_group_name(name) is None
 
     @pytest.mark.parametrize(
         "name",
@@ -292,6 +296,25 @@ class TestGetLastCapturedCommand:
     def test_no_history_raises(self, tmp_mem_dir: Path):
         with pytest.raises(click.ClickException, match="No captured history"):
             groups.get_last_captured_command("/nonexistent")
+
+    def test_last_line_that_is_json_but_not_an_object_is_reported(
+        self, tmp_mem_dir: Path
+    ):
+        """``42`` as the last line is "could not read", not a TypeError.
+
+        The reader caught JSONDecodeError and KeyError, so a line that decoded
+        to an int reached ``data["command"]`` and ``mem save !`` died with a
+        traceback instead of its own message.
+        """
+        path = storage.repo_file(storage.repo_key("/test-repo"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        from conftest import make_command
+
+        first = make_command(command="first", repo="/test-repo")
+        path.write_text(first.to_jsonl() + "\n42\n", encoding="utf-8")
+
+        with pytest.raises(click.ClickException, match="Could not read last command"):
+            groups.get_last_captured_command("/test-repo")
 
 
 # ---------------------------------------------------------------------------
@@ -1345,8 +1368,12 @@ class TestResolveScope:
     def test_in_repo(self, tmp_mem_dir: Path):
         with patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             path = groups.resolve_scope(global_flag=False)
-        expected_name = storage.sanitize_repo_name(FAKE_REPO)
-        assert path == storage.group_file_path(expected_name)
+        assert path == storage.group_file_path(FAKE_REPO)
+        # The on-disk name is pinned literally: callers used to sanitise the
+        # path themselves before handing it to group_file_path, which
+        # sanitises again, and the file must not move now that they do not.
+        assert path.name == storage.sanitize_repo_name(FAKE_REPO) + ".json"
+        assert path.name == "Users-test-projects-myapp.json"
 
     def test_outside_repo_falls_back_to_global(self, tmp_mem_dir: Path):
         with patch("mem.groups.get_git_repo", return_value=None):

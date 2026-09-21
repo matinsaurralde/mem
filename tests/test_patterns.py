@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -822,6 +823,38 @@ class TestGeneralizationFailures:
         assert sum(p.frequency for p in result.patterns) == len(commands)
 
 
+def _fake_sdk(available: bool, reason: str | None = None) -> ModuleType:
+    """An `apple_fm_sdk` whose model reports the given availability.
+
+    `is_available()` returns `(bool, reason)` exactly as the real SDK's
+    `SystemLanguageModel` does; `reason` is an object with a `.name`, like
+    the real enum member. Opening a session is counted so a test can prove
+    the model path was never entered.
+    """
+    fake = ModuleType("apple_fm_sdk")
+    fake.sessions_opened = 0  # type: ignore[attr-defined]
+
+    class Reason:
+        name = reason
+
+    class SystemLanguageModel:
+        def is_available(self):
+            return available, (None if available else Reason())
+
+    class LanguageModelSession:
+        def __init__(self) -> None:
+            fake.sessions_opened += 1  # type: ignore[attr-defined]
+
+        async def respond(self, *args, **kwargs):
+            raise RuntimeError("model unavailable")
+
+    fake.SystemLanguageModel = SystemLanguageModel  # type: ignore[attr-defined]
+    fake.LanguageModelSession = LanguageModelSession  # type: ignore[attr-defined]
+    fake.generable = lambda *a, **kw: lambda cls: cls  # type: ignore[attr-defined]
+    fake.guide = lambda *a, **kw: None  # type: ignore[attr-defined]
+    return fake
+
+
 class TestAppleFmProbe:
     """The availability probe decides between the AI and heuristic paths."""
 
@@ -831,8 +864,74 @@ class TestAppleFmProbe:
         assert _REAL_APPLE_FM_AVAILABLE() is False
 
     def test_reports_available_when_the_sdk_imports(self, monkeypatch):
+        """An SDK with no availability API is assumed usable, as before."""
         monkeypatch.setitem(sys.modules, "apple_fm_sdk", ModuleType("apple_fm_sdk"))
         assert _REAL_APPLE_FM_AVAILABLE() is True
+
+    def test_reports_unavailable_when_the_model_says_so(self, monkeypatch, caplog):
+        """Installed is not the same as usable.
+
+        With Apple Intelligence off or the model not downloaded, the SDK
+        imports fine and every request raises. The probe has to ask the
+        model, or the heuristic fallback never runs and every command maps
+        to itself with exit 0.
+        """
+        monkeypatch.setitem(
+            sys.modules,
+            "apple_fm_sdk",
+            _fake_sdk(available=False, reason="MODEL_NOT_READY"),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="mem.patterns"):
+            assert _REAL_APPLE_FM_AVAILABLE() is False
+
+        assert "MODEL_NOT_READY" in caplog.text
+
+    def test_reports_available_when_the_model_says_so(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "apple_fm_sdk", _fake_sdk(available=True))
+        assert _REAL_APPLE_FM_AVAILABLE() is True
+
+    def test_a_probe_that_raises_reads_as_unavailable(self, monkeypatch):
+        """If the model cannot even be asked, it cannot answer a prompt either."""
+        fake = _fake_sdk(available=True)
+
+        class Broken:
+            def __init__(self) -> None:
+                raise RuntimeError("native library missing")
+
+        fake.SystemLanguageModel = Broken  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "apple_fm_sdk", fake)
+
+        assert _REAL_APPLE_FM_AVAILABLE() is False
+
+    def test_the_heuristic_runs_when_the_model_is_unavailable(
+        self, tmp_mem_dir, monkeypatch
+    ):
+        """The designed fallback, end to end, with the SDK present but the model off.
+
+        Before the probe asked the model, this path went through
+        `_generalize_commands`, which opened a session per command, caught
+        the failure per command, and stored an identity mapping — a result
+        indistinguishable from the heuristic's, produced by the slow path
+        the heuristic exists to avoid. So the assertion is on the mechanism:
+        no session is ever opened.
+        """
+        fake = _fake_sdk(available=False, reason="APPLE_INTELLIGENCE_NOT_ENABLED")
+        monkeypatch.setitem(sys.modules, "apple_fm_sdk", fake)
+        # The autouse fixture pins the probe to False; this test is about the
+        # real probe, so put it back.
+        monkeypatch.setattr(patterns, "_apple_fm_available", _REAL_APPLE_FM_AVAILABLE)
+
+        now = int(time.time())
+        for cmd in ["kubectl get pods"] * 3 + ["kubectl get svc", "kubectl get nodes"]:
+            storage.append_command(make_command(command=cmd, ts=now))
+
+        patterns.run_pattern_extraction("kubectl")
+
+        result = storage.read_patterns("kubectl")
+        assert result is not None
+        assert [p.pattern for p in result.patterns][0] == "kubectl get pods"
+        assert fake.sessions_opened == 0
 
     def test_generable_type_declares_the_pattern_field(self, monkeypatch):
         """Guided generation must ask the model for a single `pattern` string."""
@@ -1005,7 +1104,10 @@ class TestRealAppleFoundationModels:
         )
 
         pattern = mapping["git checkout main"]
-        assert isinstance(pattern, str) and pattern.strip()
+        # An identity mapping is exactly what the per-command failure path
+        # stores when the model cannot answer, so "is a non-empty string" was
+        # satisfied by a model that never ran. The answer must generalise.
+        assert pattern != "git checkout main", pattern
 
     def test_real_model_summarizes_a_session(self):
         import asyncio

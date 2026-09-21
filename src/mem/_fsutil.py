@@ -11,8 +11,10 @@ hooks is what put stale capture code in front of every pip user, and a second
 copy of the ranking formula would have made the same history sort differently
 depending on how it was asked for. One implementation, two callers.
 
-``mem.storage`` re-exports everything here under its historical names, so
-nothing that already imports from ``storage`` needs to change.
+``mem.storage`` imports what it uses from here — some of it under the
+private names it had before the split — and wraps :func:`exclusive_lock`
+with the lock path. Nothing else goes through ``storage`` for these: the
+modules that cannot import it (``picks.py``) import from here directly.
 """
 
 from __future__ import annotations
@@ -96,6 +98,8 @@ def atomic_write(path: Path, data: str, mode: int = FILE_MODE) -> None:
         os.replace(tmp, path)
         fsync_dir(path.parent)
     except BaseException:
+        # Cleanup only: the temp file must not outlive a KeyboardInterrupt
+        # either, and the re-raise below lets every exception keep propagating.
         tmp.unlink(missing_ok=True)
         raise
 

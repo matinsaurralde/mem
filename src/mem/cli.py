@@ -24,21 +24,52 @@ from mem import concepts as mem_concepts
 from mem.capture import get_git_repo
 from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
 from mem.history import ImportPlan
-from mem.render import console, err_console, fit, plain, safe
+from mem.render import console, err_console, fit, no_matches, plain, safe
+
+
+def _protected_args(ctx: click.Context) -> list[str]:
+    """The subcommand slot Click parsed, on every Click inside our pin.
+
+    Click 8.2 renamed the public ``protected_args`` list to ``_protected_args``
+    and turned the old name into a property that emits a DeprecationWarning on
+    every access. That one attribute read was the entire 268-warning noise
+    floor of the test suite. Click 8.1 (still inside our pin) has only the
+    public name, so fall back to it there; on anything newer the private list
+    is the real storage and the one ``Group.invoke`` reads.
+    """
+    protected = getattr(ctx, "_protected_args", None)
+    if protected is None:
+        protected = ctx.protected_args  # Click 8.1
+    return protected
 
 
 class MemGroup(click.Group):
     """Custom group that treats unknown commands as search queries."""
 
-    def invoke(self, ctx):
-        # If the first arg isn't a known subcommand, treat it as a search query
-        args = list(ctx.protected_args) + list(ctx.args)
-        if args and args[0] not in self.commands:
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        rest = super().parse_args(ctx, list(args))
+        protected = _protected_args(ctx)
+        if protected and protected[0] not in self.commands:
+            # A query, not a subcommand. Click stopped reading the group's
+            # own options at the first positional because what follows a
+            # subcommand belongs to that subcommand — but here there is none,
+            # and ``mem foo --json`` searched for the literal text "foo --json"
+            # (nothing matched, nothing was printed, exit 0). Re-read the
+            # whole line with mem's options allowed anywhere; anything that
+            # is not one of them (``-m``, ``--force``) stays a query word, so
+            # ``mem git commit -m`` still searches for what it says.
+            ctx.allow_interspersed_args = True
+            ctx.ignore_unknown_options = True
+            # Click 8.2+ keeps the first value it stored for a parameter, so
+            # without this the second pass parses ``--json`` and drops it.
+            ctx.params.clear()
+            rest = super().parse_args(ctx, list(args))
+            protected = _protected_args(ctx)
             ctx.ensure_object(dict)
-            ctx.obj["query_args"] = args
-            ctx.protected_args.clear()
+            ctx.obj["query_args"] = [*protected, *ctx.args]
+            protected.clear()
             ctx.args.clear()
-        return super().invoke(ctx)
+        return rest
 
 
 def _current_repo() -> str | None:
@@ -51,11 +82,18 @@ def _is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def _relative_time(ts: int) -> str:
-    """Format a timestamp as a human-readable relative time."""
+def _relative_time(ts: int, now: float | None = None) -> str:
+    """Format a timestamp as a human-readable relative time.
+
+    *now* defaults to the wall clock; a test passes a fixed instant so every
+    threshold below can be asserted on exactly rather than as an ordering.
+    ``tui.relative_time`` shares the thresholds but not the wording ("5m"
+    against "5m ago"), and the two are deliberately not unified: the finder
+    has four columns for the age and the CLI has a sentence.
+    """
     import time
 
-    delta = int(time.time()) - ts
+    delta = int(time.time() if now is None else now) - ts
     if delta < 60:
         return "just now"
     if delta < 3600:
@@ -79,10 +117,18 @@ def _relative_time(ts: int) -> str:
     "--pattern", "-p", is_flag=True, help="Show extracted patterns instead of commands"
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+# 10 results: chosen by eye, not measured. `mem fix` shows 3 and `mem agent
+# log` 20 on the same basis; only `mem promote` (5) has a stated one, ADR-012.
 @click.option("--limit", "-n", default=10, help="Maximum results")
 @click.pass_context
 def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
-    """mem — your shell history, understood."""
+    """mem — your shell history, understood.
+
+    Anything that is not a command is a search: ``mem docker compose`` lists
+    the captured commands containing every word given, one per line. When
+    nothing matches, stdout stays empty, one line on stderr says so, and the
+    exit code is still 0.
+    """
     if ctx.invoked_subcommand is not None:
         return
 
@@ -108,7 +154,6 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
             return
         console.print(f'\nPatterns for "{query}":\n')
         for p in patterns:
-            # Highlight placeholders in yellow
             text = Text(f"  {p.pattern}")
             console.print(text, style="white")
         console.print()
@@ -134,10 +179,14 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
         return
 
     if not results:
-        return  # Empty results, no error (exit 0)
+        no_matches(query)  # stderr only: stdout is the pipeable surface
+        return
 
     for i, (cmd, score) in enumerate(results, 1):
         rank = f" {i:>2}"
+        # Column widths — 40 for a command, 12 for a repo here, and the 20 and
+        # 16 the other tables use — were chosen by eye for an 80-column
+        # terminal, not measured.
         command_text = fit(cmd.command, 40)
         repo_text = fit(cmd.repo or "global", 12)
         time_text = _relative_time(cmd.ts)
@@ -159,8 +208,16 @@ def capture_cmd(command: str, dir: str, exit_code: int, duration_ms: int) -> Non
 
         capture_command(command, dir, exit_code, duration_ms)
     except Exception:
-        # Silent failure — never disrupt the user's shell
-        pass
+        # Silent toward the shell — this runs inside the prompt — but not
+        # invisible: with a logging handler configured (a test's caplog, or a
+        # basicConfig in a debugging session) the traceback is there, the
+        # same way `_sync` reports. What actually reaches here: OSError from
+        # the store (disk full, permissions, a lock that never came free), a
+        # pydantic ValueError when the hook hands over an argument the model
+        # rejects, and an OSError other than FileNotFoundError from the git
+        # subprocess. Session tracking and the sync trigger swallow their
+        # own failures inside capture_command.
+        logging.getLogger("mem.capture").debug("capture failed", exc_info=True)
 
 
 # Shells mem can emit a capture hook for. Deliberately distinct from
@@ -230,11 +287,14 @@ def concepts() -> None:
 def tui(query: tuple[str, ...]) -> None:
     """Interactive history finder (bound to Ctrl+R by the shell hook).
 
-    Registered here so it shows up in ``mem --help`` and behaves like every
-    other subcommand. It is not normally reached through this path:
-    ``mem/_entry.py`` dispatches ``mem tui`` before Click is imported,
-    because the finder's entire latency budget is smaller than that import.
-    Reaching it through Click still works — it is just slower to appear.
+    Registered here so it shows up in ``mem --help``. It is not normally
+    reached through this path: ``mem/_entry.py`` dispatches ``mem tui``
+    before Click is imported, because the finder's entire latency budget is
+    smaller than that import. Reaching it through Click still works — it is
+    slower to appear, and it does not see the same arguments: Click consumes
+    a literal ``--`` before ``tui_main`` runs, so ``mem tui -- -la`` searches
+    for ``-la`` through ``_entry.py`` but for ``""`` through this command,
+    which drops every dash-prefixed word it is handed.
     """
     from mem.tui import main as tui_main
 
@@ -246,7 +306,8 @@ def sync_cmd() -> None:
     """Internal: background pattern extraction and data rotation.
 
     Triggered automatically every 20 captured commands. Runs silently —
-    no output, no errors. Never called by the user directly.
+    no output, no errors. Hidden from ``--help`` rather than blocked: a user
+    who types ``mem _sync`` gets a synchronous run, which is harmless.
     """
     from mem import storage
 
@@ -353,6 +414,7 @@ def stats(as_json: bool) -> None:
             repos.append(cmd.repo)
 
     total = len(commands)
+    # 10 commands and 5 repos: chosen by eye, not measured.
     cmd_freq = Counter(commands).most_common(10)
     repo_freq = Counter(repos).most_common(5)
 
@@ -367,6 +429,7 @@ def stats(as_json: bool) -> None:
 
     console.print(f"Commands: {total:,} total\n")
 
+    # Column widths: chosen by eye, see the search listing.
     if cmd_freq:
         console.print("Top commands:")
         for i, (cmd, count) in enumerate(cmd_freq, 1):
@@ -416,6 +479,7 @@ def _fix_evidence(entry: dict) -> str:
 @cli.command(name="fix")
 @click.argument("query", nargs=-1)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+# 3 fixes: chosen by eye, not measured.
 @click.option("--limit", "-n", default=3, help="Maximum fixes to show")
 def fix_cmd(query: tuple[str, ...], as_json: bool, limit: int) -> None:
     """Show what fixed a failed command the last time it broke.
@@ -527,6 +591,7 @@ def _promote_steps(entry: dict) -> None:
         # character class. Aligned under the label column of _fix_line.
         console.print(Text(f"           {step}"))
     for variable in entry["variables"]:
+        # Three sample values: chosen by eye, not measured.
         shown = ", ".join(variable["values"][:3])
         more = " …" if len(variable["values"]) > 3 else ""
         console.print(_fix_detail(f"${variable['name']} was {shown}{more}"))
@@ -692,6 +757,8 @@ def forget(query: str, yes: bool) -> None:
 
     if not yes:
         console.print(f"Found {len(matches)} matching commands:")
+        # 20 rows of preview before the confirmation: chosen by eye, not
+        # measured. Column widths: see the search listing.
         for i, cmd in enumerate(matches[:20], 1):
             repo_text = cmd.repo or "global"
             time_text = _relative_time(cmd.ts)
@@ -853,8 +920,7 @@ def list_cmd(
     repo_path = None
 
     if not global_flag and repo:
-        sanitized = storage.sanitize_repo_name(repo)
-        repo_path = storage.group_file_path(sanitized)
+        repo_path = storage.group_file_path(repo)
 
     # Show a specific group's commands
     if group_name is not None:
@@ -894,6 +960,8 @@ def list_cmd(
             console.print(
                 "  [dim](global group with same name exists — use --global to see it)[/]"
             )
+        # 50 columns of rule, here and in the group view: chosen by eye, not
+        # measured.
         console.print("  " + "─" * 50)
 
         # Load variable store for status display
@@ -1038,8 +1106,7 @@ def run(
     repo_path = None
     repo = _current_repo()
     if repo:
-        sanitized = storage.sanitize_repo_name(repo)
-        repo_path = storage.group_file_path(sanitized)
+        repo_path = storage.group_file_path(repo)
 
     grp, scope_label, _file_path, shadows = groups.resolve_group(
         group_name,
@@ -1204,62 +1271,43 @@ def run(
 
 
 def _read_from_clipboard() -> str | None:
-    """Read text from system clipboard. Returns None if unavailable or empty."""
+    """Read text from the macOS pasteboard. None if unavailable or empty.
+
+    ``pbpaste`` only: mem is a macOS tool by decision (ADR-010), and the
+    ``xclip``/``xsel`` branches that used to follow were never exercised by
+    any test or any user.
+    """
     import shutil
     import subprocess as sp
 
+    if not shutil.which("pbpaste"):
+        return None
     try:
-        # macOS
-        if shutil.which("pbpaste"):
-            result = sp.run(["pbpaste"], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
-        # Linux (X11)
-        if shutil.which("xclip"):
-            result = sp.run(
-                ["xclip", "-selection", "clipboard", "-o"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
-        if shutil.which("xsel"):
-            result = sp.run(
-                ["xsel", "--clipboard", "--output"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
+        # 5 s: chosen by eye, not measured. pbpaste answers at once or hangs;
+        # the bound only decides how long a hang holds the prompt.
+        result = sp.run(["pbpaste"], capture_output=True, text=True, timeout=5)
     except (sp.CalledProcessError, sp.TimeoutExpired):
         return None
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout
     return None
 
 
 def _copy_to_clipboard(text: str) -> bool:
-    """Copy text to system clipboard. Returns True on success."""
+    """Copy text to the macOS pasteboard. True on success.
+
+    ``pbcopy`` only, for the same reason as :func:`_read_from_clipboard`.
+    """
     import shutil
     import subprocess as sp
 
+    if not shutil.which("pbcopy"):
+        return False
     try:
-        # macOS
-        if shutil.which("pbcopy"):
-            sp.run(["pbcopy"], input=text.encode(), check=True)
-            return True
-        # Linux (X11)
-        if shutil.which("xclip"):
-            sp.run(
-                ["xclip", "-selection", "clipboard"], input=text.encode(), check=True
-            )
-            return True
-        if shutil.which("xsel"):
-            sp.run(["xsel", "--clipboard", "--input"], input=text.encode(), check=True)
-            return True
+        sp.run(["pbcopy"], input=text.encode(), check=True)
     except sp.CalledProcessError:
         return False
-    return False
+    return True
 
 
 @cli.command()
@@ -1286,8 +1334,7 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
     repo_path = None
     repo = _current_repo()
     if repo:
-        sanitized = storage.sanitize_repo_name(repo)
-        repo_path = storage.group_file_path(sanitized)
+        repo_path = storage.group_file_path(repo)
 
     grp, _, _, _ = groups.resolve_group(
         group_name,
@@ -1709,8 +1756,7 @@ def group_copy(name: str, global_flag: bool, repo_flag: bool) -> None:
     if repo is None:
         raise click.ClickException("Not in a git repository.")
 
-    sanitized = storage.sanitize_repo_name(repo)
-    repo_path = storage.group_file_path(sanitized)
+    repo_path = storage.group_file_path(repo)
     global_path = storage.GROUPS_GLOBAL_FILE
 
     if global_flag:
@@ -1838,7 +1884,7 @@ def vars_set(name: str, value: str | None) -> None:
     try:
         storage.set_var(name, value)
     except keychain.KeychainError as exc:
-        # No plaintext fallback, deliberately. See ADR-009: a tool that
+        # No plaintext fallback, deliberately. See ADR-010: a tool that
         # promises the Keychain and quietly writes cleartext when the Keychain
         # is busy is more dangerous than one that never promised anything.
         raise click.ClickException(
@@ -1897,6 +1943,7 @@ def vars_list(as_json: bool) -> None:
             where = "[yellow]plaintext[/]"
         else:
             where = "[green]keychain [/]"
+        # Column width: chosen by eye, see the search listing.
         console.print(f"  {safe(fit(name, 20))} {where}  {time_str}")
 
     if plaintext:
@@ -2027,6 +2074,7 @@ def agent_status(as_json: bool) -> None:
 
 
 @agent_grp.command(name="log")
+# 20 entries: chosen by eye, not measured.
 @click.option("--limit", "-n", default=20, help="Maximum entries (newest last)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def agent_log(limit: int, as_json: bool) -> None:
@@ -2047,6 +2095,7 @@ def agent_log(limit: int, as_json: bool) -> None:
     for entry in entries:
         args = " ".join(f"{k}={v}" for k, v in entry.arguments.items())
         mark = "[green]✓[/]" if entry.ok else "[yellow]✗[/]"
+        # Column widths: chosen by eye, see the search listing.
         detail = entry.error or f"{entry.results} result(s)"
         console.print(
             f"  {mark} {safe(fit(entry.tool, 16))} {safe(fit(args, 40))}"

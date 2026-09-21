@@ -1,9 +1,10 @@
 """
 AI-powered pattern extraction using Apple Foundation Models.
 
-This module is the ONLY place in mem that uses AI inference. Everything
-else is deterministic. Pattern extraction exists because no regex or
-heuristic can reliably generalize commands like:
+This module and the credential classifier in :mod:`mem.variables` are the
+only places in mem that run AI inference; everything else is deterministic.
+Pattern extraction exists because no regex or heuristic can reliably
+generalize commands like:
     kubectl get pods, kubectl get services, kubectl get deployments
 into the abstract pattern:
     kubectl get <resource>
@@ -31,6 +32,7 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
+from typing import Any
 
 from mem import storage
 from mem.models import (
@@ -51,6 +53,11 @@ logger = logging.getLogger(__name__)
 # block), *every* existing installation has a full backlog waiting. A cap is
 # what keeps enabling it from being an incident; the next run continues.
 SYNC_BUDGET = 50
+
+# Fewer commands than this and a tool gets no pattern file: with one or two
+# examples there is no repetition to abstract over. Chosen by eye, not
+# measured.
+MIN_COMMANDS_PER_TOOL = 5
 
 # Per-command generalization prompt.
 # Why this design:
@@ -104,20 +111,48 @@ _MEANINGLESS_PLACEHOLDERS = frozenset(
     }
 )
 
-# Session summary prompt (used by capture module).
+# Session summary prompt, consumed by generate_session_summary() below (which
+# is what capture.SessionTracker calls; it never sees this constant).
 SESSION_SUMMARY_PROMPT = (
     "Summarize this shell session in one short sentence:\n{commands}"
 )
 
 
 def _apple_fm_available() -> bool:
-    """Check if Apple Foundation Models SDK is available."""
-    try:
-        import apple_fm_sdk  # noqa: F401
+    """True when the SDK imports *and* the on-device model can answer.
 
-        return True
+    Importing ``apple_fm_sdk`` only proves the extra is installed. With Apple
+    Intelligence switched off, or the model not yet downloaded, the import
+    succeeds and every request raises — which ``_generalize_commands``
+    swallows per command, storing an identity mapping with exit 0. The
+    heuristic fallback, the designed answer for "no model", never ran on such
+    a machine. So the probe also asks the model, and says why when it is
+    turned down.
+
+    ``getattr`` rather than an attribute access: the test suite stands in a
+    bare module when the SDK is absent, and an SDK without this API is
+    assumed usable, which is what the probe meant before it asked.
+    """
+    try:
+        import apple_fm_sdk as fm
     except ImportError:
         return False
+    model_cls = getattr(fm, "SystemLanguageModel", None)
+    if model_cls is None:
+        return True
+    try:
+        available, reason = model_cls().is_available()
+    except Exception:  # noqa: BLE001 - the SDK's own errors, or a native library
+        # that will not load; either way a prompt would fail the same way.
+        logger.debug("apple-fm-sdk availability probe failed", exc_info=True)
+        return False
+    if not available:
+        logger.debug(
+            "on-device model unavailable (%s); using heuristic patterns",
+            getattr(reason, "name", reason),
+        )
+        return False
+    return True
 
 
 def _get_generable_types() -> type:
@@ -213,6 +248,13 @@ async def _generalize_commands(tool: str, unique_commands: list[str]) -> dict[st
             result = await session.respond(prompt, generating=GeneralizedCommand)
             pattern = (result.pattern or "").strip()
         except Exception:
+            # The SDK raises FoundationModelsError > GenerationError >
+            # {ExceededContextWindowSizeError, AssetsUnavailableError,
+            # GuardrailViolationError, RefusalError, RateLimitedError, ...} for
+            # the model, but plain ValueError/TypeError from its own argument
+            # checks and C-pointer decoding, which share no base with those.
+            # Catching the tree alone would let a decoding failure abort the
+            # whole sync, so this stays broad.
             logger.debug("generalization failed for %r", cmd, exc_info=True)
             pattern = ""
 
@@ -258,7 +300,7 @@ async def extract_patterns_for_tool(
     unique_cmds = list(raw_freq.keys())
 
     if not _apple_fm_available():
-        return _heuristic_patterns(tool, commands)
+        return _heuristic_patterns(tool, raw_freq)
 
     # Step 2: Generalize only what the cache does not already cover. Most
     # frequent first, so a budget-limited run spends the model on the commands
@@ -320,22 +362,25 @@ async def generate_session_summary(commands: list[str]) -> str | None:
         result = await session.respond(prompt)
         return str(result)
     except Exception:
+        # Same reasoning as _generalize_commands: FoundationModelsError and
+        # its subclasses from the model, plus the SDK's own ValueError and
+        # TypeError, which are not under that base. None is the documented
+        # answer for "no summary", and the caller has a fallback.
         return None
 
 
-def _heuristic_patterns(tool: str, commands: list[str]) -> PatternExtractionResult:
+def _heuristic_patterns(tool: str, freq: Counter[str]) -> PatternExtractionResult:
     """Simple fallback when Apple FM SDK is unavailable.
 
-    Groups identical commands and returns them as "patterns".
-    Not as smart as AI extraction, but still useful for ranking.
+    Groups identical commands and returns them as "patterns". ``freq`` is the
+    count the caller already took; not as smart as AI extraction, but still
+    useful for ranking.
     """
-    freq: dict[str, int] = defaultdict(int)
-    for cmd in commands:
-        freq[cmd] += 1
-
+    # The ten most repeated commands stand in for patterns. Ten is chosen by
+    # eye, not measured; it is what fits in a `mem patterns` listing.
     patterns = [
         CommandPattern(pattern=cmd, example=cmd, frequency=count)
-        for cmd, count in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+        for cmd, count in freq.most_common(10)
     ]
 
     # Identity mapping for every command, not just the ten reported: without a
@@ -348,24 +393,17 @@ def _heuristic_patterns(tool: str, commands: list[str]) -> PatternExtractionResu
     )
 
 
-def _load_cache(tool: str) -> dict[str, str]:
-    """Read the {command -> pattern} cache for a tool.
-
-    Files written before ``command_patterns`` existed only recorded which
-    commands had been seen, with no way to recover what they mapped to. Those
-    commands are treated as uncached so they get generalized once more, rather
-    than being resurrected as raw patterns.
-    """
-    existing = storage.read_patterns(tool)
-    if existing is None:
-        return {}
-    return dict(existing.command_patterns)
+# Sentinel for "the caller did not read the pattern file", as distinct from
+# "the caller read it and there was none".
+_UNREAD: Any = object()
 
 
 def run_pattern_extraction(
     tool: str,
     commands: list[str] | None = None,
     budget: int | None = None,
+    *,
+    existing: PatternFile | None = _UNREAD,
 ) -> int:
     """Extract patterns for a single tool and save to storage.
 
@@ -374,8 +412,16 @@ def run_pattern_extraction(
     into O(tools x history): 50 tools over a 100k-command history meant five
     million line parses, every 20 captures, in a background process.
 
-    Returns the number of commands sent to the model, so a caller can spend a
-    shared budget across tools.
+    ``existing`` is the tool's current pattern file, for a caller that has
+    already read it (``sync_all_patterns`` needs it to count new tools); left
+    out, it is read here, once.
+
+    Returns how many commands this run added to the cache. With the model
+    that is the number of commands sent to it, which is what lets a caller
+    spend a shared budget across tools; on the heuristic path nothing is sent
+    and every unseen command is cached at once, so the same number charges
+    the budget for work the model never did. Harmless, because without a
+    model there is no per-command cost to bound.
     """
     import asyncio
 
@@ -389,12 +435,18 @@ def run_pattern_extraction(
             if cmd.command.split()[:1] == [tool]
         ]
 
-    if len(commands) < 5:
+    if len(commands) < MIN_COMMANDS_PER_TOOL:
         return 0  # Not enough data for meaningful patterns
 
-    cache = _load_cache(tool)
+    if existing is _UNREAD:
+        existing = storage.read_patterns(tool)
+    # The {command -> pattern} cache. Files written before `command_patterns`
+    # existed only recorded which commands had been seen, with no way to
+    # recover what they mapped to; those commands are treated as uncached so
+    # they get generalized once more rather than resurrected as raw patterns.
+    cache = {} if existing is None else dict(existing.command_patterns)
     uncached = {c for c in set(commands) if c not in cache}
-    if not uncached and storage.read_patterns(tool) is not None:
+    if not uncached and existing is not None:
         return 0  # Nothing new to process
 
     result = asyncio.run(
@@ -416,12 +468,16 @@ def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
     """Extract patterns for ALL tools with sufficient command history.
 
     Detects unique tools (first token of each command), runs extraction
-    for each tool with >5 commands. Skips tools with insufficient data.
+    for each tool with at least 5 commands. Skips tools with fewer.
 
     Args:
         silent: If True, suppress all output (for background auto-sync).
 
-    Returns (new_patterns, updated_patterns) counts.
+    Returns ``(new_tools, revisited_tools)``: how many tools had no pattern
+    file before this run, and how many already had one. Counts tools, not
+    patterns, and a revisited tool is counted whether or not its run wrote
+    anything — `run_pattern_extraction` returns 0 without writing when the
+    cache already covers every command.
     """
     # Collect all commands grouped by tool (first token). Read once: passing
     # each tool's slice down avoids re-reading the whole history per tool.
@@ -440,13 +496,15 @@ def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
     for tool, commands in sorted(
         tool_commands.items(), key=lambda kv: len(kv[1]), reverse=True
     ):
-        if len(commands) < 5:
+        if len(commands) < MIN_COMMANDS_PER_TOOL:
             continue  # Skip tools with too few commands
         if remaining <= 0:
             break  # Out of budget; the next sync picks up where this stopped
 
         existing = storage.read_patterns(tool)
-        spent = run_pattern_extraction(tool, commands=commands, budget=remaining)
+        spent = run_pattern_extraction(
+            tool, commands=commands, budget=remaining, existing=existing
+        )
         remaining -= max(spent, 0)
 
         if existing is None:
