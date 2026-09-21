@@ -452,7 +452,14 @@ class TestSearchHistoryTool:
     def test_limit_is_honoured_and_capped(self, home: Path, workdir: Path) -> None:
         """`limit` bounds the result set; an absurd one is clamped, not obeyed."""
         enable(home, workdir)
-        plant(home, [{"command": f"npm run task{i}", "ts": NOW - i} for i in range(30)])
+        # More rows than the cap, or the clamp is never what bounds the count.
+        plant(
+            home,
+            [
+                {"command": f"npm run task{i}", "ts": NOW - i}
+                for i in range(mcp.MAX_LIMIT + 10)
+            ],
+        )
 
         limited = serve(
             [INIT, call(2, "search_history", {"query": "npm", "limit": 3})],
@@ -466,7 +473,7 @@ class TestSearchHistoryTool:
             home,
             workdir,
         )
-        assert tool_payload(by_id(absurd, 2))["count"] <= mcp.MAX_LIMIT
+        assert tool_payload(by_id(absurd, 2))["count"] == mcp.MAX_LIMIT
 
     def test_repo_argument_filters_results(self, home: Path, workdir: Path) -> None:
         """`repo` is a filter, not merely a ranking hint."""
@@ -1682,8 +1689,13 @@ class TestRefusalAndErrorsInProcess:
             ],
             repo="work-api",
         )
+        # More rows than MAX_LIMIT in total, or the clamp has nothing to clamp.
         local_history(
-            [{"command": "make other", "ts": NOW, "repo": "/work/web"}], repo="work-web"
+            [
+                {"command": f"make other{i}", "ts": NOW - i, "repo": "/work/web"}
+                for i in range(mcp.MAX_LIMIT + 5)
+            ],
+            repo="work-web",
         )
 
         responses, _ = drive(
@@ -1696,7 +1708,7 @@ class TestRefusalAndErrorsInProcess:
         filtered = json.loads(responses[0]["result"]["content"][0]["text"])
         assert {r["repo"] for r in filtered["results"]} == {"/work/api"}
         clamped = json.loads(responses[1]["result"]["content"][0]["text"])
-        assert clamped["count"] <= mcp.MAX_LIMIT
+        assert clamped["count"] == mcp.MAX_LIMIT
 
     def test_a_parse_error_does_not_end_the_session(self, agent_enabled: Path) -> None:
         """The loop continues after an unparseable line, in-process too."""
@@ -1799,7 +1811,8 @@ class TestStorageAgentHelpers:
 
     def test_scrubbing_a_missing_log_is_a_no_op(self, tmp_mem_dir: Path) -> None:
         """`mem forget` on a machine that never served an agent does nothing."""
-        storage._scrub_agent_audit("anything")  # must not raise
+        assert storage._scrub_agent_audit("anything") is None
+        assert not storage.agent_audit_file().exists()
 
     def test_scrubbing_preserves_unparseable_lines(self, tmp_mem_dir: Path) -> None:
         """A line we cannot read is a line we cannot judge — so we keep it."""
