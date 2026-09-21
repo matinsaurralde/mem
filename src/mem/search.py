@@ -33,43 +33,18 @@ def score_command(
 ) -> float:
     """Score a command for search relevance.
 
-    A linear combination of four features, each normalised to [0, 1]:
+    The formula is :func:`mem.ranking.score` — one implementation, over plain
+    strings and ints, because the interactive finder has to rank without
+    paying Pydantic's import and two copies of a ranking formula drift until
+    the same history sorts differently depending on how you asked. The
+    weights, the features and the measurement behind them are in
+    ``docs/decisions/009-ranking-learns-from-selections.md``; this function
+    only unwraps the model and passes the fields through.
 
-        score = 0.35*frequency + 0.35*recency + 0.15*prefix + 0.15*context
-
-    Why the normalisation matters more than the weights: the previous formula
-    was ``0.4*frequency + 0.4*recency + 0.2*context`` with ``frequency`` as a
-    *raw count*. Recency and context are bounded by 1, so a command run ten
-    times scored 4.0 against a ceiling of 0.6 for everything else — the two
-    signals the docstring described as equally weighted could not move the
-    ranking at all. mem was sorting by frequency and calling it a formula. The
-    weights are a design choice; that was a bug.
-
-    - **Frequency** (35%): ``log1p(n) / log1p(50)``, capped at 1. Logarithmic
-      because the jump from 1 run to 5 says much more than 100 to 105, and
-      capped so one pathologically repeated command cannot own every result.
-    - **Recency** (35%): exponential decay with a 7-day half-life,
-      ``exp(-days * ln(2) / 7)``. Today scores 1.0, a week ago 0.5, two weeks
-      0.25. Human memory fades the same way: older commands need a stronger
-      signal to surface.
-    - **Prefix** (15%): 1.0 when the command starts with the query. Someone
-      typing ``mem git push`` wants ``git push origin main``, not the
-      ``echo "remember to git push"`` they ran more often. Nothing else in the
-      formula could express "this is what you meant", because every result
-      already contains every term.
-    - **Context** (15%): 1.0 for the current repo, 0.5 for a sibling sharing a
-      parent directory. A refinement, not a driver.
-
-    Why exit code is NOT included: a failed command is often deliberate —
+    Why exit code is NOT a feature: a failed command is often deliberate —
     checking whether a service is down, or probing until something works. The
-    useful version of this signal is the *pair* (what failed, what fixed it),
-    which is a different feature, not a penalty term here.
-
-    The arithmetic itself lives in :mod:`mem.ranking`, which imports nothing
-    but the standard library. The interactive finder has to rank without
-    paying Pydantic's ~58ms import, and two implementations of a ranking
-    formula would drift until the same history sorted differently depending
-    on how you asked for it.
+    useful version of that signal is the *pair* (what failed, what fixed it),
+    which is ``mem fix``, not a penalty term here.
     """
     return ranking.score(
         command=cmd.command,

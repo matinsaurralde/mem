@@ -16,8 +16,8 @@ Three properties matter more than anything else here:
    entries with no recorded timestamp are back-dated rather than stamped
    "now" — stamping them now would make years of old commands outrank
    everything the user actually ran today.
-2. **Idempotency.** Frequency is the strongest term in the ranking formula, so
-   importing the same file twice must not double it. See :func:`build_plan`.
+2. **Idempotency.** Frequency is a term in the ranking formula, so importing
+   the same file twice must not double it. See :func:`build_plan`.
 3. **Not crashing.** Real history files contain invalid UTF-8, truncated
    entries and formats from shell versions that no longer exist. Every parser
    here degrades to "treat the line as a bare command" or "count it as
@@ -521,8 +521,8 @@ def build_plan(sources: list[tuple[str, Path]]) -> ImportPlan:
     Counting against *every* stored command, not just previously imported
     ones, is deliberate: a user who installs mem and imports a month later has
     the same commands in both places, and inflating frequency is worse than
-    under-counting it — frequency is 40% of the ranking, and it is the term
-    that decides what surfaces first.
+    under-counting it — frequency is a ranking term, and a doubled count is
+    a lie the ranking then acts on.
     """
     stored = _stored_command_counts()
     seen: Counter[str] = Counter()
