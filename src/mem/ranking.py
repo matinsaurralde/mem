@@ -32,7 +32,10 @@ FREQUENCY_CEILING = 50
 # `picks` takes the largest share because it is the only feature that is not
 # an inference: it is the user having already answered, for this command, the
 # question the rest of the formula is guessing at. Measured over 1,200
-# retrieval episodes, adding it moves MRR@10 from 0.039 to 0.575.
+# retrieval episodes, adding it moves MRR@10 from 0.039 to 0.575. The
+# measurement, the alternatives rejected and the cost of this choice are in
+# ADR-009 (docs/decisions/009-ranking-learns-from-selections.md); the numbers
+# here are restated from it, not a second source.
 #
 # The remaining 0.60 is split in exactly the proportions the four original
 # features had among themselves (35/35/15/15). That is deliberate: with no

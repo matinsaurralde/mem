@@ -11,10 +11,12 @@ intents, the difference is not marginal: MRR@10 goes from **0.039 to 0.575**
 and top-1 from 0.025 to 0.477. The learned weights are more startling than
 the score — they converge to picks ≈ +3.0 while frequency and recency land at
 roughly *minus* 0.05. Once you have selection feedback, the two signals mem's
-entire scoring was built on are worth approximately nothing.
+entire scoring was built on are worth approximately nothing. The measurement
+is ADR-009's (docs/decisions/009-ranking-learns-from-selections.md), which
+also records what it does *not* show: it is a simulation, not a field study.
 
 Three findings from that work are encoded here, each of which is easy to get
-backwards:
+backwards (all three are decided in ADR-009):
 
 - **The counter belongs to the command, not to the (query, command) pair.**
   Keying by pair measured 3.3% *worse*: it fragments the evidence across every
