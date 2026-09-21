@@ -346,17 +346,16 @@ def import_from_markdown_str(content: str) -> tuple[str | None, list[GroupComman
             in_table = True
             continue
 
-        # Skip header row (| Command | Description |)
+        # Skip everything before the separator, including the header row
+        # (| Command | Description |): a row only counts once the table is open.
         if not in_table:
-            if "Command" in stripped and "Description" in stripped:
-                continue
             continue
 
         # Parse table row
         cells = [c.strip() for c in stripped.split("|")[1:-1]]
         if len(cells) >= 2:
             cmd_cell = cells[0]
-            comment_cell = cells[1] if len(cells) > 1 else ""
+            comment_cell = cells[1]
 
             match = re.search(r"`(.+?)`", cmd_cell)
             if match:

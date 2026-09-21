@@ -100,16 +100,13 @@ def merge_var_declarations(
     Returns:
         Merged list of VarDeclaration objects.
     """
-    # Build a dict preserving detection order, then overlay explicit defaults
+    # Build a dict preserving detection order, then overlay explicit defaults.
+    # A declaration for a detected name enriches it with the default; one for
+    # a name absent from the command text appends it. Both are the same store.
     var_map: dict[str, str | None] = {name: None for name in detected}
 
     for name, default in explicit:
-        if name in var_map:
-            # Enrich existing detection with default value
-            var_map[name] = default
-        else:
-            # Add explicitly declared variable not found in command text
-            var_map[name] = default
+        var_map[name] = default
 
     return [
         VarDeclaration(name=name, default=default) for name, default in var_map.items()

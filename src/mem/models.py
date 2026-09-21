@@ -124,7 +124,9 @@ class SessionState(BaseModel):
 class VarDeclaration(BaseModel):
     """A variable placeholder in a saved command."""
 
-    name: str = Field(min_length=2, pattern=r"^[A-Z][A-Z0-9_]+$")
+    # The pattern already demands a letter plus at least one more character,
+    # so the two-character minimum is enforced by it alone.
+    name: str = Field(pattern=r"^[A-Z][A-Z0-9_]+$")
     default: str | None = None
 
 

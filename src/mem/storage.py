@@ -848,7 +848,6 @@ def _scrub_groups(query: str) -> None:
             if query in (group.get("description") or ""):
                 group["description"] = None
                 changed = True
-            data["groups"][name] = group
 
         if changed:
             atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
