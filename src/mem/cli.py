@@ -110,6 +110,8 @@ def _relative_time(ts: int) -> str:
     "--pattern", "-p", is_flag=True, help="Show extracted patterns instead of commands"
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+# 10 results: chosen by eye, not measured. `mem fix` shows 3 and `mem agent
+# log` 20 on the same basis; only `mem promote` (5) has a stated one, ADR-012.
 @click.option("--limit", "-n", default=10, help="Maximum results")
 @click.pass_context
 def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
@@ -175,6 +177,9 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
 
     for i, (cmd, score) in enumerate(results, 1):
         rank = f" {i:>2}"
+        # Column widths — 40 for a command, 12 for a repo here, and the 20 and
+        # 16 the other tables use — were chosen by eye for an 80-column
+        # terminal, not measured.
         command_text = fit(cmd.command, 40)
         repo_text = fit(cmd.repo or "global", 12)
         time_text = _relative_time(cmd.ts)
@@ -402,6 +407,7 @@ def stats(as_json: bool) -> None:
             repos.append(cmd.repo)
 
     total = len(commands)
+    # 10 commands and 5 repos: chosen by eye, not measured.
     cmd_freq = Counter(commands).most_common(10)
     repo_freq = Counter(repos).most_common(5)
 
@@ -416,6 +422,7 @@ def stats(as_json: bool) -> None:
 
     console.print(f"Commands: {total:,} total\n")
 
+    # Column widths: chosen by eye, see the search listing.
     if cmd_freq:
         console.print("Top commands:")
         for i, (cmd, count) in enumerate(cmd_freq, 1):
@@ -465,6 +472,7 @@ def _fix_evidence(entry: dict) -> str:
 @cli.command(name="fix")
 @click.argument("query", nargs=-1)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+# 3 fixes: chosen by eye, not measured.
 @click.option("--limit", "-n", default=3, help="Maximum fixes to show")
 def fix_cmd(query: tuple[str, ...], as_json: bool, limit: int) -> None:
     """Show what fixed a failed command the last time it broke.
@@ -576,6 +584,7 @@ def _promote_steps(entry: dict) -> None:
         # character class. Aligned under the label column of _fix_line.
         console.print(Text(f"           {step}"))
     for variable in entry["variables"]:
+        # Three sample values: chosen by eye, not measured.
         shown = ", ".join(variable["values"][:3])
         more = " …" if len(variable["values"]) > 3 else ""
         console.print(_fix_detail(f"${variable['name']} was {shown}{more}"))
@@ -741,6 +750,8 @@ def forget(query: str, yes: bool) -> None:
 
     if not yes:
         console.print(f"Found {len(matches)} matching commands:")
+        # 20 rows of preview before the confirmation: chosen by eye, not
+        # measured. Column widths: see the search listing.
         for i, cmd in enumerate(matches[:20], 1):
             repo_text = cmd.repo or "global"
             time_text = _relative_time(cmd.ts)
@@ -943,6 +954,8 @@ def list_cmd(
             console.print(
                 "  [dim](global group with same name exists — use --global to see it)[/]"
             )
+        # 50 columns of rule, here and in the group view: chosen by eye, not
+        # measured.
         console.print("  " + "─" * 50)
 
         # Load variable store for status display
@@ -1260,6 +1273,8 @@ def _read_from_clipboard() -> str | None:
     try:
         # macOS
         if shutil.which("pbpaste"):
+            # 5 s: chosen by eye, not measured. pbpaste answers at once or
+            # hangs; the bound only decides how long a hang holds the prompt.
             result = sp.run(["pbpaste"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout
@@ -1946,6 +1961,7 @@ def vars_list(as_json: bool) -> None:
             where = "[yellow]plaintext[/]"
         else:
             where = "[green]keychain [/]"
+        # Column width: chosen by eye, see the search listing.
         console.print(f"  {safe(fit(name, 20))} {where}  {time_str}")
 
     if plaintext:
@@ -2076,6 +2092,7 @@ def agent_status(as_json: bool) -> None:
 
 
 @agent_grp.command(name="log")
+# 20 entries: chosen by eye, not measured.
 @click.option("--limit", "-n", default=20, help="Maximum entries (newest last)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def agent_log(limit: int, as_json: bool) -> None:
@@ -2096,6 +2113,7 @@ def agent_log(limit: int, as_json: bool) -> None:
     for entry in entries:
         args = " ".join(f"{k}={v}" for k, v in entry.arguments.items())
         mark = "[green]✓[/]" if entry.ok else "[yellow]✗[/]"
+        # Column widths: chosen by eye, see the search listing.
         detail = entry.error or f"{entry.results} result(s)"
         console.print(
             f"  {mark} {safe(fit(entry.tool, 16))} {safe(fit(args, 40))}"

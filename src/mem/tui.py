@@ -205,6 +205,9 @@ def candidate_lines(lines: Sequence[str], terms: Sequence[str]) -> Iterator[str]
 
 
 _STABLE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+# Below this length a needle matches almost every line, so the scan costs more
+# than it saves. Mirrors ``storage._MIN_NEEDLE_LEN`` (this module cannot
+# import storage); a test pins the two implementations against each other.
 _MIN_NEEDLE_LEN = 3
 
 
@@ -421,11 +424,14 @@ def _render_row(result: Result, is_selected: bool, columns: int, now: float) -> 
     age = relative_time(entry.ts, now)
     repo = os.path.basename(entry.repo) if entry.repo else ""
 
+    # 22 columns for the metadata, or a third of the row when that is less:
+    # chosen by eye, not measured.
     meta = _visible(f"{repo} {age}".strip(), min(22, max(columns // 3, 0)))
     meta_width = display_width(meta)
     # The -1 reserves the single-column gap below. Without it a maximally long
     # command leaves no room for the gap, the `max(..., 1)` adds one anyway,
-    # and the row runs one column past the edge and wraps.
+    # and the row runs one column past the edge and wraps. The floor of 8
+    # command columns is chosen by eye, not measured.
     command = _visible(entry.command, max(columns - _PREFIX_WIDTH - meta_width - 1, 8))
     gap = max(columns - _PREFIX_WIDTH - display_width(command) - meta_width, 1)
 
@@ -539,6 +545,10 @@ class KeyReader:
 
     def _read_char_if_ready(self) -> str:
         """Read another character only if the terminal already sent it."""
+        # 50 ms: chosen by eye, not measured. A local terminal delivers the
+        # rest of a sequence in the same write, so anything above a few ms
+        # works there; the margin is for a slow ssh hop. Too short and an
+        # arrow key over ssh becomes Escape plus "[A" typed into the query.
         ready, _, _ = select.select([self.fd], [], [], 0.05)
         if not ready:
             return ""
@@ -647,8 +657,12 @@ def _terminal_size(stream: IO[str]) -> tuple[int, int]:
     """Rows and columns, with a usable fallback when there is no terminal."""
     try:
         size = os.get_terminal_size(stream.fileno())
+        # The floor of 20 columns is chosen by eye, not measured; the
+        # prototype crashed at narrow widths until every computed width
+        # was clamped (ADR-008).
         return max(size.lines, _CHROME_ROWS + 1), max(size.columns, 20)
     except (OSError, ValueError):
+        # The VT100 default, and what shutil.get_terminal_size falls back to.
         return 24, 80
 
 
