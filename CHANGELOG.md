@@ -5,6 +5,96 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-09-21
+
+The first release of the 0.5 line to reach a user. The 0.5.0 entry below was
+merged on 2026-08-04 and never tagged, so PyPI, the Homebrew tap and the
+GitHub releases page all still served 0.4.1 until this one. Everything under
+0.5.0 ships here for the first time, plus the repairs from a full audit of
+the repository against real data on the owner's machine
+(`docs/AUDIT-2026-09.md`; the decisions are defended in `docs/DEFENSE.md`).
+
+### Fixed
+
+- **Terminal mouse reports were stored as failed commands.** A program that
+  dies with mouse tracking on leaves the terminal reporting every mouse move
+  to the shell; the SGR payload (`65;50;35M`, or hundreds of them in one
+  line) runs, fails with 127, and was captured. `mem fix` then offered it as
+  the last failure. Capture now drops a line that is nothing but mouse
+  reports; `echo 65;50;35M` is still kept.
+- **Options after a query were searched for as text.** `mem deploy --json`
+  and `mem deploy -n 20`, the forms the README documents, searched for the
+  literal text and, finding nothing, printed nothing with exit 0. The router
+  now re-parses the line with mem's own options allowed anywhere; unknown
+  dash-words stay query text and `--` still forces literal text. `mem grep
+  -n` with no value is now a usage error rather than a silent search.
+- **A query with no matches printed nothing.** Now one dim line on stderr,
+  `no matches for "…"`; stdout stays empty so pipes see nothing; exit 0.
+- **A JSONL line holding `42` crashed `rotate` and `forget`.** Valid JSON
+  that is not an object made every rewriter call `.get` on an int. `rotate`
+  runs inside the silent background sync, so retention stopped for that file
+  and every file after it, with exit 0 and no message. One JSONL reader with
+  one corrupt-line policy now serves every rewriter.
+- **A hand-edited `picks.json` entry crashed the finder after Enter**, so the
+  chosen command never reached the shell. Malformed entries are skipped.
+- **An installed Apple SDK with the model unavailable never reached the
+  heuristic fallback.** The availability probe was an import check, so every
+  generalisation raised, was swallowed, and every command mapped to itself
+  with exit 0. The probe now asks the model whether it is available.
+- **A command running longer than the idle threshold ended its own session.**
+  The session tracker compared completion timestamps without subtracting
+  `duration_ms`, the fourth instance of the bug the code base warns about; a
+  six-minute build was read as six minutes of idle time.
+- **`.session_state.json` was the one file mem wrote world-readable and
+  without the lock.** It now goes through the same atomic 0600 write as
+  everything else.
+- **`recent_failures` (MCP) reported `retried_successfully: false`** for a
+  command that had succeeded before failing and again after; it recorded
+  only the first success.
+- **The empty-query view of Ctrl+R showed the least recently modified repo**,
+  not the newest commands; with a stale repo of 300 commands and a fresh one
+  of 5, none of the new ones appeared. The initial query (the shell buffer)
+  could also retitle the window through an escape sequence, and a long one
+  wrapped the header off the screen.
+- **Every CLI invocation emitted a Click deprecation warning** (268 per test
+  run), and the `perf` benchmarks ran under the coverage tracer and one
+  always failed. Zero warnings; the suite passes under `-W error`.
+
+### Changed
+
+- Every `except Exception` is narrowed to the real type or names the concrete
+  failure it absorbs; every numeric threshold says where it came from, or
+  that it was chosen by eye and not measured.
+- Helpers that existed three times (`iso`, `redact`, `is_flag`,
+  `think_seconds`, the "every word must appear" rule, the session idle
+  threshold) exist once. Dead branches, two test-only functions and the
+  Linux clipboard paths are gone. Seven tests that could not fail now can.
+- Auto-sync tests reach the threshold by writing the counter instead of
+  spawning twenty processes: the suite runs in about 60 s instead of 69 s
+  with 70 more tests.
+
+### Known limitations
+
+Carried over from 0.5.0 unless stated, and found by the walkthrough in
+`docs/AUDIT-2026-09.md`:
+
+- `mem` records its own invocations. `mem forget X` therefore re-records
+  `X` at the next prompt, and `mem …` rows rank high in a fresh store.
+- The credential filter used by `mem import` (`looks_like_credential`) is a
+  different, weaker table than the redactor used at the MCP boundary:
+  `export AWS_SECRET_ACCESS_KEY=…` and `PGPASSWORD=… psql` are imported.
+- `mem save -t <new group>` prompts for a description and hangs under a
+  pipe; `save` has no `-y`.
+- `mem session` shows nothing until a session has closed (300 s idle and
+  one more command), and captured records carry `"session": null`.
+- `$MEM_DIR` is honoured by the finder and by `picks.json` but not by the
+  rest of the storage layer.
+- Homebrew 5.1 refuses the tap as untrusted until `brew trust
+  matinsaurralde/tap` is run.
+- `mem _capture` costs 150–170 ms of CPU per prompt in the background; the
+  "<5 ms" in the documentation is the foreground cost of forking a disowned
+  job.
+
 ## [0.5.0] — 2026-08-04
 
 A full audit of the codebase, and the repairs it turned up. 151 findings were

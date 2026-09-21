@@ -20,7 +20,7 @@ Facts to have in hand (measured 2026-09-21 on the owner's machine, Python
 | `mem _capture` per prompt | 150–170 ms, in the background | measured |
 | `import mem.cli` | 112 ms, of which `mem.models` (Pydantic) 58 ms, click 6.5, rich.console 8.6 | `python -X importtime` |
 | `except Exception` sites | 20 in `src/` before the audit; after it every one is narrowed to the real type or names the concrete failure next to it (AUDIT-2026-09.md item 7) | grep |
-| Latest tag / PyPI / Homebrew tap | **v0.4.1 everywhere; 0.5.0 is merged to master and never tagged** | `git tag`, `pip index versions cli-mem`, `Formula/mem.rb` |
+| Latest tag / PyPI / Homebrew tap | **v0.4.1 everywhere at the start of the audit; 0.5.0 was merged to master on 2026-08-04 and never tagged.** 0.5.1 was tagged and published the day the audit closed | `git tag`, `pip index versions cli-mem`, `Formula/mem.rb` |
 
 That last row is the first thing to say out loud, before a reviewer finds it.
 
