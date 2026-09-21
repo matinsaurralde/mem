@@ -953,6 +953,9 @@ class TestConcurrentWriters:
         intersect, the lock is not excluding anything.
         """
         storage.ensure_dirs()
+        # Long enough, against ~100 ms of interpreter start-up jitter between
+        # the two children, that both are alive at once and would overlap if
+        # the lock excluded nothing; the figure is chosen by eye, not measured.
         hold = 0.25
         procs = [
             start_in_process(_worker_hold_lock, str(tmp_mem_dir), tag, hold)

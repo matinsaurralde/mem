@@ -660,6 +660,10 @@ def rotate(
     """
     import time
 
+    # The 90/30-day defaults are the retention the README has promised since
+    # v1 (commit f0164c5); there is no measurement behind either number —
+    # chosen by eye, not measured. 86400 is seconds per day: retention is
+    # whole days, and a leap second's worth of drift does not matter here.
     now = int(time.time())
     cmd_cutoff = now - (keep_commands_days * 86400)
     session_cutoff = now - (keep_sessions_days * 86400)
@@ -1091,6 +1095,10 @@ def forget_targets(query: str) -> list[str]:
 # --- Sync counter ---
 
 SYNC_COUNTER_FILE = MEM_DIR / ".sync_counter"
+# Captures between background syncs. ADR-003 ("Why 20 captures?"): often
+# enough that patterns stay fresh, rare enough that the detached process is
+# not spawned constantly; the pattern cache makes each sync cheaper than the
+# last, so the number was not tuned further.
 SYNC_THRESHOLD = 20
 
 
