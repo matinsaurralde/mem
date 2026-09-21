@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from mem import storage
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # The hooks live inside the package so the wheel ships them. Before that they
 # sat at the repo root, were unreachable from an installed wheel, and `mem
@@ -149,6 +151,22 @@ def plant_commands(home: Path, entries: list[tuple[str, int]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def prime_sync_counter(home: Path) -> None:
+    """Put the capture counter one short of the sync threshold.
+
+    Same file and format `storage.increment_sync_counter` writes (a bare
+    integer in ``~/.mem/.sync_counter``), written before the binary runs so
+    no lock is contended. Reaching the threshold with real captures cost
+    twenty subprocesses at ~0.2 s each per test; one capture is enough to
+    prove the trigger, and the reset and the spawned sync are still asserted.
+    """
+    mem_dir = home / ".mem"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / ".sync_counter").write_text(
+        str(storage.SYNC_THRESHOLD - 1), encoding="utf-8"
+    )
+
+
 def history_commands(home: Path) -> list[str]:
     """Read back the command strings currently stored in global history."""
     path = global_history(home)
@@ -220,11 +238,12 @@ class TestBackgroundSyncEntryPoint:
         auto-sync pipeline is reached, isolating the defect to the spawned
         entry point rather than the trigger.
         """
-        for i in range(20):
-            result = run_mem(
-                ["_capture", f"tool{i} run", str(workdir), "0", "10"], home, workdir
-            )
-            assert result.returncode == 0
+        prime_sync_counter(home)
+
+        result = run_mem(
+            ["_capture", "tool0 run", str(workdir), "0", "10"], home, workdir
+        )
+        assert result.returncode == 0
 
         counter = (home / ".mem" / ".sync_counter").read_text(encoding="utf-8").strip()
         assert counter == "0"
@@ -234,19 +253,20 @@ class TestBackgroundSyncEntryPoint:
     ) -> None:
         """Capturing SYNC_THRESHOLD commands must produce a real sync.
 
-        Full-cycle contract, straight through the binary: after 20 captures
-        the detached background process must do the work `_sync` promises.
-        Each captured command uses a distinct tool name so pattern extraction
-        stays below its 5-command floor and no AI inference is attempted.
+        Full-cycle contract, straight through the binary: the capture that
+        reaches the threshold must spawn a detached background process that
+        does the work `_sync` promises. The one captured command has a tool
+        name of its own so pattern extraction stays below its 5-command floor
+        and no AI inference is attempted.
         """
         now = int(time.time())
         plant_commands(home, [("zzancient --flag", now - ANCIENT_AGE)])
+        prime_sync_counter(home)
 
-        for i in range(20):
-            result = run_mem(
-                ["_capture", f"tool{i} run", str(workdir), "0", "10"], home, workdir
-            )
-            assert result.returncode == 0
+        result = run_mem(
+            ["_capture", "tool0 run", str(workdir), "0", "10"], home, workdir
+        )
+        assert result.returncode == 0
 
         # The sync is detached, so poll instead of sleeping a fixed amount.
         deadline = time.time() + 5
