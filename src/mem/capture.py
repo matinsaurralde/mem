@@ -192,9 +192,20 @@ class SessionTracker:
             return None
 
     def _save_state(self, state: SessionState) -> None:
-        """Persist session state to disk."""
+        """Persist session state to disk: atomically, owner-only, under the lock.
+
+        The same write path as every other file under ~/.mem. This used to
+        be a bare ``write_text``: created with the umask (0644 on a default
+        macOS account) while everything else is 0600, replaced in place
+        rather than renamed, and taken with no lock — while
+        ``storage._scrub_session_state`` rewrites the same file atomically
+        under the lock for ``mem forget``. One file, two writers, one of
+        them unguarded: a scrub and a capture landing together could leave
+        the forgotten command in the state the next boundary flushes.
+        """
         storage.ensure_dirs()
-        self._state_path.write_text(state.model_dump_json(), encoding="utf-8")
+        with storage.exclusive_lock():
+            storage.atomic_write(self._state_path, state.model_dump_json())
 
     def update(self, cmd: CapturedCommand) -> None:
         """Process a new command and update session state.

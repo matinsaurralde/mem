@@ -508,6 +508,31 @@ class TestSessionTracker:
         sessions = list(storage.read_all_sessions())
         assert len(sessions) == 0
 
+    def test_state_file_is_owner_only_and_written_atomically(self, tmp_mem_dir):
+        """The one file mem wrote with `write_text` and the umask.
+
+        Every other file under ~/.mem is 0600 via `atomic_write`, and
+        `storage._scrub_session_state` rewrites this same file atomically
+        under the lock — so the tracker was the one unlocked, non-atomic,
+        world-readable writer of a file holding the user's last commands.
+        """
+        import os
+        import stat
+
+        old_umask = os.umask(0o022)
+        try:
+            tracker = SessionTracker()
+            tracker.update(make_command(command="export TOKEN=hunter2", ts=1000))
+        finally:
+            os.umask(old_umask)
+
+        mode = stat.S_IMODE(tracker._state_path.stat().st_mode)
+        assert mode == 0o600, f"session state is readable by others: {oct(mode)}"
+        leftovers = [
+            p.name for p in tracker._state_path.parent.iterdir() if ".tmp" in p.name
+        ]
+        assert leftovers == []
+
     def test_state_survives_reload(self, tmp_mem_dir):
         """State persisted to disk can be loaded by a new tracker instance."""
         tracker1 = SessionTracker()
