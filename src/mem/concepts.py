@@ -176,9 +176,11 @@ def _load_shipped() -> ConceptData:
             .read_text(encoding="utf-8")
         )
         parsed = _parse(json.loads(raw))
-    except Exception as exc:  # noqa: BLE001 - a packaging fault, not a user one
-        # Unreachable through any supported install; a broken shipped map must
-        # still degrade to plain literal search rather than break `mem <query>`.
+    except (OSError, ValueError) as exc:
+        # OSError: the file is missing from the package; ValueError: not UTF-8
+        # or not JSON. `_parse` returns None rather than raising. Unreachable
+        # through any supported install; a broken shipped map must still
+        # degrade to plain literal search rather than break `mem <query>`.
         _warn(f"built-in concept map could not be read ({exc}); expansion is off")
         return ConceptData(concepts={}, stopwords=frozenset())
     if parsed is None:

@@ -572,6 +572,9 @@ def _audit(tool: str, args: dict[str, Any], results: int, error: str | None) -> 
             )
         )
     except Exception:  # pragma: no cover - defensive, see docstring
+        # OSError from the lock or the audit file; ValueError if a future
+        # entry field does not serialise. Broad because the docstring's
+        # promise is "never raising", and a new failure mode must keep it.
         pass
 
 
@@ -660,6 +663,9 @@ def _handle_tools_call(params: dict[str, Any]) -> dict[str, Any]:
         _audit(name, args, 0, exc.message)
         raise
     except Exception as exc:  # noqa: BLE001 - a tool bug must not kill the server
+        # OSError reading a history or group file, ValueError from a corrupt
+        # JSON line that got past the storage layer's per-line skip, and any
+        # genuine bug in a tool. Only the type name reaches the client.
         _audit(name, args, 0, type(exc).__name__)
         raise RpcError(
             INTERNAL_ERROR, f"mem failed to read its store: {type(exc).__name__}"
@@ -746,6 +752,10 @@ def handle_message(message: Any) -> dict[str, Any] | None:
     except RpcError as exc:
         return _error(request_id, exc.code, exc.message, exc.data)
     except Exception as exc:  # noqa: BLE001 - see class docstring for RpcError
+        # Anything a handler raised that is not already an RpcError: a bug in
+        # initialize/tools handling, or a storage OSError/ValueError that
+        # _handle_tools_call did not see. The reply is an error frame, not a dead
+        # server, and only the type name is disclosed.
         return _error(
             request_id, INTERNAL_ERROR, f"internal error: {type(exc).__name__}"
         )

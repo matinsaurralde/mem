@@ -92,14 +92,22 @@ def capture_command(raw: str, directory: str, exit_code: int, duration_ms: int) 
     )
     storage.append_command(cmd)
 
-    # Update session tracking
+    # Update session tracking. What can fail here: OSError from the lock, the
+    # state file or the sessions file; ValueError (Pydantic's ValidationError)
+    # building a WorkSession from a state that was hand-edited into an
+    # impossible shape. Deliberately broader than that list: this runs from a
+    # shell precmd hook, and an uncaught anything prints a traceback after
+    # every command the user types.
     try:
         tracker = SessionTracker()
         tracker.update(cmd)
     except Exception:
         pass  # Session tracking failure should never block capture
 
-    # Auto-sync: trigger background pattern extraction every N captures
+    # Auto-sync: trigger background pattern extraction every N captures. What
+    # can fail here: OSError from the lock or the counter file, and OSError
+    # from Popen when the `mem` executable found by `which` is no longer
+    # runnable. Broad for the same reason as above — a hook must not print.
     try:
         count = storage.increment_sync_counter()
         if count >= storage.SYNC_THRESHOLD:
@@ -166,8 +174,12 @@ class SessionTracker:
             return None
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
-            return SessionState(**data)
-        except Exception:
+            # model_validate, not **data: a file hand-edited into a JSON list
+            # is a ValidationError (a ValueError) instead of a TypeError.
+            return SessionState.model_validate(data)
+        except (OSError, ValueError):
+            # Unreadable, not JSON, not UTF-8, or not a SessionState. A lost
+            # session boundary is the whole cost; the next command starts one.
             return None
 
     def _save_state(self, state: SessionState) -> None:
@@ -250,6 +262,11 @@ class SessionTracker:
             if result:
                 return result
         except Exception:
+            # RuntimeError from asyncio.run when a loop is already running in
+            # this thread; the SDK's FoundationModelsError tree and its own
+            # ValueError/TypeError if generate_session_summary's catch ever
+            # narrows. Broad because this runs inside the capture hook, where
+            # a traceback costs more than a plain summary does.
             pass
 
         # Fallback: first command + count

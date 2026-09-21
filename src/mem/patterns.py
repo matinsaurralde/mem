@@ -215,6 +215,13 @@ async def _generalize_commands(tool: str, unique_commands: list[str]) -> dict[st
             result = await session.respond(prompt, generating=GeneralizedCommand)
             pattern = (result.pattern or "").strip()
         except Exception:
+            # The SDK raises FoundationModelsError > GenerationError >
+            # {ExceededContextWindowSizeError, AssetsUnavailableError,
+            # GuardrailViolationError, RefusalError, RateLimitedError, ...} for
+            # the model, but plain ValueError/TypeError from its own argument
+            # checks and C-pointer decoding, which share no base with those.
+            # Catching the tree alone would let a decoding failure abort the
+            # whole sync, so this stays broad.
             logger.debug("generalization failed for %r", cmd, exc_info=True)
             pattern = ""
 
@@ -322,6 +329,10 @@ async def generate_session_summary(commands: list[str]) -> str | None:
         result = await session.respond(prompt)
         return str(result)
     except Exception:
+        # Same reasoning as _generalize_commands: FoundationModelsError and
+        # its subclasses from the model, plus the SDK's own ValueError and
+        # TypeError, which are not under that base. None is the documented
+        # answer for "no summary", and the caller has a fallback.
         return None
 
 
