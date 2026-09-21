@@ -801,6 +801,42 @@ class TestForget:
 # ---------------------------------------------------------------------------
 
 
+class TestRelativeTime:
+    """Every threshold of ``_relative_time`` at a fixed instant.
+
+    The function read the wall clock itself, so nothing could assert on its
+    output beyond "contains 'ago'". Values, not orderings: each boundary is
+    pinned one second either side.
+    """
+
+    NOW = 1_800_000_000
+
+    @pytest.mark.parametrize(
+        ("age", "expected"),
+        [
+            (0, "just now"),
+            (59, "just now"),
+            (60, "1m ago"),
+            (3599, "59m ago"),
+            (3600, "1h ago"),
+            (86399, "23h ago"),
+            (86400, "1d ago"),
+            (6 * 86400, "6d ago"),
+            (7 * 86400, "1w ago"),
+            (400 * 86400, "57w ago"),
+        ],
+    )
+    def test_each_threshold(self, age: int, expected: str) -> None:
+        from mem.cli import _relative_time
+
+        assert _relative_time(self.NOW - age, now=self.NOW) == expected
+
+    def test_defaults_to_the_wall_clock(self) -> None:
+        from mem.cli import _relative_time
+
+        assert _relative_time(int(time.time())) == "just now"
+
+
 class TestStats:
     """Stats must degrade gracefully on a brand-new install."""
 

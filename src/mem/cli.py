@@ -82,11 +82,18 @@ def _is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def _relative_time(ts: int) -> str:
-    """Format a timestamp as a human-readable relative time."""
+def _relative_time(ts: int, now: float | None = None) -> str:
+    """Format a timestamp as a human-readable relative time.
+
+    *now* defaults to the wall clock; a test passes a fixed instant so every
+    threshold below can be asserted on exactly rather than as an ordering.
+    ``tui.relative_time`` shares the thresholds but not the wording ("5m"
+    against "5m ago"), and the two are deliberately not unified: the finder
+    has four columns for the age and the CLI has a sentence.
+    """
     import time
 
-    delta = int(time.time()) - ts
+    delta = int(time.time() if now is None else now) - ts
     if delta < 60:
         return "just now"
     if delta < 3600:
