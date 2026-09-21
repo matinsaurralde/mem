@@ -158,7 +158,11 @@ class TestReadWriteGroupFile:
 class TestValidateGroupName:
     @pytest.mark.parametrize("name", ["deploy", "my-group", "a1", "test-123-abc"])
     def test_valid_names(self, name: str):
-        groups.validate_group_name(name)  # should not raise
+        # A valid name is accepted silently: no exception and no value. The
+        # invalid-name test below proves rejection raises, so a mutation that
+        # returned a flag instead of raising would slip past both without
+        # this assertion.
+        assert groups.validate_group_name(name) is None
 
     @pytest.mark.parametrize(
         "name",

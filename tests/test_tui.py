@@ -168,7 +168,7 @@ class TestFiltering:
             inlined = tui._stable_run(term)
             official = storage.prefilter_needles([term])
 
-            assert [inlined] if inlined else [] == official, f"disagree on {term!r}"
+            assert ([inlined] if inlined else []) == official, f"disagree on {term!r}"
 
     def test_every_term_must_match(self):
         lines = [line_of("docker compose up"), line_of("docker build .")]
