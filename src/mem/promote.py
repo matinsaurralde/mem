@@ -149,12 +149,18 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from mem import storage
-from mem.fix import iter_histories
+from mem.fix import (
+    PRIVILEGE_PREFIXES,
+    is_flag,
+    iso_utc,
+    iter_histories,
+    redact_payload,
+    think_seconds,
+)
 from mem.models import CapturedCommand, GroupFile
 from mem.variables import EXCLUDED_SHELL_VARS, looks_like_credential, redact_secrets
 
@@ -192,10 +198,6 @@ MAX_VARIABLES = 2
 #: where the wording changes.
 STRONG_EVIDENCE = 6
 MODERATE_EVIDENCE = 3
-
-#: Programs that modify the command they precede rather than being it. The
-#: protected prefix (argv[0] plus the subcommand) slides past them.
-_PRIVILEGE_PREFIXES = frozenset({"sudo", "doas"})
 
 #: Shell grammar. A command containing any of these is matched literally and
 #: never generalised — see the module docstring.
@@ -240,18 +242,6 @@ def tokenize(command: str) -> list[Token]:
     return [Token(m.group(0), m.start(), m.end()) for m in _TOKEN.finditer(command)]
 
 
-def _is_flag(token: str) -> bool:
-    """True if a token is an option rather than a thing being operated on.
-
-    The same rule :mod:`mem.fix` applies, deliberately restated rather than
-    imported: that module classifies ``shlex`` tokens with the quotes already
-    stripped, this one classifies raw spans, and a shared helper would have to
-    pretend those are the same kind of value. A bare ``-`` means stdin, not a
-    flag.
-    """
-    return len(token) > 1 and token.startswith("-")
-
-
 def _protected_prefix_length(tokens: Sequence[Token]) -> int:
     """How many leading tokens may never become a variable.
 
@@ -266,7 +256,7 @@ def _protected_prefix_length(tokens: Sequence[Token]) -> int:
     runbook step of ``cd $ARG`` says nothing at all.
     """
     offset = 0
-    while offset < len(tokens) and tokens[offset].text in _PRIVILEGE_PREFIXES:
+    while offset < len(tokens) and tokens[offset].text in PRIVILEGE_PREFIXES:
         offset += 1
     return offset + 2
 
@@ -295,7 +285,7 @@ def command_shape(command: str) -> tuple[str, ...]:
     for index, token in enumerate(tokens):
         if index < protected:
             shape.append(token.text)
-        elif _is_flag(token.text):
+        elif is_flag(token.text):
             name, sep, _value = token.text.partition("=")
             shape.append(name + sep + _HOLE if sep else token.text)
         else:
@@ -328,33 +318,6 @@ def _slot_span(command: str, shape: tuple[str, ...], index: int) -> tuple[int, i
 # --- sessions --------------------------------------------------------------
 
 
-def _think_seconds(previous: CapturedCommand, command: CapturedCommand) -> int:
-    """Seconds the user paused between two commands.
-
-    mem stamps a command when it *finishes*, so a raw timestamp difference
-    charges a command's own runtime to the user's thinking time. Subtracting
-    the known duration is what keeps a four-minute ``terraform apply`` from
-    looking like four minutes of distraction. Same correction, and same
-    reason, as :mod:`mem.fix`.
-
-    Imported commands carry no duration, so the correction is a no-op for
-    them and the gap is the raw one — which is the best available answer, not
-    a guess dressed up as one.
-
-    **Read this before writing anything else that reasons about elapsed
-    time.** mem records a command's *completion*, so a bare ``b.ts - a.ts`` is
-    not the time the user spent thinking — it includes however long ``b`` took
-    to run. This is now the third place that has bitten: the shell hooks, the
-    correction window in :mod:`mem.fix`, and session splitting here, where it
-    silently cut every deploy sequence in half at its slowest step. Any new
-    comparison against a duration threshold has to subtract ``duration_ms``.
-    """
-    gap = command.ts - previous.ts
-    if command.duration_ms:
-        gap -= command.duration_ms // 1000
-    return max(gap, 0)
-
-
 def split_sessions(
     commands: Sequence[CapturedCommand],
 ) -> list[list[CapturedCommand]]:
@@ -371,8 +334,8 @@ def split_sessions(
     the sequences this module exists to find are build and deploy procedures,
     which are made *of* the slowest commands a developer runs: every deploy
     would be cut in half at its slowest step. The threshold is unchanged; what
-    is measured against it is think time (:func:`_think_seconds`), the same
-    correction ``mem fix`` applies for the same reason.
+    is measured against it is think time (:func:`mem.fix.think_seconds`), the
+    same correction ``mem fix`` applies for the same reason.
 
     Two further additions the tracker does not need:
 
@@ -392,7 +355,7 @@ def split_sessions(
             if previous.session and command.session:
                 boundary = previous.session != command.session
             else:
-                boundary = _think_seconds(previous, command) > SESSION_IDLE_SECONDS
+                boundary = think_seconds(previous, command) > SESSION_IDLE_SECONDS
             boundary = boundary or command.repo != previous.repo
             boundary = boundary or command.ts < previous.ts
             if boundary:
@@ -501,7 +464,7 @@ def is_inspection(command: str) -> bool:
     if any(marker in command for marker in _SHELL_GRAMMAR):
         return False
     tokens = [token.text for token in tokenize(command)]
-    while tokens and tokens[0] in _PRIVILEGE_PREFIXES:
+    while tokens and tokens[0] in PRIVILEGE_PREFIXES:
         tokens = tokens[1:]
     if not tokens:
         return True
@@ -529,7 +492,7 @@ def steps_of(session: Sequence[CapturedCommand]) -> list[list[CapturedCommand]]:
             continue
         if (
             previous is not None
-            and _think_seconds(previous, command) > MAX_STEP_GAP_SECONDS
+            and think_seconds(previous, command) > MAX_STEP_GAP_SECONDS
         ):
             if len(current) >= MIN_SEQUENCE_LENGTH:
                 runs.append(current)
@@ -739,7 +702,7 @@ def _variable_name(
     # Read off the shape directly: those positions are protected, so they are
     # always literal text and never a hole.
     offset = 0
-    while offset < len(step_shape) and step_shape[offset] in _PRIVILEGE_PREFIXES:
+    while offset < len(step_shape) and step_shape[offset] in PRIVILEGE_PREFIXES:
         offset += 1
     verb = _sanitize(step_shape[offset + 1] if offset + 1 < len(step_shape) else "")
     if verb and verb not in EXCLUDED_SHELL_VARS:
@@ -986,14 +949,14 @@ def suggest_name(candidate: Candidate, taken: Iterable[str] = ()) -> str:
     ``mem group rename`` fixes it later.
     """
     tokens = [token.text for token in tokenize(candidate.steps[-1])]
-    while tokens and tokens[0] in _PRIVILEGE_PREFIXES:
+    while tokens and tokens[0] in PRIVILEGE_PREFIXES:
         tokens = tokens[1:]
 
     parts: list[str] = []
     if tokens:
         head = _TRAILING_EXTENSION.sub("", tokens[0].rsplit("/", 1)[-1])
         parts.append(head)
-    if len(tokens) > 1 and not _is_flag(tokens[1]) and "$" not in tokens[1]:
+    if len(tokens) > 1 and not is_flag(tokens[1]) and "$" not in tokens[1]:
         parts.append(tokens[1].rsplit("/", 1)[-1])
 
     slug = re.sub(r"[^a-z0-9]+", "-", "-".join(parts).lower()).strip("-")
@@ -1040,32 +1003,6 @@ def build_report(
     return PromoteReport(candidates=candidates, names=names)
 
 
-def _iso(ts: int) -> str:
-    """Format an epoch timestamp as UTC ISO-8601, for machine consumers."""
-    return (
-        datetime.fromtimestamp(ts, tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def _redact(value: Any) -> Any:
-    """Recursively redact every string in a JSON-shaped structure.
-
-    At one choke point rather than field by field, exactly as ``mem fix`` and
-    ``mem mcp`` do it: a per-field call is a rule the next field can forget,
-    and the cost of forgetting is a printed credential. ``mem promote`` quotes
-    whole sequences of commands the user has stopped thinking about.
-    """
-    if isinstance(value, str):
-        return redact_secrets(value)
-    if isinstance(value, dict):
-        return {k: _redact(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact(v) for v in value]
-    return value
-
-
 def report_payload(report: PromoteReport) -> dict[str, Any]:
     """Render a report as redacted, JSON-ready data.
 
@@ -1084,7 +1021,7 @@ def report_payload(report: PromoteReport) -> dict[str, Any]:
                 "confidence": candidate.confidence,
                 "first_seen": candidate.first_seen,
                 "last_seen": candidate.last_seen,
-                "last_seen_iso": _iso(candidate.last_seen),
+                "last_seen_iso": iso_utc(candidate.last_seen),
                 "repo": candidate.repo,
                 "has_credential": candidate.has_credential,
                 "variables": [
@@ -1097,4 +1034,4 @@ def report_payload(report: PromoteReport) -> dict[str, Any]:
             )
         ],
     }
-    return _redact(payload)
+    return redact_payload(payload)

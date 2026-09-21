@@ -82,10 +82,10 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
 from typing import Any, Callable, TextIO
 
 from mem import __version__, storage
+from mem.fix import iso_utc, redact_payload
 from mem.models import AgentAuditEntry
 from mem.variables import redact_secrets
 
@@ -156,20 +156,6 @@ class RpcError(Exception):
 # --- helpers ---------------------------------------------------------------
 
 
-def _iso(ts: int) -> str:
-    """Format an epoch timestamp as UTC ISO-8601.
-
-    Alongside the raw epoch, never instead of it: a model reads dates far
-    more reliably than it does integers, and a caller that wants to sort
-    still gets the number.
-    """
-    return (
-        datetime.fromtimestamp(ts, tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
-
-
 _repo_cache: list[str | None] = []
 
 
@@ -185,22 +171,6 @@ def _current_repo() -> str | None:
 
         _repo_cache.append(get_git_repo(os.getcwd()))
     return _repo_cache[0]
-
-
-def _redact(value: Any) -> Any:
-    """Recursively redact every string in a JSON-shaped structure.
-
-    Applied once to a whole tool payload rather than field by field: a
-    per-field call is a rule a future tool can forget, and the failure mode
-    of forgetting is a leaked credential.
-    """
-    if isinstance(value, str):
-        return redact_secrets(value)
-    if isinstance(value, dict):
-        return {k: _redact(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact(v) for v in value]
-    return value
 
 
 def _require_str(args: dict[str, Any], name: str) -> str:
@@ -277,7 +247,7 @@ def _tool_search_history(args: dict[str, Any]) -> dict[str, Any]:
                 "command": cmd.command,
                 "repo": cmd.repo,
                 "ts": cmd.ts,
-                "when": _iso(cmd.ts),
+                "when": iso_utc(cmd.ts),
                 "exit_code": cmd.exit_code,
                 "duration_ms": cmd.duration_ms,
                 "score": round(score, 4),
@@ -420,7 +390,7 @@ def _tool_recent_failures(args: dict[str, Any]) -> dict[str, Any]:
                     "command": failure.command.command,
                     "repo": failure.command.repo,
                     "ts": failure.command.ts,
-                    "when": _iso(failure.command.ts),
+                    "when": iso_utc(failure.command.ts),
                     "exit_code": failure.command.exit_code,
                     "followed_by": [
                         {"command": nxt.command, "exit_code": nxt.exit_code}
@@ -679,7 +649,7 @@ def _handle_tools_call(params: dict[str, Any]) -> dict[str, Any]:
 
     _audit(name, args, int(payload.get("count", 0)), None)
     # The single choke point: nothing reaches the client without passing here.
-    return _text_content(json.dumps(_redact(payload), indent=2))
+    return _text_content(json.dumps(redact_payload(payload), indent=2))
 
 
 def _text_content(text: str, is_error: bool = False) -> dict[str, Any]:
