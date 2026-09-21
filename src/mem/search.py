@@ -193,7 +193,7 @@ def _expanded_search(
     on these questions, because the words a person uses to describe a command
     are usually not in the command.
     """
-    data = concepts.load(storage.MEM_DIR / concepts.USER_CONCEPTS_FILENAME)
+    data = concepts.load(storage.MEM_DIR / concepts.CONCEPTS_FILENAME)
     groups = concepts.expand(terms, data)
 
     admitted = list(_read_history(current_repo, line_filter=_any_variant(groups)))
