@@ -32,6 +32,7 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
+from typing import Any
 
 from mem import storage
 from mem.models import (
@@ -299,7 +300,7 @@ async def extract_patterns_for_tool(
     unique_cmds = list(raw_freq.keys())
 
     if not _apple_fm_available():
-        return _heuristic_patterns(tool, commands)
+        return _heuristic_patterns(tool, raw_freq)
 
     # Step 2: Generalize only what the cache does not already cover. Most
     # frequent first, so a budget-limited run spends the model on the commands
@@ -368,21 +369,18 @@ async def generate_session_summary(commands: list[str]) -> str | None:
         return None
 
 
-def _heuristic_patterns(tool: str, commands: list[str]) -> PatternExtractionResult:
+def _heuristic_patterns(tool: str, freq: Counter[str]) -> PatternExtractionResult:
     """Simple fallback when Apple FM SDK is unavailable.
 
-    Groups identical commands and returns them as "patterns".
-    Not as smart as AI extraction, but still useful for ranking.
+    Groups identical commands and returns them as "patterns". ``freq`` is the
+    count the caller already took; not as smart as AI extraction, but still
+    useful for ranking.
     """
-    freq: dict[str, int] = defaultdict(int)
-    for cmd in commands:
-        freq[cmd] += 1
-
     # The ten most repeated commands stand in for patterns. Ten is chosen by
     # eye, not measured; it is what fits in a `mem patterns` listing.
     patterns = [
         CommandPattern(pattern=cmd, example=cmd, frequency=count)
-        for cmd, count in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+        for cmd, count in freq.most_common(10)
     ]
 
     # Identity mapping for every command, not just the ten reported: without a
@@ -395,24 +393,17 @@ def _heuristic_patterns(tool: str, commands: list[str]) -> PatternExtractionResu
     )
 
 
-def _load_cache(tool: str) -> dict[str, str]:
-    """Read the {command -> pattern} cache for a tool.
-
-    Files written before ``command_patterns`` existed only recorded which
-    commands had been seen, with no way to recover what they mapped to. Those
-    commands are treated as uncached so they get generalized once more, rather
-    than being resurrected as raw patterns.
-    """
-    existing = storage.read_patterns(tool)
-    if existing is None:
-        return {}
-    return dict(existing.command_patterns)
+# Sentinel for "the caller did not read the pattern file", as distinct from
+# "the caller read it and there was none".
+_UNREAD: Any = object()
 
 
 def run_pattern_extraction(
     tool: str,
     commands: list[str] | None = None,
     budget: int | None = None,
+    *,
+    existing: PatternFile | None = _UNREAD,
 ) -> int:
     """Extract patterns for a single tool and save to storage.
 
@@ -420,6 +411,10 @@ def run_pattern_extraction(
     tool's commands in. Re-reading every JSONL once per tool turned a sync
     into O(tools x history): 50 tools over a 100k-command history meant five
     million line parses, every 20 captures, in a background process.
+
+    ``existing`` is the tool's current pattern file, for a caller that has
+    already read it (``sync_all_patterns`` needs it to count new tools); left
+    out, it is read here, once.
 
     Returns how many commands this run added to the cache. With the model
     that is the number of commands sent to it, which is what lets a caller
@@ -443,9 +438,15 @@ def run_pattern_extraction(
     if len(commands) < MIN_COMMANDS_PER_TOOL:
         return 0  # Not enough data for meaningful patterns
 
-    cache = _load_cache(tool)
+    if existing is _UNREAD:
+        existing = storage.read_patterns(tool)
+    # The {command -> pattern} cache. Files written before `command_patterns`
+    # existed only recorded which commands had been seen, with no way to
+    # recover what they mapped to; those commands are treated as uncached so
+    # they get generalized once more rather than resurrected as raw patterns.
+    cache = {} if existing is None else dict(existing.command_patterns)
     uncached = {c for c in set(commands) if c not in cache}
-    if not uncached and storage.read_patterns(tool) is not None:
+    if not uncached and existing is not None:
         return 0  # Nothing new to process
 
     result = asyncio.run(
@@ -501,7 +502,9 @@ def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
             break  # Out of budget; the next sync picks up where this stopped
 
         existing = storage.read_patterns(tool)
-        spent = run_pattern_extraction(tool, commands=commands, budget=remaining)
+        spent = run_pattern_extraction(
+            tool, commands=commands, budget=remaining, existing=existing
+        )
         remaining -= max(spent, 0)
 
         if existing is None:
