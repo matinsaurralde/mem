@@ -111,27 +111,14 @@ def try_sync_lock() -> bool:
     return True
 
 
-def _append_line(path: Path, line: str) -> None:
-    """Append one line to a JSONL file, creating it owner-only."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _harden_dir(path.parent)
-    existed = path.exists()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)
-    try:
-        os.write(fd, (line + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    if existed:
-        _harden_file(path)
-
-
 def _append_lines(path: Path, lines: list[str]) -> None:
-    """Append many lines to a JSONL file in a single write.
+    """Append lines to a JSONL file in a single write, creating it owner-only.
 
-    Separate from :func:`_append_line` because a shell history import writes
-    tens of thousands of entries at once: opening, writing and closing the
-    file per entry turns a sub-second operation into a visible pause, and
-    leaves a partially written import if the process dies halfway.
+    One write for the whole batch, never one per line: a shell history import
+    writes tens of thousands of entries at once, and opening, writing and
+    closing the file per entry turns a sub-second operation into a visible
+    pause — and leaves a partially written import if the process dies
+    halfway. A capture is simply a batch of one.
     """
     if not lines:
         return
@@ -353,7 +340,7 @@ def append_command(cmd: CapturedCommand) -> None:
     # acquisition in the migration is free.
     with exclusive_lock():
         path = repo_file(resolve_repo_key(cmd.repo))
-        _append_line(path, cmd.to_jsonl())
+        _append_lines(path, [cmd.to_jsonl()])
 
 
 def append_commands(cmds: list[CapturedCommand]) -> int:
@@ -605,7 +592,7 @@ def append_session(session: WorkSession) -> None:
     date = dt.strftime("%Y-%m-%d")
     path = session_file(date)
     with exclusive_lock():
-        _append_line(path, session.to_jsonl())
+        _append_lines(path, [session.to_jsonl()])
 
 
 def read_sessions(date: str) -> Iterator[WorkSession]:
@@ -1279,7 +1266,7 @@ def append_agent_audit(entry: AgentAuditEntry) -> None:
     """
     ensure_dirs()
     with exclusive_lock():
-        _append_line(agent_audit_file(), entry.to_jsonl())
+        _append_lines(agent_audit_file(), [entry.to_jsonl()])
 
 
 def read_agent_audit() -> Iterator[AgentAuditEntry]:
