@@ -26,6 +26,7 @@ watches the list, and it makes the finder pipeable.
 from __future__ import annotations
 
 import codecs
+import heapq
 import json
 import os
 import select
@@ -102,10 +103,9 @@ class Result(NamedTuple):
 def history_files(mem_dir: str) -> list[str]:
     """Every history file, newest-modified first.
 
-    The ordering is only about which file is read first. It does not help the
-    empty-query view: ``_most_recent`` walks the concatenated lines from the
-    end, so on a multi-file store it starts in the *least* recently modified
-    file and stops before reaching the newest one.
+    The order only breaks ties: ``_most_recent`` merges every file by
+    timestamp, and two commands captured in the same second in different
+    repos are shown with the more recently written file first.
     """
     repos = os.path.join(mem_dir, "repos")
     try:
@@ -123,20 +123,30 @@ def _mtime(path: str) -> float:
         return 0.0
 
 
-def read_raw_lines(paths: Sequence[str]) -> list[str]:
-    """Read every history line as text, without parsing any of it.
+def read_history(paths: Sequence[str]) -> tuple[list[str], list[int]]:
+    """Every history line as text, and the index at which each file begins.
 
-    ``errors="replace"`` because a history file is whatever the user typed,
-    and a single undecodable byte must not take down the finder.
+    Nothing is parsed here. ``errors="replace"`` because a history file is
+    whatever the user typed, and a single undecodable byte must not take down
+    the finder. The starts are what let :func:`_most_recent` walk the files
+    separately without the list being copied per file.
     """
     lines: list[str] = []
+    starts: list[int] = []
     for path in paths:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                lines.extend(handle.read().splitlines())
+                text = handle.read()
         except OSError:
             continue
-    return lines
+        starts.append(len(lines))
+        lines.extend(text.splitlines())
+    return lines, starts
+
+
+def read_raw_lines(paths: Sequence[str]) -> list[str]:
+    """Every history line as text, files concatenated in the order given."""
+    return read_history(paths)[0]
 
 
 def parse_entry(line: str) -> Entry | None:
@@ -238,15 +248,18 @@ def rank(
     current_repo: str | None,
     now: float,
     limit: int = MAX_RESULTS,
+    starts: Sequence[int] = (0,),
 ) -> list[Result]:
     """Rank history against a query, deduplicated by command text.
 
     With an empty query there is nothing to rank, so the most recent commands
     are returned instead — which is what Ctrl+R means before you type.
+    *starts* is where each history file begins in *lines*, as
+    :func:`read_history` reports it; only the empty query needs it.
     """
     terms = terms_of(query)
     if not terms:
-        return _most_recent(lines, limit)
+        return _most_recent(lines, limit, starts)
 
     # Read once for the whole page: it is one small file, and reading it per
     # candidate would turn every keystroke into thousands of stat() calls.
@@ -285,22 +298,52 @@ def rank(
     return results[:limit]
 
 
-def _most_recent(lines: Sequence[str], limit: int) -> list[Result]:
-    """The newest distinct commands, without scoring anything.
+def _most_recent(
+    lines: Sequence[str], limit: int, starts: Sequence[int] = (0,)
+) -> list[Result]:
+    """The newest distinct commands across every file, without scoring anything.
 
-    Walks backwards so the scan stops as soon as ``limit`` distinct commands
-    have been seen — the whole point of not ranking an empty query.
+    Each history file is append-only, so its newest line is its last. The
+    files are walked backwards *together*, always taking the newest of their
+    heads — a k-way merge — so the scan stops after about ``limit`` parses
+    plus one per file, which is the whole point of not ranking an empty
+    query. It used to walk the concatenation from its end, which on a
+    multi-repo store meant the end of whichever file was read last, and the
+    ``limit`` distinct commands were found before the other files were
+    reached: a stale repo with 300 commands hid a fresh one with 5.
+
+    *starts* is where each file begins in *lines*; ``(0,)`` is one file.
+    Ties on the timestamp go to the earlier file, which :func:`history_files`
+    makes the more recently written one.
     """
+    ends = [*starts[1:], len(lines)]
+    # Next index to read in each file, walking backwards.
+    cursors = [end - 1 for end in ends]
+    # (-ts, file, -index, entry): the newest line is the smallest tuple, and
+    # (file, index) is unique so the entry itself is never compared.
+    heap: list[tuple[int, int, int, Entry]] = []
+
+    def push_head(file: int) -> None:
+        index = cursors[file]
+        while index >= starts[file]:
+            entry = parse_entry(lines[index])
+            if entry is not None:
+                heapq.heappush(heap, (-entry.ts, file, -index, entry))
+                index -= 1
+                break
+            index -= 1
+        cursors[file] = index
+
+    for file in range(len(starts)):
+        push_head(file)
+
     seen: dict[str, Entry] = {}
-    for line in reversed(lines):
-        entry = parse_entry(line)
-        if entry is None or entry.command in seen:
-            continue
-        seen[entry.command] = entry
-        if len(seen) >= limit:
-            break
-    ordered = sorted(seen.values(), key=lambda e: e.ts, reverse=True)
-    return [Result(entry=entry, score=0.0, frequency=1) for entry in ordered]
+    while heap and len(seen) < limit:
+        _, file, _, entry = heapq.heappop(heap)
+        if entry.command not in seen:
+            seen[entry.command] = entry
+        push_head(file)
+    return [Result(entry=entry, score=0.0, frequency=1) for entry in seen.values()]
 
 
 # --- Rendering ---------------------------------------------------------------
@@ -578,13 +621,20 @@ class Finder:
         current_repo: str | None,
         query: str = "",
         now: float | None = None,
+        starts: Sequence[int] = (0,),
     ) -> None:
         self.lines = lines
+        self.starts = starts
         self.current_repo = current_repo
         self.query = query
         self.selected = 0
         self.now = time.time() if now is None else now
-        self.results = rank(self.lines, self.query, self.current_repo, self.now)
+        self.results = self._rank()
+
+    def _rank(self) -> list[Result]:
+        return rank(
+            self.lines, self.query, self.current_repo, self.now, starts=self.starts
+        )
 
     def apply(self, action: Action) -> str | None:
         """Apply an action. Returns "accept"/"cancel" when the session ends."""
@@ -610,7 +660,7 @@ class Finder:
             return None
 
         if self.query != previous:
-            self.results = rank(self.lines, self.query, self.current_repo, self.now)
+            self.results = self._rank()
             # Any edit to the query invalidates the position: keeping index 7
             # over a completely different result set selects an unrelated
             # command, which is how a finder makes you run the wrong thing.
@@ -685,8 +735,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         query = " ".join(a for a in args if not a.startswith("-"))
     mem_dir = os.environ.get("MEM_DIR") or os.path.join(os.path.expanduser("~"), ".mem")
-    lines = read_raw_lines(history_files(mem_dir))
-    finder = Finder(lines, _current_repo(), query=query)
+    lines, starts = read_history(history_files(mem_dir))
+    finder = Finder(lines, _current_repo(), query=query, starts=starts)
 
     try:
         tty_in = open("/dev/tty", "rb", buffering=0)
