@@ -39,13 +39,14 @@ in ``capture.py`` as "approximate", they are rotated after 30 days while
 commands are kept for 90, and ``mem import`` writes none at all — so the user
 who has just imported ten years of ``.zsh_history`` and has the most to gain
 would get nothing. Sessions are re-derived here from the command files using
-the same rule the tracker uses (:data:`SESSION_IDLE_SECONDS`), against data
-that is richer and lives longer.
+the same rule the tracker uses (:data:`mem.capture.SESSION_IDLE_SECONDS`),
+against data that is richer and lives longer.
 
 **A session boundary is 300 idle seconds or a change of repository.**
 Not a new threshold — :class:`mem.capture.SessionTracker` chose it and this
-mirrors it, because a "session" that meant one thing in ``mem session`` and
-another in ``mem promote`` would be a lie in one of the two places.
+module imports that constant rather than restating it, because a "session"
+that meant one thing in ``mem session`` and another in ``mem promote`` would
+be a lie in one of the two places.
 
 **Inspection commands are removed before mining.** ``ls``, ``cd``, ``cat``,
 ``git status`` and their kind are how you *look* at a repository, not how you
@@ -153,6 +154,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from mem import storage
+from mem.capture import SESSION_IDLE_SECONDS
 from mem.fix import (
     PRIVILEGE_PREFIXES,
     is_flag,
@@ -170,10 +172,6 @@ from mem.variables import EXCLUDED_SHELL_VARS, looks_like_credential, redact_sec
 # runbook costs the user nothing they had before; an invented one costs them
 # their trust in the whole command, once, permanently. The reasoning for each
 # is in the module docstring.
-
-#: Idle seconds that end a work session. Mirrors
-#: :class:`mem.capture.SessionTracker`, which owns this definition.
-SESSION_IDLE_SECONDS = 300
 
 #: Longest think-time gap between two consecutive steps of one procedure.
 MAX_STEP_GAP_SECONDS = 900

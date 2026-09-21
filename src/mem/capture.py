@@ -16,6 +16,12 @@ import uuid
 from mem.models import CapturedCommand, SessionState, WorkSession
 from mem import storage
 
+# Idle seconds that end a work session. The one definition: `mem promote`
+# re-derives sessions from the command files (ADR-012) and imports this rather
+# than restating it, so "a session" cannot mean two things. The value is
+# chosen by eye, not measured — see SessionTracker.
+SESSION_IDLE_SECONDS = 300
+
 
 def get_git_repo(directory: str) -> str | None:
     """Detect the current git repository's root path.
@@ -153,7 +159,8 @@ class SessionTracker:
     proximity and repository context. Session boundaries are detected
     when:
 
-    1. More than 300 seconds (5 minutes) of idle time between commands
+    1. More than ``SESSION_IDLE_SECONDS`` (300, five minutes) of idle time
+       between commands
     2. The user switches to a different git repository
 
     Why 300 seconds: Five minutes is long enough that brief interruptions
@@ -193,7 +200,7 @@ class SessionTracker:
         """Process a new command and update session state.
 
         Detects session boundaries and closes sessions when:
-        - More than 300 seconds have passed since the last command
+        - More than ``SESSION_IDLE_SECONDS`` have passed since the last command
         - The git repo has changed
         """
         state = self._load_state()
@@ -212,8 +219,8 @@ class SessionTracker:
         idle_time = cmd.ts - state.last_command_ts
         repo_changed = cmd.repo != state.last_repo
 
-        # Session boundary: >300s idle OR repo change
-        if idle_time > 300 or repo_changed:
+        # Session boundary: idle past the threshold OR repo change
+        if idle_time > SESSION_IDLE_SECONDS or repo_changed:
             self._close_session(state)
             # Start new session
             new_state = SessionState(
