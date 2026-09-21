@@ -293,6 +293,25 @@ class TestGetLastCapturedCommand:
         with pytest.raises(click.ClickException, match="No captured history"):
             groups.get_last_captured_command("/nonexistent")
 
+    def test_last_line_that_is_json_but_not_an_object_is_reported(
+        self, tmp_mem_dir: Path
+    ):
+        """``42`` as the last line is "could not read", not a TypeError.
+
+        The reader caught JSONDecodeError and KeyError, so a line that decoded
+        to an int reached ``data["command"]`` and ``mem save !`` died with a
+        traceback instead of its own message.
+        """
+        path = storage.repo_file(storage.repo_key("/test-repo"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        from conftest import make_command
+
+        first = make_command(command="first", repo="/test-repo")
+        path.write_text(first.to_jsonl() + "\n42\n", encoding="utf-8")
+
+        with pytest.raises(click.ClickException, match="Could not read last command"):
+            groups.get_last_captured_command("/test-repo")
+
 
 # ---------------------------------------------------------------------------
 # list_all

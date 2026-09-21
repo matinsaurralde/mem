@@ -34,6 +34,7 @@ import pytest
 from conftest import make_command
 from mem import _fsutil, capture, patterns, search, storage
 from mem.models import (
+    AgentAuditEntry,
     CommandPattern,
     Group,
     GroupCommand,
@@ -577,6 +578,29 @@ class TestRotateDegenerateFiles:
 
         assert path.exists(), "rotate() deleted a history file it could not date"
 
+    @pytest.mark.parametrize("scalar", ["42", '"x"', "[]", "null"])
+    def test_valid_json_that_is_not_an_object_is_preserved(
+        self, tmp_mem_dir, frozen_now, scalar
+    ):
+        """A line that is JSON but not an object is kept like any corrupt line.
+
+        The readers skip such a line with a warning, but rotate() only caught
+        JSONDecodeError and then called ``.get`` on whatever decoded — an
+        AttributeError. rotate() runs inside the background ``_sync``, which
+        swallows the exception, so from the moment such a line appeared every
+        sync exited 0 and retention silently stopped for that file and every
+        file sorted after it.
+        """
+        now = frozen_now
+        path = write_repo_file(
+            tmp_mem_dir, "w-app", [command_line("old", now - 200 * DAY), scalar]
+        )
+
+        removed, _ = storage.rotate()
+
+        assert removed == 1
+        assert read_commands_raw(path) == [scalar]
+
 
 # --- forget: every destination --------------------------------------------
 
@@ -835,6 +859,61 @@ class TestForgetWithoutMatches:
 
         assert path.exists()
         assert read_commands_raw(path) == ["NOT JSON"]
+
+
+class TestForgetKeepsNonObjectLines:
+    """A JSONL line that decodes to something other than an object is opaque.
+
+    Every rewriter kept lines that were not JSON and crashed on lines that
+    were JSON of the wrong shape (``42``, ``"x"``, ``[]``): the rewrite caught
+    JSONDecodeError and then called ``.get`` on an int. For ``mem forget``
+    that is a traceback instead of a scrub — on a privacy command, the user
+    is told nothing was done when in fact the matching files before the bad
+    one were already rewritten.
+    """
+
+    def test_repo_file(self, tmp_mem_dir):
+        path = write_repo_file(tmp_mem_dir, "w-app", [command_line("ls", 1), "42"])
+
+        assert storage.forget_commands("ls") == 1
+        assert read_commands_raw(path) == ["42"]
+
+    def test_session_file(self, tmp_mem_dir):
+        path = write_session_file(
+            tmp_mem_dir,
+            days_ago_date(0),
+            [
+                {
+                    "id": "s1",
+                    "summary": "work",
+                    "started_at": 1,
+                    "ended_at": 2,
+                    "dir": "/w/app",
+                    "repo": "/w/app",
+                    "commands": ["ls -la", "git status"],
+                }
+            ],
+        )
+        with path.open("a", encoding="utf-8") as f:
+            f.write("42\n")
+
+        storage.forget_commands("ls -la")
+
+        kept = read_commands_raw(path)
+        assert kept[-1] == "42"
+        assert json.loads(kept[0])["commands"] == ["git status"]
+
+    def test_agent_audit_log(self, tmp_mem_dir):
+        storage.append_agent_audit(
+            AgentAuditEntry(ts=1, tool="search", arguments={"query": "hunter2"})
+        )
+        path = storage.agent_audit_file()
+        with path.open("a", encoding="utf-8") as f:
+            f.write("42\n")
+
+        storage.forget_commands("hunter2")
+
+        assert read_commands_raw(path) == ["42"]
 
 
 # --- concurrency (P0-10) ---------------------------------------------------

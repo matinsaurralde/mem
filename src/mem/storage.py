@@ -134,6 +134,34 @@ def _append_lines(path: Path, lines: list[str]) -> None:
         _harden_file(path)
 
 
+def iter_jsonl_objects(lines: Iterable[str]) -> Iterator[tuple[str, dict | None]]:
+    """Walk JSONL text as ``(stripped_line, obj)`` pairs, skipping blank lines.
+
+    ``obj`` is the decoded object, or None when the line is not JSON *or* is
+    JSON that is not an object — ``42``, ``"x"``, ``[]``, ``null``. That second
+    case is the reason this exists: the readers already skipped such a line,
+    but every rewriter (``rotate``, ``forget``, the audit scrub) caught only
+    JSONDecodeError and then called ``.get`` on an int. ``rotate`` runs inside
+    the silent background sync, so one such line stopped retention with exit
+    code 0 and no message.
+
+    What a None means is the caller's decision — the rewriters keep the line
+    verbatim, because a line they cannot interpret is not theirs to delete.
+    The Pydantic readers do not go through here: they parse with the model's
+    own JSON parser, and decoding every line twice would double the cost of
+    the one path this module measures in milliseconds.
+    """
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            data = None
+        yield line, data if isinstance(data, dict) else None
+
+
 def repo_file(repo: str) -> Path:
     """Path to a repo's command history file."""
     return MEM_DIR / "repos" / f"{repo}.jsonl"
@@ -271,11 +299,8 @@ def _migrate_legacy_repo_file_locked(legacy: Path, fallback_key: str) -> None:
     # Seeded with the requesting repo so an empty legacy file still migrates
     # (and keeps existing) instead of being silently deleted.
     buckets: dict[str, list[str]] = {fallback_key: []}
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        buckets.setdefault(_owner_key_of_line(line, fallback_key), []).append(line)
+    for line, entry in iter_jsonl_objects(raw.splitlines()):
+        buckets.setdefault(_owner_key_of_entry(entry, fallback_key), []).append(line)
 
     destination = repo_file(fallback_key)
     if list(buckets) == [fallback_key] and not destination.exists():
@@ -294,13 +319,11 @@ def _migrate_legacy_repo_file_locked(legacy: Path, fallback_key: str) -> None:
     _fsync_dir(legacy.parent)
 
 
-def _owner_key_of_line(line: str, fallback_key: str) -> str:
-    """Storage key of the repo that produced one legacy JSONL line."""
-    try:
-        entry = json.loads(line)
-        owner = entry.get("repo")
-    except (ValueError, AttributeError):
+def _owner_key_of_entry(entry: dict | None, fallback_key: str) -> str:
+    """Storage key of the repo that produced one decoded legacy JSONL line."""
+    if entry is None:
         return fallback_key
+    owner = entry.get("repo")
     return repo_key(owner) if isinstance(owner, str) and owner else fallback_key
 
 
@@ -651,14 +674,9 @@ def rotate(
                 lines_kept = []
                 lines_total = 0
                 with path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_stripped = line.strip()
-                        if not line_stripped:
-                            continue
+                    for line_stripped, data in iter_jsonl_objects(f):
                         lines_total += 1
-                        try:
-                            data = json.loads(line_stripped)
-                        except json.JSONDecodeError:
+                        if data is None:
                             lines_kept.append(line_stripped)  # keep corrupted lines
                             continue
                         ts = data.get("ts")
@@ -726,13 +744,8 @@ def forget_commands(query: str) -> int:
                 lines_kept = []
                 matched = 0
                 with path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_stripped = line.strip()
-                        if not line_stripped:
-                            continue
-                        try:
-                            data = json.loads(line_stripped)
-                        except json.JSONDecodeError:
+                    for line_stripped, data in iter_jsonl_objects(f):
+                        if data is None:
                             lines_kept.append(line_stripped)
                             continue
                         if query in data.get("command", ""):
@@ -757,13 +770,8 @@ def forget_commands(query: str) -> int:
                 sessions_kept = []
                 matched = False
                 with path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_stripped = line.strip()
-                        if not line_stripped:
-                            continue
-                        try:
-                            data = json.loads(line_stripped)
-                        except json.JSONDecodeError:
+                    for line_stripped, data in iter_jsonl_objects(f):
+                        if data is None:
                             sessions_kept.append(line_stripped)
                             continue
                         cmds = [c for c in data.get("commands", []) if query not in c]
@@ -968,13 +976,8 @@ def _scrub_agent_audit(query: str) -> None:
     kept: list[str] = []
     matched = 0
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                data = json.loads(stripped)
-            except json.JSONDecodeError:
+        for stripped, data in iter_jsonl_objects(f):
+            if data is None:
                 kept.append(stripped)
                 continue
             args = data.get("arguments") or {}

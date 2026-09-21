@@ -145,23 +145,20 @@ def get_last_captured_command(repo: str | None) -> str:
             "No captured history found. Run some commands first."
         )
 
-    last_line = None
+    last: tuple[str, dict | None] | None = None
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped:
-                last_line = stripped
+        for last in storage.iter_jsonl_objects(f):
+            pass
 
-    if last_line is None:
+    if last is None:
         raise click.ClickException(
             "No captured history found. Run some commands first."
         )
 
-    try:
-        data = json.loads(last_line)
-        return data["command"]
-    except (json.JSONDecodeError, KeyError):
+    _line, data = last
+    if data is None or "command" not in data:
         raise click.ClickException("Could not read last command from history.")
+    return data["command"]
 
 
 def list_all(repo_path: Path | None, global_path: Path) -> dict:
