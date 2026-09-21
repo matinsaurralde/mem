@@ -1,9 +1,10 @@
 """
 AI-powered pattern extraction using Apple Foundation Models.
 
-This module is the ONLY place in mem that uses AI inference. Everything
-else is deterministic. Pattern extraction exists because no regex or
-heuristic can reliably generalize commands like:
+This module and the credential classifier in :mod:`mem.variables` are the
+only places in mem that run AI inference; everything else is deterministic.
+Pattern extraction exists because no regex or heuristic can reliably
+generalize commands like:
     kubectl get pods, kubectl get services, kubectl get deployments
 into the abstract pattern:
     kubectl get <resource>
@@ -104,7 +105,8 @@ _MEANINGLESS_PLACEHOLDERS = frozenset(
     }
 )
 
-# Session summary prompt (used by capture module).
+# Session summary prompt, consumed by generate_session_summary() below (which
+# is what capture.SessionTracker calls; it never sees this constant).
 SESSION_SUMMARY_PROMPT = (
     "Summarize this shell session in one short sentence:\n{commands}"
 )
@@ -374,8 +376,12 @@ def run_pattern_extraction(
     into O(tools x history): 50 tools over a 100k-command history meant five
     million line parses, every 20 captures, in a background process.
 
-    Returns the number of commands sent to the model, so a caller can spend a
-    shared budget across tools.
+    Returns how many commands this run added to the cache. With the model
+    that is the number of commands sent to it, which is what lets a caller
+    spend a shared budget across tools; on the heuristic path nothing is sent
+    and every unseen command is cached at once, so the same number charges
+    the budget for work the model never did. Harmless, because without a
+    model there is no per-command cost to bound.
     """
     import asyncio
 
@@ -416,12 +422,16 @@ def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
     """Extract patterns for ALL tools with sufficient command history.
 
     Detects unique tools (first token of each command), runs extraction
-    for each tool with >5 commands. Skips tools with insufficient data.
+    for each tool with at least 5 commands. Skips tools with fewer.
 
     Args:
         silent: If True, suppress all output (for background auto-sync).
 
-    Returns (new_patterns, updated_patterns) counts.
+    Returns ``(new_tools, revisited_tools)``: how many tools had no pattern
+    file before this run, and how many already had one. Counts tools, not
+    patterns, and a revisited tool is counted whether or not its run wrote
+    anything — `run_pattern_extraction` returns 0 without writing when the
+    cache already covers every command.
     """
     # Collect all commands grouped by tool (first token). Read once: passing
     # each tool's slice down avoids re-reading the whole history per tool.

@@ -105,10 +105,15 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
-# Upper bound on how many stored commands a single tool call may consider.
-# Not a performance guard — a guard against a `limit: 100000` turning one
-# request into a full dump of the user's shell history.
+# Upper bound on how many results a single tool call may return. Not a
+# performance guard — a guard against a `limit: 100000` turning one request
+# into a full dump of the user's shell history.
 MAX_LIMIT = 50
+
+# How deep `search_history` over-fetches when a `repo` filter is given, since
+# the ranking engine scores every repository and the filter is applied to its
+# output afterwards. Deep enough that a repo with a modest share of the history
+# still fills MAX_LIMIT; never returned to the client as such.
 MAX_SCAN = 500
 
 DISABLED_MESSAGE = (
@@ -237,11 +242,11 @@ def _optional_limit(args: dict[str, Any], default: int) -> int:
 def _tool_search_history(args: dict[str, Any]) -> dict[str, Any]:
     """Rank the user's captured commands against a query.
 
-    ``repo`` is applied here as a filter rather than passed to
-    ``search.search``, which treats the repo as a *ranking* signal and always
-    scans every history file. Over-fetching and filtering keeps the tool's
-    contract honest ("only commands from this repo") without changing the
-    ranking engine.
+    ``repo`` is passed to ``search.search`` as ``current_repo`` — where it is
+    only a *ranking* signal; the engine always scans every history file — and
+    then applied here as a filter on the result. Over-fetching ``MAX_SCAN``
+    and filtering keeps the tool's contract honest ("only commands from this
+    repo") without changing the ranking engine.
     """
     from mem.search import search
 

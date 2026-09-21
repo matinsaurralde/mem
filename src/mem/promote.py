@@ -182,8 +182,10 @@ MIN_OCCURRENCES = 3
 #: Most variables a single candidate may carry.
 MAX_VARIABLES = 2
 
-#: Occurrence counts at which the wording of the claim changes. Same ladder as
-#: ``mem fix``, because it is the same kind of claim about the same evidence.
+#: Occurrence counts at which the wording of the claim changes. The same
+#: three-word ladder as ``mem fix`` (strong / moderate / weak) but higher
+#: rungs: 6/3 here against fix's 3/2, because an occurrence here is a whole
+#: session, not a single pair, and the sequences worth a runbook recur often.
 STRONG_EVIDENCE = 6
 MODERATE_EVIDENCE = 3
 
@@ -402,8 +404,11 @@ def split_sessions(
 #
 # A deliberately short, deliberately boring list. Its job is not to be
 # complete — it is to remove the handful of commands that make up most of a
-# real history and none of a runbook. Every entry is read-only and
-# unconditionally safe to skip; anything with an argument that could make it
+# real history and none of a runbook. The rule for membership is that the
+# command does not advance a procedure: most entries only look (`ls`, `cat`,
+# `git status`), and the rest — editors, `open`, `code`, `mem` itself — are
+# interactive detours whose effect is not in the command line, so they carry
+# no step a runbook could replay. Anything with an argument that could make it
 # write (a redirection, a pipe) is excluded by is_inspection() before the list
 # is consulted at all.
 
