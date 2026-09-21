@@ -913,8 +913,7 @@ def list_cmd(
     repo_path = None
 
     if not global_flag and repo:
-        sanitized = storage.sanitize_repo_name(repo)
-        repo_path = storage.group_file_path(sanitized)
+        repo_path = storage.group_file_path(repo)
 
     # Show a specific group's commands
     if group_name is not None:
@@ -1100,8 +1099,7 @@ def run(
     repo_path = None
     repo = _current_repo()
     if repo:
-        sanitized = storage.sanitize_repo_name(repo)
-        repo_path = storage.group_file_path(sanitized)
+        repo_path = storage.group_file_path(repo)
 
     grp, scope_label, _file_path, shadows = groups.resolve_group(
         group_name,
@@ -1350,8 +1348,7 @@ def export(group_name: str, fmt: str, global_flag: bool, use_stdout: bool) -> No
     repo_path = None
     repo = _current_repo()
     if repo:
-        sanitized = storage.sanitize_repo_name(repo)
-        repo_path = storage.group_file_path(sanitized)
+        repo_path = storage.group_file_path(repo)
 
     grp, _, _, _ = groups.resolve_group(
         group_name,
@@ -1773,8 +1770,7 @@ def group_copy(name: str, global_flag: bool, repo_flag: bool) -> None:
     if repo is None:
         raise click.ClickException("Not in a git repository.")
 
-    sanitized = storage.sanitize_repo_name(repo)
-    repo_path = storage.group_file_path(sanitized)
+    repo_path = storage.group_file_path(repo)
     global_path = storage.GROUPS_GLOBAL_FILE
 
     if global_flag:

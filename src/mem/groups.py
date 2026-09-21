@@ -44,8 +44,7 @@ def resolve_scope(global_flag: bool) -> Path:
     repo = get_git_repo(os.getcwd())
     if repo is None:
         return storage.GROUPS_GLOBAL_FILE
-    sanitized = storage.sanitize_repo_name(repo)
-    return storage.group_file_path(sanitized)
+    return storage.group_file_path(repo)
 
 
 def validate_group_name(name: str) -> None:

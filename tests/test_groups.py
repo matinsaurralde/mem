@@ -1368,8 +1368,12 @@ class TestResolveScope:
     def test_in_repo(self, tmp_mem_dir: Path):
         with patch("mem.groups.get_git_repo", return_value=FAKE_REPO):
             path = groups.resolve_scope(global_flag=False)
-        expected_name = storage.sanitize_repo_name(FAKE_REPO)
-        assert path == storage.group_file_path(expected_name)
+        assert path == storage.group_file_path(FAKE_REPO)
+        # The on-disk name is pinned literally: callers used to sanitise the
+        # path themselves before handing it to group_file_path, which
+        # sanitises again, and the file must not move now that they do not.
+        assert path.name == storage.sanitize_repo_name(FAKE_REPO) + ".json"
+        assert path.name == "Users-test-projects-myapp.json"
 
     def test_outside_repo_falls_back_to_global(self, tmp_mem_dir: Path):
         with patch("mem.groups.get_git_repo", return_value=None):
