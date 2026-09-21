@@ -227,7 +227,17 @@ class SessionTracker:
             self._save_state(new_state)
             return
 
+        # Think time, not the raw gap. mem stamps a command when it *finishes*,
+        # so `cmd.ts - last_ts` includes cmd's own runtime, and a build that
+        # ran longer than the threshold ended its own session when it
+        # completed (ADR-012 records this as the tracker being wrong). The
+        # same arithmetic as `mem.fix.think_seconds`, inlined: that helper
+        # takes two commands and the state keeps only a timestamp, and the
+        # capture hook cannot afford fix.py's imports on every prompt.
         idle_time = cmd.ts - state.last_command_ts
+        if cmd.duration_ms:
+            idle_time -= cmd.duration_ms // 1000
+        idle_time = max(idle_time, 0)
         repo_changed = cmd.repo != state.last_repo
 
         # Session boundary: idle past the threshold OR repo change

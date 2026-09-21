@@ -428,6 +428,36 @@ class TestSessionTracker:
             assert sessions == []
             assert state.commands == ["cmd1", "cmd2"]
 
+    @pytest.mark.parametrize(
+        ("duration_ms", "expect_closed"),
+        [(200_000, False), (0, True)],
+    )
+    def test_idle_is_think_time_not_the_raw_gap(
+        self, tmp_mem_dir, duration_ms: int, expect_closed: bool
+    ):
+        """A command that ran longer than the threshold must not end its own session.
+
+        Timestamps are completion times. Last command at t=1000, next one
+        finishing at t=1400: if it *ran* for 200 s the user paused 200 s and
+        the session continues; if it ran for 0 s they paused 400 s and it
+        splits. `mem fix` and `mem promote` both subtract `duration_ms`; the
+        tracker did not, which ADR-012 records as the tracker being wrong.
+        """
+        tracker = SessionTracker()
+        tracker.update(make_command(command="cmd1", ts=1000, duration_ms=0))
+        tracker.update(
+            make_command(command="docker build .", ts=1400, duration_ms=duration_ms)
+        )
+
+        sessions = list(storage.read_all_sessions())
+        state = tracker._load_state()
+        if expect_closed:
+            assert [s.commands for s in sessions] == [["cmd1"]]
+            assert state.commands == ["docker build ."]
+        else:
+            assert sessions == []
+            assert state.commands == ["cmd1", "docker build ."]
+
     def test_session_summary_fallback(self, tmp_mem_dir):
         """Session summary falls back to first command when AI unavailable."""
         tracker = SessionTracker()
