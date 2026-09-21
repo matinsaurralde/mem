@@ -102,8 +102,10 @@ class Result(NamedTuple):
 def history_files(mem_dir: str) -> list[str]:
     """Every history file, newest-modified first.
 
-    Ordering by mtime means the repo the user is actually working in tends to
-    be read first, which matters for the empty-query view.
+    The ordering is only about which file is read first. It does not help the
+    empty-query view: ``_most_recent`` walks the concatenated lines from the
+    end, so on a multi-file store it starts in the *least* recently modified
+    file and stops before reaching the newest one.
     """
     repos = os.path.join(mem_dir, "repos")
     try:
@@ -504,10 +506,14 @@ class KeyReader:
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def read_key(self) -> str:
-        """Read one keypress, collapsing escape sequences into a single token.
+        """Read one keypress, collapsing a short escape sequence into one token.
 
         Arrow keys arrive as three bytes. Reading them one at a time would
-        move the selection and then insert ``[A`` into the query.
+        move the selection and then insert ``[A`` into the query. Only up to
+        three bytes are collapsed (ESC, ``[`` or ``O``, one final): longer
+        sequences such as ``ESC [ 1 ; 5 C`` (Ctrl+Right) or ``ESC [ 3 ~``
+        (Delete) come back as their first three bytes, and the remainder is
+        read as ordinary keypresses.
         """
         first = self._read_char()
         if first != _ESC:

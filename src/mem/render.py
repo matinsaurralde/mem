@@ -64,7 +64,11 @@ def no_matches(query: str) -> None:
 
 
 def fit(value: str, width: int) -> str:
-    """Pad or truncate to an exact display width, with an ellipsis if cut.
+    """Pad or truncate to *width* code points, with an ellipsis if cut.
+
+    Measured with ``len()``, not in terminal columns, so a value containing
+    CJK or emoji (two columns each) misaligns the row. ``tui.display_width``
+    does the column arithmetic properly; this surface has not needed it yet.
 
     Applied to the raw string before escaping: escaping inserts backslashes
     that are not displayed, so measuring afterwards would misalign columns.

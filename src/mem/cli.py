@@ -145,7 +145,6 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
             return
         console.print(f'\nPatterns for "{query}":\n')
         for p in patterns:
-            # Highlight placeholders in yellow
             text = Text(f"  {p.pattern}")
             console.print(text, style="white")
         console.print()
@@ -268,11 +267,14 @@ def concepts() -> None:
 def tui(query: tuple[str, ...]) -> None:
     """Interactive history finder (bound to Ctrl+R by the shell hook).
 
-    Registered here so it shows up in ``mem --help`` and behaves like every
-    other subcommand. It is not normally reached through this path:
-    ``mem/_entry.py`` dispatches ``mem tui`` before Click is imported,
-    because the finder's entire latency budget is smaller than that import.
-    Reaching it through Click still works — it is just slower to appear.
+    Registered here so it shows up in ``mem --help``. It is not normally
+    reached through this path: ``mem/_entry.py`` dispatches ``mem tui``
+    before Click is imported, because the finder's entire latency budget is
+    smaller than that import. Reaching it through Click still works — it is
+    slower to appear, and it does not see the same arguments: Click consumes
+    a literal ``--`` before ``tui_main`` runs, so ``mem tui -- -la`` searches
+    for ``-la`` through ``_entry.py`` but for ``""`` through this command,
+    which drops every dash-prefixed word it is handed.
     """
     from mem.tui import main as tui_main
 
@@ -284,7 +286,8 @@ def sync_cmd() -> None:
     """Internal: background pattern extraction and data rotation.
 
     Triggered automatically every 20 captured commands. Runs silently —
-    no output, no errors. Never called by the user directly.
+    no output, no errors. Hidden from ``--help`` rather than blocked: a user
+    who types ``mem _sync`` gets a synchronous run, which is harmless.
     """
     from mem import storage
 
@@ -1876,7 +1879,7 @@ def vars_set(name: str, value: str | None) -> None:
     try:
         storage.set_var(name, value)
     except keychain.KeychainError as exc:
-        # No plaintext fallback, deliberately. See ADR-009: a tool that
+        # No plaintext fallback, deliberately. See ADR-010: a tool that
         # promises the Keychain and quietly writes cleartext when the Keychain
         # is busy is more dangerous than one that never promised anything.
         raise click.ClickException(
