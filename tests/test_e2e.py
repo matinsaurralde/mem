@@ -298,10 +298,26 @@ class TestCaptureSearchRoundTrip:
         assert "terraform apply" in search.stdout
 
     def test_search_without_matches_exits_zero(self, home: Path, workdir: Path) -> None:
-        """An empty result set is not an error — the shell must stay happy."""
+        """An empty result set is not an error — the shell must stay happy.
+
+        stdout is empty so a pipe sees nothing; the one-line note is on
+        stderr, where a redirect of the results does not pick it up.
+        """
         result = run_mem(["nothing-was-ever-captured"], home, workdir)
 
         assert result.returncode == 0
+        assert result.stdout == ""
+        assert result.stderr == 'no matches for "nothing-was-ever-captured"\n'
+
+    def test_json_after_the_query_is_still_json(
+        self, home: Path, workdir: Path
+    ) -> None:
+        """``mem QUERY --json`` used to print nothing: the flag joined the query."""
+        result = run_mem(["nothing-was-ever-captured", "--json"], home, workdir)
+
+        assert result.returncode == 0
+        assert json.loads(result.stdout) == []
+        assert result.stderr == ""
 
 
 SHELLS = ["zsh", "bash", "fish"]

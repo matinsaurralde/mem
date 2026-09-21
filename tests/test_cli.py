@@ -370,10 +370,15 @@ class TestImplicitSearchRouting:
         assert "Usage:" in result.stdout
         assert "Commands:" in result.stdout
 
-    def test_query_with_no_matches_is_silent_and_succeeds(
+    def test_query_with_no_matches_says_so_on_stderr_only(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
     ) -> None:
-        """No matches is a valid answer: exit 0, no output, no traceback."""
+        """No matches is a valid answer: exit 0, empty stdout, one stderr line.
+
+        stdout stays empty so ``mem foo | head`` pipes nothing; the line on
+        stderr is what tells a human the query ran and found nothing, which
+        pure silence could not distinguish from a broken hook.
+        """
         _add_history("git status")
 
         result = runner.invoke(cli, ["zzzz-nothing-matches-this"])
@@ -381,6 +386,24 @@ class TestImplicitSearchRouting:
         assert result.exception is None
         assert result.exit_code == 0
         assert result.stdout == ""
+        assert result.stderr == 'no matches for "zzzz-nothing-matches-this"\n'
+
+    def test_concept_fallback_finding_nothing_gives_the_same_line(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """A question the concept map understands but history cannot answer.
+
+        "certificate" expands to openssl, x509, certbot...; none of them was
+        ever run, so the expanded pass finds nothing too. The user gets the
+        one line, worded for the query they typed, not for the expansion.
+        """
+        _add_history("git status")
+
+        result = runner.invoke(cli, ["certificate"])
+
+        assert result.exit_code == 0
+        assert result.stdout == ""
+        assert result.stderr == 'no matches for "certificate"\n'
 
     def test_query_against_empty_history_succeeds(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
@@ -402,6 +425,54 @@ class TestImplicitSearchRouting:
 
         assert result.exit_code == 0
         assert len(json.loads(result.stdout)) == 2
+
+    def test_options_after_the_query_are_options(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """``mem git --json -n 1`` means the same as ``mem --json -n 1 git``.
+
+        It used to search for the literal text "git --json -n 1": every
+        subcommand accepts its options after its arguments, and a script that
+        wrote ``mem "$q" --json`` got human output (or nothing) instead of
+        JSON, with exit code 0.
+        """
+        _add_history("git status")
+        _add_history("git push")
+
+        result = runner.invoke(cli, ["git", "--json", "-n", "1"])
+
+        assert result.exit_code == 0
+        assert len(json.loads(result.stdout)) == 1
+
+    def test_json_after_a_query_with_no_matches_is_an_empty_list(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """The measured failure: ``mem zzz --json`` printed nothing at all."""
+        _add_history("git status")
+
+        result = runner.invoke(cli, ["zzzz-nothing-matches-this", "--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == []
+        assert result.stderr == ""
+
+    def test_a_flag_mem_does_not_own_stays_a_query_word(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        """``mem git commit -m`` searches for exactly that.
+
+        Shell fragments are full of flags; only mem's own options are lifted
+        out of the query, everything else is text to match.
+        """
+        _add_history("git commit -m fix")
+        _add_history("git commit --amend")
+
+        result = runner.invoke(cli, ["--json", "git", "commit", "-m"])
+
+        assert result.exit_code == 0
+        assert [e["command"] for e in json.loads(result.stdout)] == [
+            "git commit -m fix"
+        ]
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from mem import concepts as mem_concepts
 from mem.capture import get_git_repo
 from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
 from mem.history import ImportPlan
-from mem.render import console, err_console, fit, plain, safe
+from mem.render import console, err_console, fit, no_matches, plain, safe
 
 
 def _protected_args(ctx: click.Context) -> list[str]:
@@ -46,16 +46,30 @@ def _protected_args(ctx: click.Context) -> list[str]:
 class MemGroup(click.Group):
     """Custom group that treats unknown commands as search queries."""
 
-    def invoke(self, ctx):
-        # If the first arg isn't a known subcommand, treat it as a search query
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        rest = super().parse_args(ctx, list(args))
         protected = _protected_args(ctx)
-        args = list(protected) + list(ctx.args)
-        if args and args[0] not in self.commands:
+        if protected and protected[0] not in self.commands:
+            # A query, not a subcommand. Click stopped reading the group's
+            # own options at the first positional because what follows a
+            # subcommand belongs to that subcommand — but here there is none,
+            # and ``mem foo --json`` searched for the literal text "foo --json"
+            # (nothing matched, nothing was printed, exit 0). Re-read the
+            # whole line with mem's options allowed anywhere; anything that
+            # is not one of them (``-m``, ``--force``) stays a query word, so
+            # ``mem git commit -m`` still searches for what it says.
+            ctx.allow_interspersed_args = True
+            ctx.ignore_unknown_options = True
+            # Click 8.2+ keeps the first value it stored for a parameter, so
+            # without this the second pass parses ``--json`` and drops it.
+            ctx.params.clear()
+            rest = super().parse_args(ctx, list(args))
+            protected = _protected_args(ctx)
             ctx.ensure_object(dict)
-            ctx.obj["query_args"] = args
+            ctx.obj["query_args"] = [*protected, *ctx.args]
             protected.clear()
             ctx.args.clear()
-        return super().invoke(ctx)
+        return rest
 
 
 def _current_repo() -> str | None:
@@ -99,7 +113,13 @@ def _relative_time(ts: int) -> str:
 @click.option("--limit", "-n", default=10, help="Maximum results")
 @click.pass_context
 def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
-    """mem — your shell history, understood."""
+    """mem — your shell history, understood.
+
+    Anything that is not a command is a search: ``mem docker compose`` lists
+    the captured commands containing every word given, one per line. When
+    nothing matches, stdout stays empty, one line on stderr says so, and the
+    exit code is still 0.
+    """
     if ctx.invoked_subcommand is not None:
         return
 
@@ -151,7 +171,8 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
         return
 
     if not results:
-        return  # Empty results, no error (exit 0)
+        no_matches(query)  # stderr only: stdout is the pipeable surface
+        return
 
     for i, (cmd, score) in enumerate(results, 1):
         rank = f" {i:>2}"
