@@ -526,6 +526,32 @@ class TestRendering:
         assert "gotcha" in body
 
     @pytest.mark.parametrize("columns", [20, 40, 80, 120])
+    def test_the_query_cannot_repaint_the_terminal_or_wrap_the_header(
+        self, columns: int
+    ):
+        """The initial query is the live ``$BUFFER`` — as untrusted as history.
+
+        Every result row was scrubbed and clamped; the header wrote the query
+        raw. A pasted OSC title sequence in the buffer retitled the window on
+        Ctrl+R, and a long buffer wrapped the header, pushing the last result
+        row off the alternate screen.
+        """
+        hostile = "echo \x1b]0;pwned\x07\x1b[2J" + "y" * 300
+        finder = tui.Finder([line_of("ls")], None, query=hostile)
+
+        header = finder.frame(rows=24, columns=columns).split("\r\n")[0]
+        # Every frame opens with the finder's own clear-screen sequence; what
+        # follows it is the header and must contain no sequence of its own.
+        assert header.startswith(tui._CLEAR)
+        header = header[len(tui._CLEAR) :]
+
+        assert "\x1b]0;" not in header
+        assert "\x07" not in header
+        assert "\x1b[2J" not in header
+        assert "echo" in header
+        assert tui.display_width(strip_ansi(header)) <= columns, repr(header)
+
+    @pytest.mark.parametrize("columns", [20, 40, 80, 120])
     def test_long_commands_are_truncated_to_the_terminal_width(self, columns: int):
         """One column too many and every row wraps, doubling the list height."""
         finder = tui.Finder([line_of("x" * 500)], None, query="xxx")

@@ -430,9 +430,15 @@ def render(
     window = results[first : first + height]
 
     out = [_CLEAR]
+    counter = f"{len(results)}/{total}"
+    # The query is untrusted too: the hook passes the live $BUFFER, and a
+    # pasted OSC title sequence in it retitled the window from the header
+    # while every result row scrubbed it. Clamped as well — "mem " before it,
+    # "▏  " and the counter after — because a header that wraps pushes the
+    # last result row off the alternate screen.
+    shown = _visible(query, columns - 4 - 3 - len(counter))
     out.append(
-        f"{_BOLD}mem{_RESET} {query}"
-        f"{_DIM}▏{_RESET}  {_DIM}{len(results)}/{total}{_RESET}\r\n"
+        f"{_BOLD}mem{_RESET} {shown}{_DIM}▏{_RESET}  {_DIM}{counter}{_RESET}\r\n"
     )
     out.append(f"{_DIM}{'─' * max(columns, 1)}{_RESET}\r\n")
 
