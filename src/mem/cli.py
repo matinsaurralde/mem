@@ -738,6 +738,11 @@ def forget(query: str, yes: bool) -> None:
     """Permanently delete commands matching a query."""
     from mem import storage
 
+    if not query.strip():
+        raise click.BadParameter(
+            "an empty query matches every command.", param_hint="QUERY"
+        )
+
     # Preview matches
     matches = []
     for cmd in storage.read_all_commands():

@@ -1117,3 +1117,24 @@ class TestBackgroundSync:
 
         assert result.exit_code == 0
         assert rotate.call_count == 1
+
+
+class TestForgetRefusesAnEmptyQuery:
+    """An empty query is a substring of everything, so it deleted the store.
+
+    The confirmation counted only history lines, never saying that every saved
+    command, runbook, variable and pattern would go too.
+    """
+
+    @pytest.mark.parametrize("query", ["", "   "])
+    def test_nothing_is_deleted(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None, query: str
+    ) -> None:
+        _seed_every_surface("git status")
+
+        result = runner.invoke(cli, ["forget", query, "--yes"])
+
+        assert result.exit_code == 2
+        assert "empty query" in result.stderr
+        assert [c.command for c in storage.read_all_commands()] == ["git status"]
+        assert storage.read_group_file(storage.GROUPS_GLOBAL_FILE).saved
