@@ -318,17 +318,21 @@ def sync_cmd() -> None:
     if not storage.try_sync_lock():
         return
 
+    log = logging.getLogger("mem.sync")
     try:
         from mem.patterns import sync_all_patterns
 
         sync_all_patterns(silent=True)
-        # Rotation lives here rather than in the capture path because it
-        # rewrites every history file, which is far too much work to do on a
-        # prompt. It also means retention only ever runs if this command does —
-        # which for four months it did not.
+    except Exception:
+        log.debug("background pattern extraction failed", exc_info=True)
+
+    # Rotation lives here rather than in the capture path because it rewrites
+    # every history file, which is far too much work to do on a prompt. It has
+    # its own `try` because retention must not depend on extraction succeeding.
+    try:
         storage.rotate()
     except Exception:
-        logging.getLogger("mem.sync").debug("background sync failed", exc_info=True)
+        log.debug("background rotation failed", exc_info=True)
 
 
 @cli.command()

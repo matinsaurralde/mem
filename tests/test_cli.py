@@ -1064,3 +1064,19 @@ class TestSearchShowsTheRepo:
         assert "infra" in result.stdout
         assert "backend" in result.stdout
         assert "/Users" not in result.stdout
+
+
+class TestBackgroundSync:
+    def test_rotation_runs_even_when_pattern_extraction_fails(
+        self, tmp_mem_dir, runner: CliRunner
+    ) -> None:
+        """Retention shared a ``try`` with extraction, so any extraction error
+        silently stopped the 90-day rotation for good."""
+        with (
+            patch("mem.patterns.sync_all_patterns", side_effect=OSError("read-only")),
+            patch.object(storage, "rotate") as rotate,
+        ):
+            result = runner.invoke(cli, ["_sync"])
+
+        assert result.exit_code == 0
+        assert rotate.call_count == 1

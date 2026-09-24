@@ -485,7 +485,7 @@ def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
     for cmd in storage.read_all_commands():
         parts = cmd.command.split()
         if parts:
-            tool_commands[parts[0]].append(cmd.command)
+            tool_commands[storage.tool_name(parts[0])].append(cmd.command)
 
     new_count = 0
     updated_count = 0
@@ -501,10 +501,15 @@ def sync_all_patterns(silent: bool = False) -> tuple[int, int]:
         if remaining <= 0:
             break  # Out of budget; the next sync picks up where this stopped
 
-        existing = storage.read_patterns(tool)
-        spent = run_pattern_extraction(
-            tool, commands=commands, budget=remaining, existing=existing
-        )
+        # One tool's unwritable file must not cost every other tool its patterns.
+        try:
+            existing = storage.read_patterns(tool)
+            spent = run_pattern_extraction(
+                tool, commands=commands, budget=remaining, existing=existing
+            )
+        except (OSError, ValueError):
+            logger.debug("pattern extraction failed for %r", tool, exc_info=True)
+            continue
         remaining -= max(spent, 0)
 
         if existing is None:

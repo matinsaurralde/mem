@@ -172,8 +172,20 @@ def session_file(date: str) -> Path:
     return MEM_DIR / "sessions" / f"{date}.jsonl"
 
 
+def tool_name(program: str) -> str:
+    """The name a program's patterns are filed under: ``/usr/bin/git`` is ``git``."""
+    return os.path.basename(program)
+
+
 def pattern_file(tool: str) -> Path:
-    """Path to a tool's pattern file."""
+    """Path to a tool's pattern file.
+
+    Raises ValueError for anything but a plain name. The tool used to be a
+    command's raw first word, so ``/abs/dir/tool.sh`` wrote its patterns into
+    /abs/dir, outside ~/.mem, and tightened that directory to 0700.
+    """
+    if tool in ("", ".", "..") or "/" in tool:
+        raise ValueError(f"not a tool name: {tool!r}")
     return MEM_DIR / "patterns" / f"{tool}.json"
 
 

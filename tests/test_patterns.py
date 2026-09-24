@@ -1123,3 +1123,58 @@ class TestRealAppleFoundationModels:
 
         assert isinstance(summary, str)
         assert summary.strip()
+
+
+class TestPatternFilesStayInsideMem:
+    """A pattern file is named after its tool, and a tool is a name, not a path.
+
+    The key was the raw first token, so ``/abs/dir/deploy.sh`` run five times
+    wrote ``/abs/dir/deploy.sh.json`` — outside ~/.mem — and tightened that
+    directory to 0700. Where the directory was not writable, the error ended
+    the whole sync, and with it every other tool's extraction.
+    """
+
+    def test_a_tool_run_by_path_is_filed_under_its_name(self, tmp_mem_dir, tmp_path):
+        import stat
+
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        scripts.chmod(0o755)
+        now = int(time.time())
+        for i in range(6):
+            storage.append_command(
+                make_command(command=f"{scripts}/deploy.sh --target t{i}", ts=now)
+            )
+
+        with patch.object(patterns, "_apple_fm_available", return_value=False):
+            patterns.sync_all_patterns(silent=True)
+
+        assert list(scripts.iterdir()) == []
+        assert stat.S_IMODE(scripts.stat().st_mode) == 0o755
+        assert storage.read_patterns("deploy.sh") is not None
+
+    @pytest.mark.parametrize("tool", ["../x", "/etc/x", "a/b", "", ".", ".."])
+    def test_a_path_is_never_a_pattern_file_name(self, tool):
+        with pytest.raises(ValueError):
+            storage.pattern_file(tool)
+
+    def test_one_tool_failing_does_not_stop_the_others(self, tmp_mem_dir):
+        now = int(time.time())
+        for i in range(7):
+            storage.append_command(make_command(command=f"tool-a x{i}", ts=now))
+        for i in range(6):
+            storage.append_command(make_command(command=f"tool-b x{i}", ts=now))
+        real = patterns.run_pattern_extraction
+
+        def flaky(tool, **kwargs):
+            if tool == "tool-a":
+                raise OSError("read-only directory")
+            return real(tool, **kwargs)
+
+        with (
+            patch.object(patterns, "run_pattern_extraction", side_effect=flaky),
+            patch.object(patterns, "_apple_fm_available", return_value=False),
+        ):
+            patterns.sync_all_patterns(silent=True)
+
+        assert storage.read_patterns("tool-b") is not None
