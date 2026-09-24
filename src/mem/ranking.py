@@ -17,6 +17,7 @@ pattern that put a stale shell hook in front of every pip user.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Sequence
 
 from mem import picks
@@ -143,6 +144,42 @@ def matches(command: str, query_terms: Sequence[str]) -> bool:
     """True if every term appears somewhere in the command, case-insensitively."""
     lowered = command.lower()
     return all(term in lowered for term in query_terms)
+
+
+# --- what counts as history --------------------------------------------------
+#
+# Capture, storage, the finder and import all decide what a command is, and the
+# finder cannot import Pydantic, so the rule lives here beside `matches`.
+
+
+def canonical(command: str) -> str | None:
+    """The command as history stores and compares it, or None if it is not history.
+
+    Surrounding whitespace is dropped, so ``ls`` and ``ls `` are one command.
+    mem's own invocations are not history: recording them made a repeated search
+    answer itself, and wrote ``mem forget SECRET`` back to disk as it deleted it.
+    """
+    command = command.strip()
+    if not command or _runs_mem(command):
+        return None
+    return command
+
+
+def repo_name(repo: str | None) -> str:
+    """How listings show a repo: its directory name, or ``global``."""
+    if not repo:
+        return "global"
+    return os.path.basename(repo.rstrip("/")) or repo
+
+
+def _runs_mem(command: str) -> bool:
+    """True when the first word, after any NAME=value prefixes, is mem."""
+    for word in command.split():
+        name, equals, _ = word.partition("=")
+        if equals and name.isidentifier():
+            continue
+        return os.path.basename(word) == "mem"
+    return False
 
 
 def score(

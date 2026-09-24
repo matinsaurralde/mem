@@ -14,7 +14,7 @@ import time
 import uuid
 
 from mem.models import CapturedCommand, SessionState, WorkSession
-from mem import storage
+from mem import ranking, storage
 
 # Idle seconds that end a work session. The one definition: `mem promote`
 # re-derives sessions from the command files (ADR-012) and imports this rather
@@ -83,15 +83,17 @@ def capture_command(raw: str, directory: str, exit_code: int, duration_ms: int) 
     Builds a CapturedCommand with the current timestamp and git repo,
     then appends it to the appropriate JSONL file.
 
-    Terminal noise is dropped before anything runs — no repo lookup, no
-    session update, no sync counter — and silently, like every other skip in
-    the capture path (`mem _capture` never prints and always exits 0).
+    Terminal noise and whatever :func:`mem.ranking.canonical` rejects are
+    dropped before anything runs — no repo lookup, no session update, no sync
+    counter — and silently, like every other skip in the capture path
+    (`mem _capture` never prints and always exits 0).
     """
-    if looks_like_terminal_noise(raw):
+    command = ranking.canonical(raw)
+    if command is None or looks_like_terminal_noise(command):
         return
     repo = get_git_repo(directory)
     cmd = CapturedCommand(
-        command=raw,
+        command=command,
         ts=int(time.time()),
         dir=directory,
         repo=repo,

@@ -326,7 +326,10 @@ def search_patterns(tool: str) -> list[CommandPattern]:
     Returns patterns sorted by frequency (most common first).
     Returns empty list if no patterns exist for this tool.
     """
-    pf = storage.read_patterns(tool)
+    try:
+        pf = storage.read_patterns(storage.tool_name(tool))
+    except ValueError:
+        return []  # not a program name, so there is no pattern file for it
     if pf is None:
         return []
     return sorted(pf.patterns, key=lambda p: p.frequency, reverse=True)

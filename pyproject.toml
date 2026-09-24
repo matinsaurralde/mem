@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cli-mem"
-version = "0.5.1"
+version = "0.5.2"
 description = "Privacy-first CLI that turns shell history into searchable memory"
 license = "MIT"
 readme = "README.md"
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Shells",
 ]
 # Upper bounds are deliberate. Unpinned ranges already bit us once: Click 9

@@ -19,12 +19,20 @@ import click
 from rich.panel import Panel
 from rich.text import Text
 
-from mem import __version__
+from mem import __version__, ranking
 from mem import concepts as mem_concepts
 from mem.capture import get_git_repo
 from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
 from mem.history import ImportPlan
-from mem.render import console, err_console, fit, no_matches, plain, safe
+from mem.render import (
+    console,
+    err_console,
+    fit,
+    no_matches,
+    plain,
+    printable,
+    safe,
+)
 
 
 def _protected_args(ctx: click.Context) -> list[str]:
@@ -188,7 +196,7 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
         # 16 the other tables use — were chosen by eye for an 80-column
         # terminal, not measured.
         command_text = fit(cmd.command, 40)
-        repo_text = fit(cmd.repo or "global", 12)
+        repo_text = fit(ranking.repo_name(cmd.repo), 12)
         time_text = _relative_time(cmd.ts)
         console.print(
             f"{rank}  {safe(command_text)}  [dim cyan]{safe(repo_text)}[/]"
@@ -318,17 +326,21 @@ def sync_cmd() -> None:
     if not storage.try_sync_lock():
         return
 
+    log = logging.getLogger("mem.sync")
     try:
         from mem.patterns import sync_all_patterns
 
         sync_all_patterns(silent=True)
-        # Rotation lives here rather than in the capture path because it
-        # rewrites every history file, which is far too much work to do on a
-        # prompt. It also means retention only ever runs if this command does —
-        # which for four months it did not.
+    except Exception:
+        log.debug("background pattern extraction failed", exc_info=True)
+
+    # Rotation lives here rather than in the capture path because it rewrites
+    # every history file, which is far too much work to do on a prompt. It has
+    # its own `try` because retention must not depend on extraction succeeding.
+    try:
         storage.rotate()
     except Exception:
-        logging.getLogger("mem.sync").debug("background sync failed", exc_info=True)
+        log.debug("background rotation failed", exc_info=True)
 
 
 @cli.command()
@@ -364,15 +376,13 @@ def session(query: str, as_json: bool) -> None:
     for i, s in enumerate(results, 1):
         dt = datetime.fromtimestamp(s.started_at, tz=timezone.utc)
         header = safe(
-            f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {s.repo or 'global'}"
+            f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {ranking.repo_name(s.repo)}"
         )
 
-        lines = []
-        for j, cmd in enumerate(s.commands, 1):
-            lines.append(f"  {j:>2}  {cmd}")
-
         # Text, not a markup string: Panel parses its renderable for tags.
-        panel_content = plain("\n".join(lines))
+        panel_content = Text("\n").join(
+            plain(f"  {j:>2}  {cmd}") for j, cmd in enumerate(s.commands, 1)
+        )
         console.print(Panel(panel_content, title=header, border_style="dim"))
         console.print()
 
@@ -386,7 +396,9 @@ def session(query: str, as_json: bool) -> None:
             if 0 <= idx < len(results):
                 console.print()
                 for cmd in results[idx].commands:
-                    if not click.confirm(f"  Run: {cmd}?", default=True, err=True):
+                    if not click.confirm(
+                        f"  Run: {printable(cmd)}?", default=True, err=True
+                    ):
                         continue
                     console.print(f"  [dim]$ {safe(cmd)}[/]")
                     try:
@@ -439,7 +451,7 @@ def stats(as_json: bool) -> None:
     if repo_freq:
         console.print("Top repos:")
         for i, (repo, count) in enumerate(repo_freq, 1):
-            console.print(f"  {i:>2}  {safe(fit(repo, 20))} {count}")
+            console.print(f"  {i:>2}  {safe(fit(ranking.repo_name(repo), 20))} {count}")
 
 
 def _fix_line(label: str, style: str, value: str) -> Text:
@@ -726,6 +738,11 @@ def forget(query: str, yes: bool) -> None:
     """Permanently delete commands matching a query."""
     from mem import storage
 
+    if not query.strip():
+        raise click.BadParameter(
+            "an empty query matches every command.", param_hint="QUERY"
+        )
+
     # Preview matches
     matches = []
     for cmd in storage.read_all_commands():
@@ -760,7 +777,7 @@ def forget(query: str, yes: bool) -> None:
         # 20 rows of preview before the confirmation: chosen by eye, not
         # measured. Column widths: see the search listing.
         for i, cmd in enumerate(matches[:20], 1):
-            repo_text = cmd.repo or "global"
+            repo_text = ranking.repo_name(cmd.repo)
             time_text = _relative_time(cmd.ts)
             console.print(
                 f"  {i:>2}  {safe(fit(cmd.command, 40))}  [dim cyan]{safe(repo_text)}[/]"

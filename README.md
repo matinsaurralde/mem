@@ -1,37 +1,36 @@
-<p align="center">
-  <h1 align="center">mem</h1>
-  <p align="center">
-    <strong>Your shell, remembered.</strong>
-  </p>
-  <p align="center">
-    A privacy-first CLI that captures, searches, and organizes your terminal history<br>
-    with on-device AI. Nothing ever leaves your machine.
-  </p>
-  <p align="center">
-    <a href="#install"><img alt="macOS 26+" src="https://img.shields.io/badge/macOS-26%2B-blue?logo=apple&logoColor=white"></a>
-    <a href="#install"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white"></a>
-    <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
-    <a href="PHILOSOPHY.md"><img alt="Privacy: on-device" src="https://img.shields.io/badge/privacy-100%25%20on--device-brightgreen"></a>
-  </p>
-</p>
+<div align="center">
+
+# mem
+
+**Your shell, remembered.**
+
+A privacy-first CLI that captures, ranks, and organizes your terminal history.<br>
+Nothing ever leaves your machine.
+
+[![CI](https://github.com/matinsaurralde/mem/actions/workflows/ci.yml/badge.svg)](https://github.com/matinsaurralde/mem/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/cli-mem?label=pypi&color=3776AB)](https://pypi.org/project/cli-mem/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#requirements)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+</div>
 
 ---
 
 ## What mem does
 
-mem silently captures every command you type, then lets you search, save, and replay them — scoped to the git repo you're in.
+mem silently captures every command you type — with its directory, git repo, exit code and duration — and gives it back ranked, scoped to the repo you're in.
 
 ```bash
-Ctrl+R                 # interactive finder, ranked
-mem deploy             # or search from the command line
-mem fix                # what fixed the last thing that broke
-mem promote            # sequences you repeat, ready to become runbooks
-mem save "cmd" -t ops  # save a command to a group
-mem run ops            # run the group interactively
-mem vars set API_KEY   # store a secret for saved commands
+mem deploy               # search your history
+mem kubectl -p           # the patterns you actually use
+mem save "cmd" -t ops    # save a command to a group
+mem run ops              # run the group, step by step
 ```
 
-mem replaces `Ctrl+R` rather than competing with it. Your shell's version does a literal reverse scan; mem ranks by how often you run a command, how recently, whether it's how the line *starts*, and which repo you're standing in. Unlike cloud-based tools, everything stays on your machine as plain text files in `~/.mem/` — readable with `cat`, greppable, and yours to delete.
+Press `Ctrl+R` to search interactively, right at your prompt.
+
+Your shell's own `Ctrl+R` does a literal reverse scan. mem ranks by how often you run a command, how recently, whether it *starts* with what you typed, and which repo you're standing in. Everything stays on your machine as plain text in `~/.mem/`.
 
 ---
 
@@ -44,33 +43,65 @@ brew install matinsaurralde/tap/mem
 # pip
 pip install cli-mem
 
-# With AI features (pattern extraction + credential detection)
+# pip, with on-device pattern extraction
 pip install "cli-mem[ai]"
 ```
 
-Then activate the shell hook for your shell:
+Then add the hook for your shell:
 
 ```bash
 # zsh
 echo 'eval "$(mem init zsh)"' >> ~/.zshrc
 source ~/.zshrc
 
-# bash
-echo 'eval "$(mem init bash)"' >> ~/.bashrc
-source ~/.bashrc
+# bash (macOS terminals read ~/.bash_profile; Ctrl+R needs bash 4+)
+echo 'eval "$(mem init bash)"' >> ~/.bash_profile
+source ~/.bash_profile
 
 # fish
 echo 'mem init fish | source' >> ~/.config/fish/config.fish
 source ~/.config/fish/config.fish
 ```
 
-That's it. Every command you type is now silently captured with full context (directory, git repo, exit code, duration), and **Ctrl+R** now searches it.
+That's it. From the next command on, everything you type is captured, and `Ctrl+R` searches it.
+
+To start from the history your shell has already been keeping:
+
+```bash
+mem import --from-shell-history --dry-run   # see what would be imported
+mem import --from-shell-history             # import it
+```
 
 ---
 
-## Ctrl+R
+## Search
 
-The shell hook rebinds Ctrl+R to mem's finder. Type to filter, `↑`/`↓` to move, `⏎` to put the command on your command line — where you can read it and edit it before running it. `esc` cancels and leaves your line untouched.
+Type `mem` followed by any words. A command matches when it contains every word, and the best matches come first.
+
+```bash
+mem kubectl              # one word
+mem docker compose       # every word must appear
+mem deploy -n 20         # more results (default: 10)
+mem deploy --json        # machine-readable output
+```
+
+```
+  1  kubectl apply -f deployment.yaml    infra       2h ago
+  2  kubectl get pods -n production      infra       1d ago
+  3  kubectl rollout status deploy/api   api         3d ago
+```
+
+When nothing matches literally, mem reads the words through a concept map, so a question finds the command that answers it:
+
+```bash
+mem "check disk space"   # -> du -sh .
+```
+
+When nothing matches at all, stdout stays empty, one line on stderr says so, and the exit code is still `0`.
+
+### Ctrl+R
+
+The shell hook binds `Ctrl+R` to mem's finder. Type to filter, `↑`/`↓` to move, `⏎` to put the command on your prompt — where you can read and edit it before running it. `esc` cancels and leaves your line untouched.
 
 ```
 mem kube▏  3/12417
@@ -81,89 +112,15 @@ mem kube▏  3/12417
 ↑↓ select · ⏎ accept · ^U clear · esc cancel
 ```
 
-Results are ranked by the same formula `mem <query>` uses, so the two never disagree. Commands that failed are marked, because "the one that worked" is usually what you are looking for.
+Commands that failed are marked with `✗`, and the finder never runs anything for you.
 
-**It learns from what you pick.** Choosing a result is the one moment you say, unambiguously, which command you meant — so mem counts it, and weighs it above everything it can only infer. One selection is enough to move a command past one you happen to have run twenty times:
+It also learns from what you pick. Choosing a result is the one moment you say exactly which command you meant, so a pick outweighs anything mem can only infer. If you never open the finder, your ranking is unaffected.
 
-```bash
-mem "git commit"                  # 1. git commit --amend   (run 20 times)
-                                  # 3. git commit -v        (run once)
-# ...pick `git commit -v` in the finder, once...
-mem "git commit"                  # 1. git commit -v
-```
-
-Picks fade with a three-week half-life, so a command you chose constantly last quarter stops steering results once you stop choosing it. They live in `~/.mem/picks.json` — the one file here that cannot be rebuilt from your history, and the only one worth backing up. If you never open the finder, your ranking is exactly what it was.
-
-It never runs anything for you. A history search that executes behind your back is how people delete the wrong branch.
-
-Prefer your shell's own Ctrl+R? Set `MEM_NO_KEYBINDING=1` before loading the hook; capture still works.
-
-### Import what you already typed
-
-The hook only sees commands typed after it was installed. To start from the years of history your shell has already been keeping:
-
-```bash
-mem import --from-shell-history --dry-run   # see what would be imported
-mem import --from-shell-history             # import it
-
-mem import --from-shell-history --shell zsh          # one shell only
-mem import --from-shell-history --file ~/backup.hist # a specific file
-```
-
-`~/.zsh_history`, `~/.bash_history` and `~/.local/share/fish/fish_history` are detected automatically. Imported commands keep their recorded timestamps where the file has them, and are back-dated (never stamped as "now") where it does not. Because a history file records no directory, exit code or duration, mem stores those as unknown rather than guessing, and imported commands go to the global scope.
-
-Running the import twice is safe: it never double-counts a command. Commands that look like they contain credentials are skipped, and the count is reported.
-
----
-
-## Search
-
-Just type `mem` followed by any keyword. Results are ranked by your current repo.
-
-```bash
-mem kubectl              # search by keyword
-mem "docker compose"     # search by phrase
-mem deploy -n 20         # more results
-mem deploy --json        # machine-readable output
-```
-
-```
-  1  kubectl apply -f deployment.yaml    infra       2h ago
-  2  docker compose up -d                backend     1d ago
-  3  fly deploy                          api         3d ago
-```
-
-### Ask in English
-
-You do not always remember the command. You remember what it was *for*. When a query matches nothing literally, mem re-reads it through a concept map — a dictionary from what people say to what they type — and answers with commands that share the meaning instead of the letters.
-
-```bash
-mem "how do I see what's listening on a port"   # -> lsof -i :8080
-mem "the command I used to fix the certificate" # -> openssl x509 -in cert.pem -noout -dates
-mem "check disk space"                          # -> du -sh * | sort -h
-```
-
-This is a fallback, never a filter. A query that matches literally is answered literally, with the same results in the same order as before — type `openssl` and you get `openssl`, not everything tagged "certificate". Only when substring search finds nothing does the map get a turn, and a synonym that appears everywhere in your history is weighted down to nothing, so a broad entry cannot drag unrelated commands up.
-
-The map is a plain JSON file you can read, grep and correct. Copy it and make it yours:
-
-```bash
-mem concepts > ~/.mem/concepts.json   # then edit it
-```
-
-```json
-{
-  "certificate": ["openssl", "x509", "cert", "pem", "tls", "certbot"],
-  "port": ["lsof", "netstat", "listen", "port", "8080"],
-  "deploy": ["deploy", "kubectl apply", "fly deploy", "ansible-playbook"]
-}
-```
-
-A concept you define replaces the shipped one of the same name; new concepts are added; everything else is untouched by upgrades. Keys starting with `_` are metadata — `_comment` for the comments JSON does not have, `_stopwords` for the filler words your language uses to ask a question (yours are added to the built-in English ones, so the map translates). A broken file prints a warning and mem falls back to the shipped map; it never stops searching.
+Prefer your shell's own `Ctrl+R`? Set `MEM_NO_KEYBINDING=1` before loading the hook. Capture keeps working.
 
 ### Patterns
 
-mem automatically learns structural patterns from your history using on-device AI. No manual step needed — extraction runs in the background every 20 commands.
+mem learns the structure of the commands you run and shows it with `-p`:
 
 ```bash
 mem kubectl -p
@@ -178,431 +135,90 @@ Patterns for "kubectl":
   kubectl apply -f <file>
 ```
 
----
-
-## Fix
-
-`mem fix` answers one question: **last time this failed, what did you do next that worked?**
-
-mem has been recording the exit code of every command since day one. `mem fix` reads them back, looking for a command that failed and a near-variant of it that succeeded seconds later — the shape of you reading an error message and retyping the line.
-
-```bash
-mem fix                  # the last thing that failed here
-mem fix npm build        # a specific one
-mem fix --json           # machine-readable
-mem fix -n 5             # show more candidate fixes
-```
-
-```
-  failed   npm run buld
-           exit 1 · 3m ago · /Users/dev/work/api
-
-  fixed by npm run build
-           seen 4 times · last worked 3m ago
-
-  also     npm run build --if-present
-           seen once · last worked 2d ago · one observation only
-
-           mem does not run it for you. Read it, then decide.
-```
-
-**It never runs anything.** `mem fix` prints the command and stops. Same reason `mem run` asks before each step: a tool that executes on your behalf is how people delete the wrong branch.
-
-**Confidence is repetition.** A pair seen four times and a pair seen once are different claims, and the output says which. Candidates are ranked by how often the pairing was observed, then by whether the fix has itself broken since, then by recency.
-
-```
-  fixed by npm ci
-           seen 3 times · last worked 1h ago
-           careful: this command has itself failed 2 times since.
-```
-
-**When there is no evidence, it says so.** No suggestion is invented:
-
-```
-  failed   terraform apply
-           exit 1 · just now · /Users/dev/infra
-
-           mem has no record of anything fixing this.
-```
-
-### What it will and won't pair
-
-The matching is deterministic — no AI, no network, just exit codes and text. It is deliberately strict, because a wrong "fix" suggested confidently is worse than no suggestion at all. A pair is only recorded when all of these hold:
-
-| Condition | Why |
-|---|---|
-| The first command exited non-zero, the second exited exactly `0` | A missing exit code is not a success |
-| At most 3 commands apart | You often `ls` and `cat` before fixing |
-| Typed within 60 seconds | Longer, and the connection is a guess |
-| Same terminal session | Two tabs in one repo interleave in one history file |
-| Same program (after ignoring `sudo`) | `git status` failing then `git push` working is two events |
-| The second is the first *retyped* | See below |
-
-"Retyped" means the edit has the shape of a correction: a flag or argument **added**, a flag **removed**, or **one token mistyped** — a transposition (`psuh` → `push`), a dropped letter (`buld` → `build`), a doubled one (`hostt` → `host`).
-
-It specifically does **not** use fuzzy string similarity, because that measures the wrong thing. `test_a.py`/`test_b.py` scores *higher* than `psuh`/`push`, so any threshold that catches the real typo also reports "the fix for `pytest tests/test_a.py` is `pytest tests/test_b.py`". Substituting one token for a different one is never treated as a correction.
-
-Things mem finds:
-
-```
-apt install htop        →  sudo apt install htop
-npm i                   →  npm i --legacy-peer-deps
-gti status              →  git status          (only when the shell said "command not found")
-kubectl get pods -n prd →  kubectl get pods -n prod
-npm ci --frozen-lockfile → npm ci
-```
-
-Things mem deliberately refuses, even though they sit next to each other in your history:
-
-```
-pytest tests/test_a.py  →  pytest tests/test_b.py     a different file
-terraform plan          →  terraform apply            the next step, not a repair
-brew install jq         →  brew install yq            a different package
-ssh prod-1              →  ssh prod-2                 a different host
-ls /nope                →  ls                         worked by doing less
-```
-
-Two consequences worth knowing:
-
-- **Imported history is invisible to `mem fix`.** `mem import` reads your old `.zsh_history`, which records no exit codes, so there is nothing to mine. Only commands captured by the shell hook are paired.
-- **Some real fixes are missed.** `git push` → `git pull --rebase` is not found, because the rule that would find it would also produce the false positives above. Missing a fix is invisible; inventing one is not.
-
-Credentials are removed from the output using the same redaction that guards the MCP server, so a `curl` with an auth header still shows you the fix without reprinting the token.
+No manual step: extraction runs in the background every 20 commands, with Apple Foundation Models on your Mac.
 
 ---
 
-## Promote
+## Scoping
 
-Groups are the most useful thing mem does and the least used, because building one means remembering to run `mem save` at the exact moment you're busy doing the thing. `mem promote` closes that gap: it reads the history you already have, finds sequences you repeat across separate work sessions, and works out which argument changed between runs.
+mem knows which git repo every command was run in.
 
-```bash
-mem promote              # what looks promotable
-mem promote 1            # save candidate 1 as a group (asks first)
-mem promote 1 --name ship
-mem promote --json
-```
-
-```
-$ mem promote
-
-   1.      kubectl-rollout
-           6 times · last 2d ago · strong
-           kubectl config use-context $CONFIG_ARG
-           kubectl apply -f deploy.yaml -n $CONFIG_ARG
-           kubectl rollout status deploy/api -n $CONFIG_ARG
-           $CONFIG_ARG was staging, prod, dev
-
-   2.      terraform-apply
-           4 times · last 6d ago · moderate
-           terraform fmt -recursive
-           terraform plan -out plan.tfplan
-           terraform apply plan.tfplan
-
-           mem promote <n> saves one as a group. It runs nothing.
-```
-
-```
-$ mem promote 1 --name deploy-staging
-
-  group    deploy-staging
-           kubectl config use-context $CONFIG_ARG
-           kubectl apply -f deploy.yaml -n $CONFIG_ARG
-           kubectl rollout status deploy/api -n $CONFIG_ARG
-           $CONFIG_ARG was staging, prod, dev
-
-Save these 3 commands as 'deploy-staging'? [y/N]: y
-Saved group deploy-staging with 3 commands.
-           mem run deploy-staging
-```
-
-The variable is the point. A sequence that recurs with a changing namespace or branch is worth *more* than an identical one, because that difference is precisely the parameter the runbook should take. `$CONFIG_ARG` above is a name mem derived, not a name it understood — rename it with `mem group edit`.
-
-### What it will and won't propose
-
-A sequence has to recur in **three separate sessions**. Repetitions inside one session don't count: a build loop run eight times in one afternoon is one episode of work, not eight.
-
-Commands that only *look* at things — `ls`, `cd`, `cat`, `git status` — are dropped before mining, so an inspection command between two steps doesn't break the sequence. Failed commands are dropped too: a command that exited non-zero isn't part of a working procedure.
-
-A token becomes a `$VAR` only in an argument position — never the program, never the subcommand after it, never a flag name. That's the rule that separates `git checkout main` / `git checkout staging` (a branch, so a variable) from `git push` / `git pull` (a different intent, so not the same sequence at all). Commands containing a pipe or a redirection are never generalised, because mem doesn't parse shell and won't guess inside one.
-
-**It will sometimes suggest `git add -A; git commit -m $MSG; git push`.** That really is a sequence you repeat, and it really is a poor runbook — the whole point is the message you type fresh each time. mem can't tell the difference from the outside. On the calibration corpus this was about one in eight suggestions. Skip it; it isn't a sign anything is broken.
-
-**Nothing is written without confirmation and nothing is ever executed.** A sequence containing something credential-shaped is shown with a warning and refused for promotion outright — there's no `--force`, because a secret in a saved runbook is a second copy of it on disk. Use `mem save --var` to save those steps with the secret as a variable instead.
-
-By default the five best candidates are shown. That number is calibrated, not cosmetic: ranking is what keeps the list trustworthy, and going deeper costs accuracy. See [ADR-012](docs/decisions/012-promote-mines-sequences-not-commands.md) for the corpus and the measurements.
+- **History** is stored per repo. Searching from inside a repo favors that repo's commands, and those of sibling checkouts, without hiding the rest.
+- **Groups and saved commands** live in either **repo scope** or **global scope**:
+  - inside a git repo they default to repo scope; outside one, to global scope
+  - `--global` / `-g` forces global scope
+  - a repo group **shadows** a global group with the same name
 
 ---
 
 ## Groups
 
-Groups are named collections of commands — like runbooks you can execute.
-
-### Save commands to a group
+Groups are named collections of commands — runbooks you can execute.
 
 ```bash
 mem save "kubectl get pods -n production" --group k8s --comment "list pods"
-mem save "docker compose up -d" -t deploy -c "start services"
-```
+mem save '!' -t troubleshooting      # the last command you ran
 
-Save the last command you ran:
+mem list                             # all groups and saved commands
+mem list k8s                         # the commands in one group
+mem list --json                      # JSON output
 
-```bash
-mem save "!" -t troubleshooting
-```
+mem run k8s                          # pick one step, or run them all
+mem run k8s -y                       # run every step without prompting
 
-### List groups
-
-```bash
-mem list                 # show all groups and saved commands
-mem list k8s             # show commands in a specific group
-mem list -g              # global scope only
-mem list -r              # current repo only
-mem list --json          # JSON output
-```
-
-### Run a group
-
-```bash
-mem run k8s              # run interactively (pick one or all)
-mem run deploy -y        # run all without prompts
-```
-
-### Manage groups
-
-```bash
-mem group rename old new       # rename a group
-mem group remove k8s           # delete a group
-mem group copy k8s --global    # copy from repo to global scope
-mem group edit k8s             # open in $EDITOR
-```
-
-### Export and import
-
-```bash
-mem export k8s                       # copy JSON to clipboard
-mem export k8s --format markdown     # copy as markdown
-mem export k8s --stdout              # print instead of clipboard
-
-mem import                           # import from clipboard (auto-detect format + group name)
-mem import -t renamed                # import from clipboard with custom group name
-mem import runbook.json -t ops       # import from file (auto-detects format)
-mem import runbook.md -t ops         # markdown works too
+mem group rename k8s kube            # rename, remove, copy --global, or edit in $EDITOR
+mem export k8s --stdout              # print as JSON (without --stdout: copy to the clipboard)
+mem import runbook.json -t ops       # import from a file, or from the clipboard with no file
 ```
 
 ---
 
 ## Variables
 
-Saved commands can contain `$VAR_NAME` placeholders that get resolved at runtime. Values never get stored in group files.
-
-### Save commands with variables
+Saved commands can contain `$VAR_NAME` placeholders, resolved when the command runs. Values are never stored in group files.
 
 ```bash
-# Variables are detected automatically from $VAR_NAME tokens
 mem save "ssh -i ~/.ssh/\$KEY_NAME ubuntu@\$BASTION_HOST" -t ssh
-
-# Set a default value with --var
 mem save "kubectl get pods -n \$NAMESPACE" -t k8s --var NAMESPACE=production
-
-# AI detects hardcoded credentials and suggests variables
-mem save "curl -H 'Authorization: Bearer eyJhbGci...' https://api.example.com/users" -t api
-#  Detected possible credential: Bearer token
-#  Suggested: curl -H 'Authorization: Bearer $API_TOKEN' ...
-#  Variable name [API_TOKEN]: █
 ```
 
-### Resolution priority
+When `mem run` meets a variable, it takes the first value it finds, in this order:
 
-When `mem run` encounters variables, it resolves them in this order:
-
-1. **Inline arguments** — `mem run api API_TOKEN=abc123`
-2. **Shell environment** — `export API_TOKEN=abc123`
-3. **Persistent store** — `mem vars set API_TOKEN` (macOS Keychain)
-4. **Default value** — from `--var NAME=default` at save time
-5. **Interactive prompt** — asks you, only as a last resort
-
-All prompts are collected upfront before any command runs. With `--yes`, unresolved variables cause an immediate error listing what's missing.
-
-### Variable store
-
-For values that persist across sessions but shouldn't be in `.zshrc`:
+1. **Inline** — `mem run api API_TOKEN=abc123`
+2. **Environment** — `export API_TOKEN=abc123`
+3. **Variable store** — `mem vars set API_TOKEN`
+4. **Default** — from `--var NAME=default` at save time
+5. **Prompt** — asked once, before any command runs
 
 ```bash
-mem vars set API_TOKEN           # hidden input (like sudo)
-mem vars set DB_HOST staging.db  # inline for non-sensitive values
-mem vars list                    # shows names and backend, never values
+mem vars set API_TOKEN           # hidden input, like sudo
+mem vars list                    # names, never values
 mem vars remove API_TOKEN
-mem vars clear
 ```
 
-**Values live in the macOS Keychain**, not in a file ([ADR-010](docs/decisions/010-keychain-for-variable-values.md)). They are encrypted at rest under your login password, and mem hands them to `/usr/bin/security` over a pipe — never on a command line, where `ps` would show them to every process on the machine.
+Stored values live in the **macOS Keychain**, under the service `mem-cli-vars`, never in a file. mem hands them to `/usr/bin/security` over a pipe, so they never appear on a command line where `ps` could see them.
 
-```bash
-# Everything mem stores is filed under one service, and it is yours:
-security find-generic-password -s mem-cli-vars -a API_TOKEN -w
-```
-
-They are also visible in **Keychain Access** under the service `mem-cli-vars`, listed as `mem-cli-vars:API_TOKEN`.
-
-If you used `mem vars` before this landed, your values are moved out of `~/.mem/vars.json` and into the Keychain the first time you run any `mem vars` command — one at a time, and each plaintext copy is deleted only after the Keychain has been read back and agrees. `vars.json` stays as the index of *which* variables exist:
-
-```json
-{"vars": {"API_TOKEN": {"value": null, "last_used": 0, "backend": "keychain"}}}
-```
-
-**When the Keychain is not available** — a locked keychain, a declined authorization prompt, a non-macOS machine — `mem vars set` fails and stores nothing. It does not fall back to writing your token in cleartext under a promise of encryption. Values that could not be migrated keep working and are listed as `plaintext`, with a warning, every time:
+`mem list <group>` shows whether each variable is ready:
 
 ```
-Stored variables (values hidden) — macOS Keychain, service 'mem-cli-vars'
-  API_TOKEN            keychain   last used 2h ago
-  LEGACY_TOKEN         plaintext  never used
-
-  ! 1 value(s) are still in plaintext in ~/.mem/vars.json.
+● global / api
+  ──────────────────────────────────────────────────
+  1. curl -H "Authorization: Bearer $API_TOKEN" .../users/$USER_ID
+     ✓ $API_TOKEN  from environment
+     ⚠ $USER_ID  unset — pass inline: mem run api USER_ID=<value>
 ```
-
-Two limits worth knowing: a value is capped at roughly 2 KB (`security` truncates longer command lines instead of failing, so mem refuses them), and `mem forget` has to ask the Keychain for each stored value in order to match it — the only place mem reads them all.
-
-### Variable status in listings
-
-`mem list` shows whether each variable is ready:
-
-```
-● backend / api
-  ──────────────────────────────────────────────────────
-  1. curl -H 'Authorization: Bearer $API_TOKEN' .../users/$USER_ID
-     ✓ $API_TOKEN  resolved from environment
-     ⚠ $USER_ID    unset — pass inline: mem run api USER_ID=42
-```
-
----
-
-## Scoping
-
-Every group and saved command lives in either **repo scope** (tied to the current git repo) or **global scope** (available everywhere).
-
-- Inside a git repo: defaults to repo scope
-- Outside a git repo: defaults to global scope
-- Use `--global` / `-g` to force global scope
-- A repo group **shadows** a global group with the same name
-
----
-
-## Sessions
-
-mem groups your commands into work sessions (based on 5-minute idle gaps and repo changes) so you can recall exactly what you did.
-
-```bash
-mem session "api outage"       # search sessions by keyword
-mem session debug --json       # machine-readable output
-```
-
-```
-┌ [1] Session: 2026-03-07 14:30  myapp ──────────────────┐
-│   1  kubectl logs api-7f9b --tail=100                   │
-│   2  kubectl get pods -n production                     │
-│   3  kubectl rollout restart deploy api                 │
-│   4  curl -s localhost:8080/health                      │
-└─────────────────────────────────────────────────────────┘
-
-Replay a session? [number/n]: _
-```
-
-Replaying a session executes each command with per-command confirmation.
-
----
-
-## AI agents (MCP)
-
-mem can lend your shell memory to an AI agent — Claude Code, Claude Desktop, or
-anything else that speaks MCP — so it stops guessing at commands you have
-already run a hundred times.
-
-**It is off until you turn it on.**
-
-```bash
-mem agent status                 # disabled by default
-mem agent enable                 # opt in
-mem agent log                    # what an agent asked for, and when
-mem agent disable                # revoke — takes effect on the next request
-```
-
-### Register the server
-
-Claude Code:
-
-```bash
-claude mcp add mem -- mem mcp
-```
-
-Claude Desktop (`claude_desktop_config.json`) or a project-level `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "mem": {
-      "command": "mem",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-That is the whole configuration. `mem mcp` speaks JSON-RPC 2.0 over stdin and
-stdout — there is no port, no URL and no token, because there is no server
-listening for anything. Run it by hand and it will simply wait on stdin.
-
-### What an agent can see
-
-| Tool | What it answers |
-|---|---|
-| `search_history` | How *you* actually run a tool in this repo — real flags, real hosts |
-| `list_runbooks` | Which named groups you have curated |
-| `get_runbook` | The ordered commands of one runbook, with your comments |
-| `recent_failures` | What broke recently, and what you ran next to fix it |
-
-Read-only, all four. **No tool executes anything.** An agent gets the *text* of
-a command to propose to you; you still press Enter.
-
-### What it cannot see
-
-- Anything, until `mem agent enable`.
-- Credentials: every string leaving mem passes through redaction first — AWS
-  keys, bearer tokens and JWTs, `PGPASSWORD=`, `curl -u user:pass`,
-  `--token=`, private key blobs, `.env`-style assignments and vendor tokens
-  (`ghp_`, `xox…`, `sk-…`, `AKIA…`) come out as `[REDACTED]`.
-- Your stored variable values (`~/.mem/vars.json`) — they are never exposed;
-  a runbook shows `$API_TOKEN`, never the token.
-
-Every request is appended to `~/.mem/agent-audit.jsonl`, redacted, and shown by
-`mem agent log`. `mem forget` scrubs that file too.
 
 ---
 
 ## Other commands
 
 ```bash
-mem fix                          # what fixed the last failure (see Fix)
-mem fix kubectl --json           # ...for a specific one, machine-readable
-mem promote                      # repeated sequences worth saving (see Promote)
-mem promote 1 --name deploy      # ...turn one into a group, after confirming
+mem fix                          # what fixed the last command that failed
 mem stats                        # top commands, repos, totals
-mem stats --json                 # machine-readable stats
 mem forget "API_KEY=sk-..."      # permanently delete matching commands
-mem forget "password" --yes      # skip confirmation
-mem init zsh                     # print shell hook code (also: bash, fish)
-mem tui                          # the Ctrl+R finder, on demand
-mem tui -- kubectl               # ...opened on a query
-
-mem import --from-shell-history --dry-run   # see what your old history holds
-mem import --from-shell-history             # bring it in
-
-mem agent status                 # is AI-agent access on?
-mem agent enable / disable       # turn it on or revoke it
-mem agent log                    # what an agent asked for, and when
-mem mcp                          # run the MCP server (agents call this, not you)
+mem tui -- kubectl               # open the Ctrl+R finder on a query
+mem init zsh                     # print the shell hook (also: bash, fish)
 ```
-
-`mem forget` reaches everywhere mem stores text — history, saved commands and runbooks, variables, extracted patterns, sessions and the agent log — not just the command history.
 
 ---
 
@@ -612,103 +228,69 @@ mem mcp                          # run the MCP server (agents call this, not you
 You type a command
        │
        ▼
-  Shell hook (preexec/precmd)
+  Shell hook (preexec / precmd)
        │
        ▼
-  mem _capture  ← runs in background, <5ms
+  mem _capture              ← in the background; never blocks your prompt
        │
-       ├─→ Append to ~/.mem/repos/<repo-slug>-<hash>.jsonl
-       └─→ Every 20 captures: background pattern extraction
+       ├─→ append to ~/.mem/repos/<repo>-<hash>.jsonl
+       └─→ every 20 captures: pattern extraction and retention, in the background
 ```
 
-**Search scoring:**
+### Ranking
 
 ```
-score = (picks × 0.40) + (frequency × 0.21) + (recency × 0.21)
-      + (prefix × 0.09) + (context × 0.09)
+score = 0.40 × picks + 0.21 × frequency + 0.21 × recency + 0.09 × prefix + 0.09 × context
 ```
 
-- **Picks** — how often you chose this command in the finder, halving every
-  21 days. Weighted highest because it is the only signal that is not an
-  inference: it is you having already answered the question. Zero until you
-  use `Ctrl+R`, and with none recorded the ordering is exactly what the other
-  four produce on their own.
-- **Frequency** — how often you ran it: `log1p(n)/log1p(50)`, capped, so the
-  jump from 1 to 5 counts and one repeated command cannot own every result
-- **Recency** — exponential decay, 7-day half-life
-- **Prefix** — the command *starts with* your query, not merely contains it
-- **Context** — 1.0 same repo, 0.5 sibling directory, 0.0 otherwise
+| Signal | Meaning |
+|---|---|
+| **Picks** | How often you chose the command in `Ctrl+R`, halving every 21 days |
+| **Frequency** | How often you ran it: `log1p(n) / log1p(50)`, capped at 1 |
+| **Recency** | Exponential decay with a 7-day half-life |
+| **Prefix** | 1 when the command *starts with* your query |
+| **Context** | 1 in the current repo, 0.5 in a sibling checkout, 0 otherwise |
 
-Every feature is normalised to [0, 1] and the weights sum to 1, so a score
-reads as a fraction. If nothing matches literally, the
-[concept map](#search) expands the query — and only then.
-
-**AI features** use [Apple Foundation Models](https://developer.apple.com/machine-learning/api/) running entirely on your Mac's neural engine. No API keys, no cloud, no data leaves the machine. If Apple Intelligence isn't available, everything still works — you just don't get pattern extraction or credential detection.
+Every signal is normalized to [0, 1] and the weights sum to 1, so a score reads as a fraction. The weights, and the measurement behind them, are in [ADR-009](docs/decisions/009-ranking-learns-from-selections.md).
 
 ---
 
 ## Storage
 
-All your data lives in `~/.mem/` as human-readable plain text, and these
-files are the only source of truth. Any index mem keeps for speed sits
-beside them, is rebuilt from them, and is safe to delete:
+Everything lives in `~/.mem/` as plain text:
 
 ```
 ~/.mem/
   repos/
-    myapp-3f9a1c07.jsonl     # commands captured in this git repo
-    _global.jsonl            # commands outside any repo
-  sessions/
-    2026-03-07.jsonl         # work sessions by date
+    Users-you-code-myapp-3f9a1c07.jsonl   # commands captured in one git repo
+    _global.jsonl                         # commands run outside any repo
   patterns/
-    kubectl.json             # AI-extracted command patterns
-    docker.json
+    kubectl.json                          # extracted command patterns
   groups/
     repos/
-      myapp.json             # repo-scoped groups and saved commands
-    _global.json             # global groups and saved commands
-  concepts.json              # your concept map, layered over the shipped one
-  vars.json                  # which variables exist (values are in the Keychain)
-  agent.json                 # AI agent access flag (off unless you enabled it)
-  agent-audit.jsonl          # append-only record of every agent request
+      Users-you-code-myapp.json           # repo-scoped groups and saved commands
+    _global.json                          # global groups and saved commands
+  picks.json                              # what you chose in Ctrl+R
+  vars.json                               # which variables exist (values are in the Keychain)
 ```
 
-The suffix on a repo file is the first 8 hex characters of the sha256 of the
-repo's absolute path. It exists because the readable slug alone is ambiguous —
-`/work/a-b/c` and `/work/a/b/c` both slugify to `work-a-b-c` — and two unrelated
-repos sharing one history file merged their commands and leaked them into each
-other. History written by an older version is migrated to the new name
-automatically the first time mem touches that repo.
-
-Inspect anything:
+The suffix on a history file is the first 8 hex characters of the SHA-256 of the repo's path, so two repos whose paths slugify the same never share a history.
 
 ```bash
-cat ~/.mem/repos/myapp-*.jsonl
-tail -f ~/.mem/repos/myapp-*.jsonl  # watch commands arrive in real-time
-grep "docker" ~/.mem/repos/*.jsonl  # search across repos
+tail -f ~/.mem/repos/_global.jsonl     # watch commands arrive in real time
+grep docker ~/.mem/repos/*.jsonl        # search across every repo
 ```
 
-Data rotation happens automatically in the background:
-
-| Data | Retention |
-|------|-----------|
-| Commands | 90 days |
-| Sessions | 30 days |
-| Patterns | Forever |
+Captured commands are kept for 90 days; patterns are kept forever.
 
 ---
 
 ## Privacy
 
-- Zero network requests — not even update checks
-- Zero telemetry — no analytics, no crash reports
-- Zero cloud dependencies — fully offline, always
-- On-device AI only — runs on your Mac's neural engine
-- Plain text storage — no proprietary formats, you own your data. The one
-  deliberate exception is variable *values*, which live in the macOS
-  Keychain: "readable with `cat`" is the wrong property for a password
-  ([ADR-010](docs/decisions/010-keychain-for-variable-values.md))
-- Agent access off by default — opt-in, redacted and audited ([MCP](#ai-agents-mcp))
+- **Zero network requests** — not even update checks. The test suite runs mem with sockets disabled to keep it that way.
+- **Zero telemetry** — no analytics, no crash reports.
+- **On-device AI only** — Apple Foundation Models, on your Mac.
+- **Plain-text storage** — your data is yours to read, grep and delete. The one exception is variable *values*, which belong in the Keychain rather than in a file.
 
 Read more in [PHILOSOPHY.md](PHILOSOPHY.md).
 
@@ -720,22 +302,23 @@ Read more in [PHILOSOPHY.md](PHILOSOPHY.md).
 |-------------|---------|
 | macOS | 26.0+ |
 | Python | 3.10+ |
-| Apple Intelligence | Optional (for patterns + credential detection) |
+| Apple Intelligence | Optional, for pattern extraction |
 
 ---
 
 ## Uninstall
 
 ```bash
+mem vars clear              # remove stored variables from the Keychain
 brew uninstall mem          # or: pip uninstall cli-mem
 rm -rf ~/.mem               # remove all captured data
 ```
 
-Remove the shell hook line from your shell config (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish`).
+Then remove the hook line from your shell config.
 
 ---
 
-## Contributing
+## Development
 
 ```bash
 git clone https://github.com/matinsaurralde/mem.git
@@ -744,7 +327,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Read [PHILOSOPHY.md](PHILOSOPHY.md) first.
+CI runs the suite on macOS against Python 3.10–3.13; the end-to-end tests drive the real binary inside real interactive shells. Design decisions and the measurements behind them are recorded as [ADRs](docs/decisions/). [ARCHITECTURE.md](ARCHITECTURE.md) maps the code, and [PHILOSOPHY.md](PHILOSOPHY.md) explains the principles it follows.
 
 ## License
 

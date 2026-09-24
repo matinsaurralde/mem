@@ -21,7 +21,7 @@ from typing import Any
 
 import click
 
-from mem import storage
+from mem import ranking, storage
 from mem.capture import get_git_repo
 from mem.models import Group, GroupCommand, GroupFile, SavedCommand, VarDeclaration
 from mem.variables import (
@@ -139,25 +139,23 @@ def get_last_captured_command(repo: str | None) -> str:
     """
     path = storage.repo_file(storage.resolve_repo_key(repo))
 
-    if not path.exists():
+    found, last = False, None
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            for _line, data in storage.iter_jsonl_objects(f):
+                raw = data.get("command") if isinstance(data, dict) else None
+                command = ranking.canonical(raw) if isinstance(raw, str) else None
+                if isinstance(raw, str) and command is None:
+                    continue  # mem's own invocation, recorded by an older version
+                found, last = True, command
+
+    if not found:
         raise click.ClickException(
             "No captured history found. Run some commands first."
         )
-
-    last: tuple[str, dict | None] | None = None
-    with path.open("r", encoding="utf-8") as f:
-        for last in storage.iter_jsonl_objects(f):
-            pass
-
     if last is None:
-        raise click.ClickException(
-            "No captured history found. Run some commands first."
-        )
-
-    _line, data = last
-    if data is None or "command" not in data:
         raise click.ClickException("Could not read last command from history.")
-    return data["command"]
+    return last
 
 
 def list_all(repo_path: Path | None, global_path: Path) -> dict:

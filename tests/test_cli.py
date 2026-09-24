@@ -42,6 +42,11 @@ MARKUP_CMD = "echo [red]payload[/red] mundo"
 CLOSE_TAG_CMD = "echo payload [/] done"
 """A stray ``[/]`` has nothing to close — Rich raises ``MarkupError``."""
 
+CONTROL_CMD = "echo payload\x1b]0;pwned\x07\x1b[2J"
+"""An OSC window-title change and a clear-screen, obeyed by any terminal."""
+
+CONTROL_CMD_SHOWN = "echo payload?]0;pwned??[2J"
+
 CONCEAL_CMD = "echo [conceal]payload[/conceal]"
 """``conceal`` renders the text invisible in a real terminal."""
 
@@ -179,6 +184,38 @@ class TestMarkupIsShownVerbatim:
         assert result.exception is None
         assert result.exit_code == 0
         assert CLOSE_TAG_CMD in result.stdout
+
+    @pytest.mark.parametrize(
+        ("args", "stdin"),
+        [(args, stdin) for _id, args, stdin in RENDERING_SURFACES],
+        ids=SURFACE_IDS,
+    )
+    def test_control_characters_are_shown_not_obeyed(
+        self,
+        tmp_mem_dir,
+        runner: CliRunner,
+        outside_repo: None,
+        args: list[str],
+        stdin: str,
+    ) -> None:
+        """Listing a command must not let it retitle the window or clear the screen."""
+        _seed_every_surface(CONTROL_CMD)
+
+        result = runner.invoke(cli, args, input=stdin)
+
+        assert result.exit_code == 0
+        assert CONTROL_CMD_SHOWN in result.stdout
+        assert "\x1b" not in result.output
+
+    def test_session_replay_prompt_shows_the_command_neutralised(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        _seed_every_surface(CONTROL_CMD)
+
+        result = runner.invoke(cli, ["session", "demo"], input="1\nn\n")
+
+        assert f"Run: {CONTROL_CMD_SHOWN}?" in result.stderr
+        assert "\x1b" not in result.stderr
 
     def test_conceal_tag_cannot_hide_the_payload(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
@@ -1038,3 +1075,66 @@ class TestClipboard:
             ),
         ):
             assert _copy_to_clipboard("x") is False
+
+
+class TestSearchShowsTheRepo:
+    """The location column names the repo, as the README's example shows.
+
+    It printed the first eleven characters of the absolute path, so every repo
+    under a home directory rendered as ``/Users/mati…`` and the column could
+    not tell two repos apart.
+    """
+
+    def test_the_repo_is_shown_by_name(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        for i, repo in enumerate(
+            ["/Users/someone/code/infra", "/Users/someone/code/backend"]
+        ):
+            storage.append_command(
+                make_command(command=f"kubectl get pods -n ns{i}", repo=repo, dir=repo)
+            )
+
+        result = runner.invoke(cli, ["kubectl"])
+
+        assert result.exit_code == 0
+        assert "infra" in result.stdout
+        assert "backend" in result.stdout
+        assert "/Users" not in result.stdout
+
+
+class TestBackgroundSync:
+    def test_rotation_runs_even_when_pattern_extraction_fails(
+        self, tmp_mem_dir, runner: CliRunner
+    ) -> None:
+        """Retention shared a ``try`` with extraction, so any extraction error
+        silently stopped the 90-day rotation for good."""
+        with (
+            patch("mem.patterns.sync_all_patterns", side_effect=OSError("read-only")),
+            patch.object(storage, "rotate") as rotate,
+        ):
+            result = runner.invoke(cli, ["_sync"])
+
+        assert result.exit_code == 0
+        assert rotate.call_count == 1
+
+
+class TestForgetRefusesAnEmptyQuery:
+    """An empty query is a substring of everything, so it deleted the store.
+
+    The confirmation counted only history lines, never saying that every saved
+    command, runbook, variable and pattern would go too.
+    """
+
+    @pytest.mark.parametrize("query", ["", "   "])
+    def test_nothing_is_deleted(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None, query: str
+    ) -> None:
+        _seed_every_surface("git status")
+
+        result = runner.invoke(cli, ["forget", query, "--yes"])
+
+        assert result.exit_code == 2
+        assert "empty query" in result.stderr
+        assert [c.command for c in storage.read_all_commands()] == ["git status"]
+        assert storage.read_group_file(storage.GROUPS_GLOBAL_FILE).saved

@@ -1158,3 +1158,14 @@ class TestBulkAppend:
         storage.append_commands([make_command(command="later", repo=None)])
 
         assert stored_commands() == ["earlier", "later"]
+
+
+class TestMemIsNotItsOwnHistory:
+    """A shell's history file holds every ``mem …`` the user ever typed."""
+
+    def test_invocations_of_mem_are_not_imported(self, home: Path) -> None:
+        path = zsh_history(home, "mem docker\nls -la\nmem forget sk-test123\n")
+
+        plan = history.build_plan([("zsh", path)])
+
+        assert [cmd.command for cmd in plan.files[0].commands] == ["ls -la"]

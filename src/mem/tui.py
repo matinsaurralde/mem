@@ -38,6 +38,7 @@ import unicodedata
 from typing import IO, Iterator, NamedTuple, Sequence
 
 from mem import picks, ranking
+from mem._text import printable
 
 # --- Terminal control --------------------------------------------------------
 
@@ -164,7 +165,10 @@ def parse_entry(line: str) -> Entry | None:
         # reachable in a hand-edited file, which is exactly why it is checked.
         return None
     command = record.get("command")
-    if not isinstance(command, str) or not command:
+    if not isinstance(command, str):
+        return None
+    command = ranking.canonical(command)
+    if command is None:
         return None
     ts = record.get("ts")
     if not isinstance(ts, (int, float)):
@@ -377,15 +381,8 @@ def display_width(text: str) -> int:
 
 
 def _visible(text: str, width: int) -> str:
-    """Fit text into *width* columns, stripping anything the terminal obeys.
-
-    Control characters are replaced rather than escaped: a command containing
-    a stray escape sequence would otherwise repaint the screen, set a colour
-    that bleeds into every row after it, or rewrite the window title, purely
-    by being *listed*. History is untrusted input — it is whatever somebody
-    pasted into a shell.
-    """
-    cleaned = "".join(ch if ch.isprintable() or ch == " " else "?" for ch in text)
+    """Fit text into *width* columns, after :func:`mem._text.printable`."""
+    cleaned = printable(text)
     if display_width(cleaned) <= width:
         return cleaned
     if width <= 1:
@@ -463,7 +460,7 @@ def _render_row(result: Result, is_selected: bool, columns: int, now: float) -> 
     """
     entry = result.entry
     age = relative_time(entry.ts, now)
-    repo = os.path.basename(entry.repo) if entry.repo else ""
+    repo = ranking.repo_name(entry.repo) if entry.repo else ""
 
     # 22 columns for the metadata, or a third of the row when that is less:
     # chosen by eye, not measured.
