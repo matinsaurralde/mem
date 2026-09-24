@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple, Sequence
 
-from mem import _fsutil, keychain
+from mem import _fsutil, keychain, ranking
 from mem._fsutil import FILE_MODE, atomic_write
 from mem._fsutil import fsync_dir as _fsync_dir
 from mem._fsutil import harden_dir as _harden_dir
@@ -537,6 +537,10 @@ def read_commands(
     :func:`prefilter_needles`; a line missing any of them is skipped without
     being parsed. Callers that want every command leave it unset.
 
+    Every reader goes through here, so :func:`mem.ranking.canonical` is
+    applied on read as well as on capture: stores written before it existed
+    hold mem's own invocations and untrimmed commands.
+
     ``line_filter`` is the same optimisation for a caller whose test is not
     "every needle present" — query expansion needs "*any* of these forty",
     which no list of needles can express here, because ``needles`` are ANDed.
@@ -560,7 +564,7 @@ def read_commands(
                 if not all(needle in lowered for needle in needles):
                     continue
             try:
-                yield CapturedCommand.from_jsonl(line)
+                cmd = CapturedCommand.from_jsonl(line)
             # Pydantic's ValidationError subclasses ValueError, so this covers
             # both a line that is not JSON and one that is JSON of the wrong
             # shape — and nothing else, which is the point.
@@ -569,6 +573,13 @@ def read_commands(
                     f"warning: skipping corrupted line {line_num} in {path.name}",
                     file=sys.stderr,
                 )
+                continue
+            command = ranking.canonical(cmd.command)
+            if command is None:
+                continue
+            if command != cmd.command:
+                cmd = cmd.model_copy(update={"command": command})
+            yield cmd
 
 
 def read_all_commands() -> Iterator[CapturedCommand]:

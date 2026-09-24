@@ -164,7 +164,10 @@ def parse_entry(line: str) -> Entry | None:
         # reachable in a hand-edited file, which is exactly why it is checked.
         return None
     command = record.get("command")
-    if not isinstance(command, str) or not command:
+    if not isinstance(command, str):
+        return None
+    command = ranking.canonical(command)
+    if command is None:
         return None
     ts = record.get("ts")
     if not isinstance(ts, (int, float)):

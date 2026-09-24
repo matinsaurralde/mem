@@ -1086,3 +1086,26 @@ class TestEntryPointDispatch:
 
         assert exit_info.value.code == 0
         assert capsys.readouterr().out.startswith("mem, version ")
+
+
+class TestMemIsNotItsOwnHistory:
+    """The finder applies the same two rules as ``mem <query>``."""
+
+    def test_an_invocation_of_mem_is_not_a_candidate(self):
+        assert tui.parse_entry(line_of("mem kubectl")) is None
+
+    def test_whitespace_variants_are_one_row(self):
+        now = time.time()
+        lines = [line_of("ls", ts=int(now)), line_of("ls ", ts=int(now))]
+
+        results = tui.rank(lines, "ls", None, now)
+
+        assert [(r.entry.command, r.frequency) for r in results] == [("ls", 2)]
+
+    def test_the_empty_query_lists_no_invocation_of_mem(self):
+        now = int(time.time())
+        lines = [line_of("git status", ts=now - 1), line_of("mem git", ts=now)]
+
+        results = tui.rank(lines, "", None, float(now))
+
+        assert [r.entry.command for r in results] == ["git status"]

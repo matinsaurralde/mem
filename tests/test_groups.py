@@ -2452,3 +2452,15 @@ class TestInitShellHooks:
         for shell in ("zsh", "bash", "fish"):
             assert shell in result.output
         assert "_mem_preexec" not in result.output
+
+
+class TestSaveLastCommandSkipsMem:
+    """``mem save '!'`` means the last command you ran, not a mem invocation."""
+
+    def test_an_earlier_invocation_of_mem_is_skipped(self, tmp_mem_dir):
+        from conftest import make_command
+
+        for command in ["docker ps", "mem ls"]:
+            storage.append_command(make_command(command=command, repo=None))
+
+        assert groups.get_last_captured_command(None) == "docker ps"

@@ -553,3 +553,84 @@ class TestSearchSessions:
     def test_no_match_returns_empty(self, tmp_mem_dir):
         storage.append_session(self._session("s1", 1700000000, "work", ["ls"]))
         assert search.search_sessions("kubernetes") == []
+
+
+class TestMemIsNotItsOwnHistory:
+    """mem's own invocations are not history, and whitespace is not a difference.
+
+    Found by following the README in a real hooked shell. The hook recorded
+    every ``mem …`` line, so asking a question a second time matched the
+    recorded question on every word: the literal pass answered with it, the
+    concept map never ran, and "what's listening on a port" was answered with
+    the question itself. A store written by 0.5.1 already holds those rows, so
+    they are skipped when read as well as no longer written.
+    """
+
+    QUESTION = "how do I see what's listening on a port"
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("mem", None),
+            ("mem docker", None),
+            ('mem "how do I see it"', None),
+            ("/opt/homebrew/bin/mem ls", None),
+            ("MEM_DEBUG=1 mem stats", None),
+            ("  mem ls", None),
+            ("   ", None),
+            ("ls ", "ls"),
+            ("memo list", "memo list"),
+            ("echo mem", "echo mem"),
+            ("git commit -m 'mem fix'", "git commit -m 'mem fix'"),
+            ("vim ~/.mem/concepts.json", "vim ~/.mem/concepts.json"),
+            ("FOO=1", "FOO=1"),
+        ],
+    )
+    def test_what_counts_as_history(self, command, expected):
+        assert search.ranking.canonical(command) == expected
+
+    def test_asking_twice_still_reaches_the_concept_map(self, tmp_mem_dir):
+        """The user's transcript, as the 0.5.1 hook stored it."""
+        now = int(time.time())
+        for offset, command, exit_code in [
+            (30, f'mem "{self.QUESTION}"', 0),
+            (20, "lsof -i :8080", 1),
+            (10, f'mem "{self.QUESTION}"', 0),
+        ]:
+            storage.append_command(
+                make_command(
+                    command=command,
+                    ts=now - offset,
+                    repo=None,
+                    dir="/Users/test",
+                    exit_code=exit_code,
+                )
+            )
+
+        results = search.search(self.QUESTION)
+
+        assert [cmd.command for cmd, _ in results] == ["lsof -i :8080"]
+
+    def test_a_search_never_returns_an_earlier_search(self, tmp_mem_dir):
+        for command in ["mem docker compose", "docker compose up -d"]:
+            storage.append_command(make_command(command=command, repo=None))
+
+        results = search.search("docker compose")
+
+        assert [cmd.command for cmd, _ in results] == ["docker compose up -d"]
+
+    def test_whitespace_variants_are_one_result_with_their_runs_summed(
+        self, tmp_mem_dir, frozen_clock
+    ):
+        """`ls` and `ls ` were two rows, each with half the frequency."""
+        for command in ["ls", "ls ", "ls"]:
+            storage.append_command(
+                make_command(command=command, ts=frozen_clock, repo=None)
+            )
+
+        results = search.search("ls")
+
+        assert [cmd.command for cmd, _ in results] == ["ls"]
+        assert results[0][1] == pytest.approx(
+            expected_score(frequency=3, recency=1.0, prefix=1.0, context=0.0)
+        )

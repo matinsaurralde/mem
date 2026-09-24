@@ -35,7 +35,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mem import storage
+from mem import ranking, storage
 from mem.models import CapturedCommand
 from mem.variables import looks_like_credential
 
@@ -543,6 +543,10 @@ def build_plan(sources: list[tuple[str, Path]]) -> ImportPlan:
         resolve_timestamps(parsed.entries, path)
 
         for entry in parsed.entries:
+            command = ranking.canonical(entry.command)
+            if command is None:
+                continue
+            entry.command = command
             if looks_like_credential(entry.command):
                 file_plan.credentials += 1
                 continue

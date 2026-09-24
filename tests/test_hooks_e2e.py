@@ -1141,6 +1141,47 @@ class TestHookPerformance:
 # --- Isolation guard ---------------------------------------------------------
 
 
+class TestMemDoesNotRecordItself:
+    """The user's own transcript, replayed in a real hooked shell.
+
+    Ask a question, run the command that answers it, ask again. Under 0.5.1 the
+    second answer was the first question: the hook had recorded it, it matched
+    every word literally, and the concept map never got a turn.
+    """
+
+    @pytest.mark.parametrize(
+        "shell",
+        [
+            pytest.param("zsh", marks=requires_zsh),
+            pytest.param("bash", marks=requires_bash),
+        ],
+    )
+    def test_asking_twice_still_answers_the_question(
+        self,
+        shell: str,
+        hook_files: dict[str, Path],
+        shell_home: Path,
+        shell_cwd: Path,
+    ) -> None:
+        _run_shell(
+            shell,
+            ['mem "check disk space"', "du -sh ."],
+            shell_home,
+            shell_cwd,
+            hook_files,
+        )
+        _wait_for_command(shell_home, "du -sh .")
+        _wait_for_quiescence(shell_home)
+
+        second = _run_shell(
+            shell, ['mem "check disk space"'], shell_home, shell_cwd, hook_files
+        )
+
+        assert "du -sh ." in second.stdout
+        records = _wait_for_quiescence(shell_home)
+        assert [c for c in _commands(records) if c.startswith("mem")] == []
+
+
 @requires_zsh
 def test_harness_writes_only_inside_the_temporary_home(
     hook_files: dict[str, Path], shell_home: Path, shell_cwd: Path

@@ -656,3 +656,45 @@ class TestAutoSyncTrigger:
         assert kwargs["stdout"] is subprocess.DEVNULL
         assert kwargs["stderr"] is subprocess.DEVNULL
         assert kwargs["start_new_session"] is True
+
+
+class TestMemDoesNotRecordItself:
+    """The hook hands every line to ``mem _capture``, including mem's own.
+
+    Recording them made every repeated search answer itself, and it re-wrote
+    secrets straight back into history: ``mem forget "API_KEY=sk-…"`` deleted
+    the key, and the hook then captured the line that deleted it.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "secret"),
+        [
+            ('mem forget "API_KEY=sk-test123"', "sk-test123"),
+            ("mem vars set TOKEN hunter2-value", "hunter2-value"),
+            ("mem run api API_TOKEN=abc123-value", "abc123-value"),
+            ('mem "check disk space"', "check disk space"),
+        ],
+    )
+    def test_an_invocation_of_mem_is_written_nowhere(self, tmp_mem_dir, raw, secret):
+        with (
+            patch("mem.capture.get_git_repo", return_value=None),
+            patch("mem.capture._spawn_background_sync"),
+        ):
+            capture_command(raw, "/tmp", 0, 5)
+
+        leaked = [
+            path
+            for path in storage.MEM_DIR.rglob("*")
+            if path.is_file() and secret in path.read_text(errors="replace")
+        ]
+        assert leaked == []
+        assert storage.read_sync_counter() == 0
+
+    def test_surrounding_whitespace_is_not_part_of_the_command(self, tmp_mem_dir):
+        with (
+            patch("mem.capture.get_git_repo", return_value=None),
+            patch("mem.capture._spawn_background_sync"),
+        ):
+            capture_command("ls ", "/tmp", 0, 5)
+
+        assert [c.command for c in storage.read_all_commands()] == ["ls"]
