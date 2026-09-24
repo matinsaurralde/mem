@@ -466,7 +466,7 @@ def _render_row(result: Result, is_selected: bool, columns: int, now: float) -> 
     """
     entry = result.entry
     age = relative_time(entry.ts, now)
-    repo = os.path.basename(entry.repo) if entry.repo else ""
+    repo = ranking.repo_name(entry.repo) if entry.repo else ""
 
     # 22 columns for the metadata, or a third of the row when that is less:
     # chosen by eye, not measured.

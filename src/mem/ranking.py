@@ -165,6 +165,13 @@ def canonical(command: str) -> str | None:
     return command
 
 
+def repo_name(repo: str | None) -> str:
+    """How listings show a repo: its directory name, or ``global``."""
+    if not repo:
+        return "global"
+    return os.path.basename(repo.rstrip("/")) or repo
+
+
 def _runs_mem(command: str) -> bool:
     """True when the first word, after any NAME=value prefixes, is mem."""
     for word in command.split():

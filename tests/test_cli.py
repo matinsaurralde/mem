@@ -1038,3 +1038,29 @@ class TestClipboard:
             ),
         ):
             assert _copy_to_clipboard("x") is False
+
+
+class TestSearchShowsTheRepo:
+    """The location column names the repo, as the README's example shows.
+
+    It printed the first eleven characters of the absolute path, so every repo
+    under a home directory rendered as ``/Users/mati…`` and the column could
+    not tell two repos apart.
+    """
+
+    def test_the_repo_is_shown_by_name(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        for i, repo in enumerate(
+            ["/Users/someone/code/infra", "/Users/someone/code/backend"]
+        ):
+            storage.append_command(
+                make_command(command=f"kubectl get pods -n ns{i}", repo=repo, dir=repo)
+            )
+
+        result = runner.invoke(cli, ["kubectl"])
+
+        assert result.exit_code == 0
+        assert "infra" in result.stdout
+        assert "backend" in result.stdout
+        assert "/Users" not in result.stdout

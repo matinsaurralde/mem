@@ -19,7 +19,7 @@ import click
 from rich.panel import Panel
 from rich.text import Text
 
-from mem import __version__
+from mem import __version__, ranking
 from mem import concepts as mem_concepts
 from mem.capture import get_git_repo
 from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
@@ -188,7 +188,7 @@ def cli(ctx: click.Context, pattern: bool, as_json: bool, limit: int) -> None:
         # 16 the other tables use — were chosen by eye for an 80-column
         # terminal, not measured.
         command_text = fit(cmd.command, 40)
-        repo_text = fit(cmd.repo or "global", 12)
+        repo_text = fit(ranking.repo_name(cmd.repo), 12)
         time_text = _relative_time(cmd.ts)
         console.print(
             f"{rank}  {safe(command_text)}  [dim cyan]{safe(repo_text)}[/]"
@@ -364,7 +364,7 @@ def session(query: str, as_json: bool) -> None:
     for i, s in enumerate(results, 1):
         dt = datetime.fromtimestamp(s.started_at, tz=timezone.utc)
         header = safe(
-            f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {s.repo or 'global'}"
+            f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {ranking.repo_name(s.repo)}"
         )
 
         lines = []
@@ -439,7 +439,7 @@ def stats(as_json: bool) -> None:
     if repo_freq:
         console.print("Top repos:")
         for i, (repo, count) in enumerate(repo_freq, 1):
-            console.print(f"  {i:>2}  {safe(fit(repo, 20))} {count}")
+            console.print(f"  {i:>2}  {safe(fit(ranking.repo_name(repo), 20))} {count}")
 
 
 def _fix_line(label: str, style: str, value: str) -> Text:
@@ -760,7 +760,7 @@ def forget(query: str, yes: bool) -> None:
         # 20 rows of preview before the confirmation: chosen by eye, not
         # measured. Column widths: see the search listing.
         for i, cmd in enumerate(matches[:20], 1):
-            repo_text = cmd.repo or "global"
+            repo_text = ranking.repo_name(cmd.repo)
             time_text = _relative_time(cmd.ts)
             console.print(
                 f"  {i:>2}  {safe(fit(cmd.command, 40))}  [dim cyan]{safe(repo_text)}[/]"
