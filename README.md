@@ -91,12 +91,6 @@ mem deploy --json        # machine-readable output
   3  kubectl rollout status deploy/api   api         3d ago
 ```
 
-When nothing matches literally, mem reads the words through a concept map, so a question finds the command that answers it:
-
-```bash
-mem "check disk space"   # -> du -sh .
-```
-
 When nothing matches at all, stdout stays empty, one line on stderr says so, and the exit code is still `0`.
 
 ### Ctrl+R
