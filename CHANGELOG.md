@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-09-24
+
+### Fixed
+
+- **mem recorded its own invocations.** Asking the same question twice
+  returned the first asking instead of the command that answers it, and
+  `mem forget X` wrote `X` back to history as it deleted it. Invocations of
+  mem are no longer captured, imported or listed, including the ones earlier
+  versions already stored.
+- **`ls` and `ls ` were two commands.** Surrounding whitespace is no longer
+  part of a command, so its runs are counted together.
+- **The repo column showed a cut path.** Every repo under a home directory
+  read `/Users/…`; listings now show the repo's name.
+- **A tool run by path wrote its patterns outside `~/.mem`.** Patterns are
+  filed under the program's name, one tool's failure no longer stops the
+  others, and data rotation no longer depends on pattern extraction.
+- **Listing a command could control the terminal.** Escape sequences in
+  stored commands are shown as `?` instead of being obeyed.
+- **`mem forget ""` deleted everything.** An empty query is a usage error.
+
+### Changed
+
+- The README covers the basics — install, search, Ctrl+R, patterns, scoping,
+  groups and variables — and the bash hook now goes in `~/.bash_profile`,
+  the file macOS terminals read.
+
 ## [0.5.1] — 2026-09-21
 
 The first release of the 0.5 line to reach a user. The 0.5.0 entry below was
