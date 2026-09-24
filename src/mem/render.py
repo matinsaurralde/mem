@@ -25,6 +25,8 @@ from rich.console import Console
 from rich.markup import escape
 from rich.text import Text
 
+from mem._text import printable
+
 # highlight=False so Rich does not colourize things that look like numbers,
 # paths or URLs inside a command. A command is text, not a value to prettify.
 console = Console(highlight=False)
@@ -36,9 +38,10 @@ def safe(value: object) -> str:
 
     Use for anything interpolated into a string that Rich will parse for
     markup. ``escape`` backslash-escapes bracket sequences that would
-    otherwise be read as tags, so the text survives byte-for-byte.
+    otherwise be read as tags; :func:`printable` neutralises the characters a
+    terminal would obey instead of display.
     """
-    return escape(str(value))
+    return escape(printable(str(value)))
 
 
 def plain(value: object) -> Text:
@@ -47,7 +50,7 @@ def plain(value: object) -> Text:
     Preferred over :func:`safe` when the value is printed on its own, since
     it removes the escaping step entirely rather than relying on it.
     """
-    return Text(str(value))
+    return Text(printable(str(value)))
 
 
 def no_matches(query: str) -> None:

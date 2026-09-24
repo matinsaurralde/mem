@@ -24,7 +24,15 @@ from mem import concepts as mem_concepts
 from mem.capture import get_git_repo
 from mem.history import SUPPORTED_SHELLS as IMPORTABLE_SHELLS
 from mem.history import ImportPlan
-from mem.render import console, err_console, fit, no_matches, plain, safe
+from mem.render import (
+    console,
+    err_console,
+    fit,
+    no_matches,
+    plain,
+    printable,
+    safe,
+)
 
 
 def _protected_args(ctx: click.Context) -> list[str]:
@@ -371,12 +379,10 @@ def session(query: str, as_json: bool) -> None:
             f"[{i}] Session: {dt.strftime('%Y-%m-%d %H:%M')}  {ranking.repo_name(s.repo)}"
         )
 
-        lines = []
-        for j, cmd in enumerate(s.commands, 1):
-            lines.append(f"  {j:>2}  {cmd}")
-
         # Text, not a markup string: Panel parses its renderable for tags.
-        panel_content = plain("\n".join(lines))
+        panel_content = Text("\n").join(
+            plain(f"  {j:>2}  {cmd}") for j, cmd in enumerate(s.commands, 1)
+        )
         console.print(Panel(panel_content, title=header, border_style="dim"))
         console.print()
 
@@ -390,7 +396,9 @@ def session(query: str, as_json: bool) -> None:
             if 0 <= idx < len(results):
                 console.print()
                 for cmd in results[idx].commands:
-                    if not click.confirm(f"  Run: {cmd}?", default=True, err=True):
+                    if not click.confirm(
+                        f"  Run: {printable(cmd)}?", default=True, err=True
+                    ):
                         continue
                     console.print(f"  [dim]$ {safe(cmd)}[/]")
                     try:

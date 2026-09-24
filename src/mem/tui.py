@@ -38,6 +38,7 @@ import unicodedata
 from typing import IO, Iterator, NamedTuple, Sequence
 
 from mem import picks, ranking
+from mem._text import printable
 
 # --- Terminal control --------------------------------------------------------
 
@@ -380,15 +381,8 @@ def display_width(text: str) -> int:
 
 
 def _visible(text: str, width: int) -> str:
-    """Fit text into *width* columns, stripping anything the terminal obeys.
-
-    Control characters are replaced rather than escaped: a command containing
-    a stray escape sequence would otherwise repaint the screen, set a colour
-    that bleeds into every row after it, or rewrite the window title, purely
-    by being *listed*. History is untrusted input — it is whatever somebody
-    pasted into a shell.
-    """
-    cleaned = "".join(ch if ch.isprintable() or ch == " " else "?" for ch in text)
+    """Fit text into *width* columns, after :func:`mem._text.printable`."""
+    cleaned = printable(text)
     if display_width(cleaned) <= width:
         return cleaned
     if width <= 1:

@@ -42,6 +42,11 @@ MARKUP_CMD = "echo [red]payload[/red] mundo"
 CLOSE_TAG_CMD = "echo payload [/] done"
 """A stray ``[/]`` has nothing to close — Rich raises ``MarkupError``."""
 
+CONTROL_CMD = "echo payload\x1b]0;pwned\x07\x1b[2J"
+"""An OSC window-title change and a clear-screen, obeyed by any terminal."""
+
+CONTROL_CMD_SHOWN = "echo payload?]0;pwned??[2J"
+
 CONCEAL_CMD = "echo [conceal]payload[/conceal]"
 """``conceal`` renders the text invisible in a real terminal."""
 
@@ -179,6 +184,38 @@ class TestMarkupIsShownVerbatim:
         assert result.exception is None
         assert result.exit_code == 0
         assert CLOSE_TAG_CMD in result.stdout
+
+    @pytest.mark.parametrize(
+        ("args", "stdin"),
+        [(args, stdin) for _id, args, stdin in RENDERING_SURFACES],
+        ids=SURFACE_IDS,
+    )
+    def test_control_characters_are_shown_not_obeyed(
+        self,
+        tmp_mem_dir,
+        runner: CliRunner,
+        outside_repo: None,
+        args: list[str],
+        stdin: str,
+    ) -> None:
+        """Listing a command must not let it retitle the window or clear the screen."""
+        _seed_every_surface(CONTROL_CMD)
+
+        result = runner.invoke(cli, args, input=stdin)
+
+        assert result.exit_code == 0
+        assert CONTROL_CMD_SHOWN in result.stdout
+        assert "\x1b" not in result.output
+
+    def test_session_replay_prompt_shows_the_command_neutralised(
+        self, tmp_mem_dir, runner: CliRunner, outside_repo: None
+    ) -> None:
+        _seed_every_surface(CONTROL_CMD)
+
+        result = runner.invoke(cli, ["session", "demo"], input="1\nn\n")
+
+        assert f"Run: {CONTROL_CMD_SHOWN}?" in result.stderr
+        assert "\x1b" not in result.stderr
 
     def test_conceal_tag_cannot_hide_the_payload(
         self, tmp_mem_dir, runner: CliRunner, outside_repo: None
